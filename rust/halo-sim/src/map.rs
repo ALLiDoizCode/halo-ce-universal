@@ -78,7 +78,9 @@ impl MapData {
         let (start_bytes, collision) =
             count.checked_mul(Start::BYTES).and_then(|n| rest.split_at_checked(n)).ok_or_else(short)?;
         let starts = start_bytes
-            .chunks_exact(Start::BYTES)
+            .as_chunks::<{ Start::BYTES }>()
+            .0
+            .iter()
             .map(|b| {
                 let f = |i: usize| f32::from_le_bytes(b[4 * i..4 * i + 4].try_into().unwrap());
                 let h = |i: usize| i16::from_le_bytes(b[16 + 2 * i..18 + 2 * i].try_into().unwrap());
@@ -103,8 +105,12 @@ impl MapData {
 
 impl From<HaloMap> for MapData {
     fn from(map: HaloMap) -> MapData {
-        let mut data =
-            MapData { collision: map.collision, world_bounds: map.world_bounds, movement: map.movement, starts: Vec::new() };
+        let mut data = MapData {
+            collision: map.collision,
+            world_bounds: map.world_bounds,
+            movement: map.movement,
+            starts: Vec::new(),
+        };
         let starts: Vec<Start> = map
             .player_starts
             .iter()

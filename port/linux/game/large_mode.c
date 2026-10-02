@@ -31,6 +31,19 @@ renderer (see "remote players" below). The game logs what the library holds,
 and where it has drawn each remote player and the local one, once a second,
 for the automated test to compare with what the server sent.
 
+The server owns spawns, deaths and score. The local player's unit is made
+by the engine only while the server says the player is alive (the gate in
+game_engine_should_spawn_player, large_mode_player_spawn), and is put where the
+server spawned the player, facing as it says, whenever the server spawns the
+player; when the server says the player is dead, or waiting for a respawn wave
+because no starting location is free, the unit is killed and the HUD says how
+long until the respawn or the wave (large_mode_state_message). Another
+player the server says is dead is not drawn (the library leaves them out of
+what it holds). The engine's own scoring is off in the mode: the scoreboard
+(game_engine.c, large_mode_scoreboard_*) lists every player of the match from
+the server's standing table, in range or not, and when the game has ended it
+stays up with the winner (the next match follows, as it does a rotation).
+
 The local player: the engine hands the player's unit the controls of the
 tick (the throttle and where the player faces and aims) just before this
 adapter runs. The library computes the movement from them and from the map's
@@ -88,6 +101,7 @@ the library) the mode is not there: large_mode_active() is FALSE.
 #include "game/players.h"
 #include "objects/objects.h"
 #include "scenario/scenario.h"
+#include "text/unicode.h"
 #include "units/unit_control_data.h"
 #include "units/units.h"
 
@@ -122,6 +136,10 @@ unsigned long halo_large_frame(unsigned long *tick);
 unsigned long halo_large_unit(unsigned long index, unsigned long *player, unsigned long *tick, float *out);
 unsigned long halo_large_member(unsigned long player, unsigned long *team, char *name, unsigned long size);
 unsigned long halo_large_local(float *out);
+unsigned long halo_large_life(unsigned long *info, float *position);
+unsigned long halo_large_game(unsigned long *out);
+unsigned long halo_large_scoreboard_freeze(void);
+unsigned long halo_large_scoreboard_row(unsigned long index, unsigned long *out, char *name, unsigned long size);
 unsigned long halo_large_bounds(float *out);
 void halo_large_send_input(float x, float y, float z, float yaw, float pitch);
 unsigned long halo_large_load_map(const char *path);
@@ -140,6 +158,14 @@ unsigned long halo_large_browse_find(const char *id);
 unsigned long halo_large_browse_message(char *buffer, unsigned long size);
 unsigned long halo_large_identity(char *buffer, unsigned long size);
 unsigned long halo_large_refusal(char *buffer, unsigned long size);
+
+/* the local player's life, halo_large_life's first number */
+enum
+{
+	_large_life_alive,
+	_large_life_dead,
+	_large_life_waiting
+};
 
 /* the server list's fields of halo_large_browse_text */
 enum
@@ -225,6 +251,15 @@ static struct
 	boolean local_airborne;
 	float local_state[7];
 	long local_logged_time;
+
+	/* the server's say of the local player's life: the spawn the unit was
+	last put at (halo_large_life's third number), the unit that has been killed
+	because the server says the player is dead, the life last logged, and
+	large.scoreboard (the scoreboard stays up) */
+	unsigned long spawn_seen;
+	long killed_unit;
+	long life_logged;
+	boolean scoreboard_always;
 } large;
 
 static void large_mode_read_settings(
@@ -240,6 +275,7 @@ static void large_mode_read_settings(
 		snprintf(large.gateway, sizeof(large.gateway), "%s", config_string("large.gateway"));
 		snprintf(large.spacetimedb, sizeof(large.spacetimedb), "%s", config_string("large.spacetimedb"));
 		large.log_players = config_boolean("large.log_players") != 0;
+		large.scoreboard_always = config_boolean("large.scoreboard") != 0;
 		if (large.root[0])
 		{
 			large.browser_mode = TRUE;
@@ -253,6 +289,7 @@ static void large_mode_read_settings(
 	snprintf(large.spacetimedb, sizeof(large.spacetimedb), "%s", config_string("large.spacetimedb"));
 	snprintf(large.database, sizeof(large.database), "%s", config_string("large.database"));
 	large.log_players = config_boolean("large.log_players") != 0;
+	large.scoreboard_always = config_boolean("large.scoreboard") != 0;
 	if (!large.database[0])
 	{
 		platform_log("large mode: large.database names the match's database and cannot be missing: the game is "
@@ -322,6 +359,9 @@ void large_mode_new_game(
 	large.local_suspended_unit = NONE;
 	large.local_seen_unit = NONE;
 	large.local_moving = FALSE;
+	large.spawn_seen = 0xFFFFFFFFUL;
+	large.killed_unit = NONE;
+	large.life_logged = NONE;
 	large_mode_forget_remotes();
 	/* (with a server list the session is the player's join's, which started it) */
 	if (large.browser_mode)
@@ -943,47 +983,281 @@ static void large_mode_local_after_objects(void)
 	}
 }
 
+/* ---------- the server's say of the local player's life, and the scoreboard */
+
+/* the team the server says the local player is on, which the engine's player
+and unit have (the engine gave it the red team, and the roster alternates) */
+static void large_mode_set_local_team(
+	long unit_index,
+	struct unit_datum *unit,
+	unsigned long team)
+{
+	long player_index = local_player_get_player_index(0);
+
+	if (player_index != NONE && team < 2 && player_get(player_index)->team_index != (short)team)
+		player_get(player_index)->team_index = (short)team;
+	if (team < 2 && unit->object.owner_team_index != (short)team)
+		unit->object.owner_team_index = (short)team;
+}
+
+/* the library's text, as the engine's wide characters */
+static void large_mode_widen(
+	wchar_t *to,
+	char const *from,
+	long size)
+{
+	long index;
+
+	for (index = 0; index < size - 1 && from[index]; index++)
+		to[index] = (wchar_t)((byte)from[index] < 0x80 ? from[index] : '?');
+	to[index] = 0;
+}
+
+/* a change of the local player's life is logged (the automated tests read it) */
+static void large_mode_log_life(
+	unsigned long const *life)
+{
+	long state = (long)life[0] * 1000 + (long)(life[2] & 0xFF);
+
+	if (large.life_logged == state)
+		return;
+	large.life_logged = state;
+	platform_log("large mode: the server says the local player is %s (spawns %lu, score %ld, deaths %lu, team %lu, "
+		"tick %lu, due %lu)", life[0] == _large_life_alive ? "alive" : life[0] == _large_life_dead ? "dead" : "waiting",
+		life[2], (long)life[3], life[4], life[5], life[6], life[1]);
+}
+
+/* whether the engine need not choose a starting location for the player (find_best_starting_location_index):
+the local player's is the server's to choose, and its unit is put there once the engine has made it */
+boolean large_mode_player_spawn_anywhere(
+	long player_index)
+{
+	return large.started && player_index != NONE && player_index == local_player_get_player_index(0);
+}
+
+/* the gate of the engine's spawning (game_engine_should_spawn_player): the
+local player's unit is the server's to allow, once it says the player is alive;
+returns whether the server decides, and *spawn what it says */
+boolean large_mode_player_spawn(
+	long player_index,
+	boolean *spawn)
+{
+	unsigned long life[8];
+	float position[4];
+
+	if (!large.started || player_index == NONE || player_index != local_player_get_player_index(0))
+		return FALSE;
+	*spawn = halo_large_life(life, position) != 0 && life[0] == _large_life_alive;
+	return TRUE;
+}
+
+/* what the HUD says of a local player who is not in the world (game_engine_get_state_message):
+how long until the respawn, or the wave when no starting location is free */
+boolean large_mode_state_message(
+	long player_index,
+	wchar_t *buffer,
+	long count)
+{
+	unsigned long life[8];
+	float position[4];
+	long seconds;
+
+	if (!large.started || player_index == NONE || player_index != local_player_get_player_index(0) ||
+		!halo_large_life(life, position) || life[0] == _large_life_alive)
+	{
+		return FALSE;
+	}
+	/* (the ticks of the server's clock, which runs 30 a second: the difference is a signed number) */
+	seconds = ((long)(life[1] - life[6]) + TICKS_PER_SECOND - 1) / TICKS_PER_SECOND;
+	seconds = MAX(seconds, 0);
+	if (life[0] == _large_life_waiting)
+	{
+		usnprintf(buffer, count, L"No spawn point is free: respawn wave in %ld seconds", seconds);
+	}
+	else
+	{
+		usnprintf(buffer, count, L"You will respawn in %ld seconds", seconds);
+	}
+	return TRUE;
+}
+
+/* whether the game's scoreboard is the mode's (the engine's players are only the nearest 127) */
+boolean large_mode_scoreboard_active(
+	void)
+{
+	return large.started;
+}
+
+/* whether the game has teams (Team Slayer: the scoreboard has a column for each) */
+boolean large_mode_scoreboard_teams(
+	void)
+{
+	unsigned long game[10];
+
+	return halo_large_game(game) != 0 && game[0] != 0;
+}
+
+/* whether the scoreboard stays up: the game has ended (the winner is on it, until the next match
+follows), or large.scoreboard says so (for the automated tests' pictures) */
+boolean large_mode_scoreboard_forced(
+	void)
+{
+	unsigned long game[10];
+
+	if (!large.started)
+		return FALSE;
+	return large.scoreboard_always || (halo_large_game(game) != 0 && game[7] != 0);
+}
+
+/* every player of the match, best first: how many, and then each by its place in the list */
+long large_mode_scoreboard_freeze(
+	void)
+{
+	return (long)halo_large_scoreboard_freeze();
+}
+
+/* a row: the player, team, score, deaths, life (0 alive, 1 dead, 2 waiting), place, and 1 for the
+local player, in values; the name */
+boolean large_mode_scoreboard_row(
+	long index,
+	long *values,
+	wchar_t *name,
+	long name_size)
+{
+	unsigned long row[7];
+	char text[LARGE_NAME_LENGTH + 1];
+	long item;
+
+	if (!halo_large_scoreboard_row((unsigned long)index, row, text, sizeof(text)))
+		return FALSE;
+	for (item = 0; item < 7; item++)
+		values[item] = (long)row[item];
+	large_mode_widen(name, text, name_size);
+	return TRUE;
+}
+
+/* the scoreboard's title: the game, its limit and what the scores are; when the game has ended, who won */
+void large_mode_scoreboard_title(
+	wchar_t *buffer,
+	long size)
+{
+	unsigned long game[10];
+	unsigned long life[8];
+	float position[4];
+	wchar_t limit[64];
+	wchar_t clock[32];
+
+	if (!halo_large_game(game))
+	{
+		usnprintf(buffer, size, L"Slayer");
+		return;
+	}
+	limit[0] = 0;
+	if (game[1])
+		usnprintf(limit, NUMBEROF(limit), L"   first to %lu", game[1]);
+	clock[0] = 0;
+	if (game[2] && !game[7] && halo_large_life(life, position))
+	{
+		long left = (long)(game[3] + game[2] - life[6]);
+
+		left = MAX(left, 0) / TICKS_PER_SECOND;
+		usnprintf(clock, NUMBEROF(clock), L"   %ld:%02ld left", left / 60, left % 60);
+	}
+	if (game[0])
+	{
+		usnprintf(buffer, size, L"Team Slayer   Red %ld   Blue %ld%s%s", (long)game[5], (long)game[6], limit, clock);
+	}
+	else
+	{
+		usnprintf(buffer, size, L"Slayer%s%s", limit, clock);
+	}
+	if (game[7])
+	{
+		wchar_t winner[64];
+		char name[LARGE_NAME_LENGTH + 1];
+		unsigned long team;
+
+		if (game[8] == 2)
+		{
+			usnprintf(winner, NUMBEROF(winner), L"the %s team wins", game[9] == 0 ? L"red" : L"blue");
+		}
+		else if (game[8] == 1 && halo_large_member(game[9], &team, name, sizeof(name)))
+		{
+			wchar_t wide[LARGE_NAME_LENGTH + 1];
+
+			large_mode_widen(wide, name, NUMBEROF(wide));
+			usnprintf(winner, NUMBEROF(winner), L"%s wins", wide);
+		}
+		else
+		{
+			usnprintf(winner, NUMBEROF(winner), L"nobody wins");
+		}
+		usnprintf(buffer, size, L"Game over: %s   (%s)", winner, game[7] == 1 ? L"score limit" : L"time limit");
+	}
+}
+
 /* called from game_tick, before objects_update */
 void large_mode_game_tick(
 	void)
 {
 	long unit_index;
 	struct unit_datum *unit;
+	unsigned long life[8];
+	float life_position[4];
+	boolean have_life;
 
 	if (!large.started || !game_engine_running())
 		return;
 
 	unit = large_mode_local_unit(&unit_index);
-	if (unit)
+	have_life = halo_large_life(life, life_position) != 0;
+	if (have_life)
+		large_mode_log_life(life);
+	if (have_life && life[0] != _large_life_alive)
 	{
-		/* the server decides where the player starts: put the unit there, once */
-		if (!large.placed)
+		/* dead, or waiting for a wave: the server says. A unit the engine still has is killed
+		(once), and the engine's own respawn is gated (large_mode_player_spawn) */
+		large.local_moving = FALSE;
+		if (unit && large.killed_unit != unit_index)
 		{
-			float own[5];
+			large.killed_unit = unit_index;
+			unit_kill(unit_index);
+			platform_log("large mode: the server says the local player is %s: the unit is killed",
+				life[0] == _large_life_waiting ? "waiting for a wave" : "dead");
+		}
+	}
+	else if (unit && have_life)
+	{
+		large_mode_set_local_team(unit_index, unit, life[5]);
+		/* the server decides where the player spawns: a unit the engine has made (it spawns
+		the player's unit where it chooses, and it is not that) is put where the server
+		spawned the player, facing as it says, and the library starts from there; each time
+		the server spawns the player, and for any new unit */
+		if (large.local_seen_unit != unit_index || large.spawn_seen != life[2])
+		{
+			real_point3d position;
+			real_vector3d forward, up;
 
-			if (halo_large_local(own))
-			{
-				real_point3d position;
-				real_vector3d forward, up;
-
-				position.x = own[0];
-				position.y = own[1];
-				position.z = own[2];
-				forward.i = (real)cos(own[3]);
-				forward.j = (real)sin(own[3]);
-				forward.k = 0.0f;
-				up.i = 0.0f;
-				up.j = 0.0f;
-				up.k = 1.0f;
-				object_set_position(unit_index, &position, &forward, &up);
-				unit->object.translational_velocity.i = 0.0f;
-				unit->object.translational_velocity.j = 0.0f;
-				unit->object.translational_velocity.k = 0.0f;
-				halo_large_place(own[0], own[1], own[2]);
-				large.placed = TRUE;
-				platform_log("large mode: the local unit is where the server has the player: (%.3f %.3f %.3f)",
-					own[0], own[1], own[2]);
-			}
+			position.x = life_position[0];
+			position.y = life_position[1];
+			position.z = life_position[2];
+			forward.i = (real)cos(life_position[3]);
+			forward.j = (real)sin(life_position[3]);
+			forward.k = 0.0f;
+			up.i = 0.0f;
+			up.j = 0.0f;
+			up.k = 1.0f;
+			object_set_position(unit_index, &position, &forward, &up);
+			player_control_set_facing(0, &forward);
+			unit->object.translational_velocity.i = 0.0f;
+			unit->object.translational_velocity.j = 0.0f;
+			unit->object.translational_velocity.k = 0.0f;
+			halo_large_place(life_position[0], life_position[1], life_position[2]);
+			large.local_seen_unit = unit_index;
+			large.spawn_seen = life[2];
+			large.placed = TRUE;
+			platform_log("large mode: the local unit is where the server has the player: (%.3f %.3f %.3f) spawn %lu",
+				life_position[0], life_position[1], life_position[2], life[2]);
 		}
 		else
 		{
@@ -1437,6 +1711,66 @@ boolean large_mode_remote_player(
 	long player_index)
 {
 	return FALSE;
+}
+
+boolean large_mode_player_spawn(
+	long player_index,
+	boolean *spawn)
+{
+	return FALSE;
+}
+
+boolean large_mode_player_spawn_anywhere(
+	long player_index)
+{
+	return FALSE;
+}
+
+boolean large_mode_state_message(
+	long player_index,
+	wchar_t *buffer,
+	long count)
+{
+	return FALSE;
+}
+
+boolean large_mode_scoreboard_active(
+	void)
+{
+	return FALSE;
+}
+
+boolean large_mode_scoreboard_forced(
+	void)
+{
+	return FALSE;
+}
+
+boolean large_mode_scoreboard_teams(
+	void)
+{
+	return FALSE;
+}
+
+long large_mode_scoreboard_freeze(
+	void)
+{
+	return 0;
+}
+
+boolean large_mode_scoreboard_row(
+	long index,
+	long *values,
+	wchar_t *name,
+	long name_size)
+{
+	return FALSE;
+}
+
+void large_mode_scoreboard_title(
+	wchar_t *buffer,
+	long size)
+{
 }
 
 #endif

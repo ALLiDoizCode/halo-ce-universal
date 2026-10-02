@@ -16,6 +16,16 @@
 //! assert_eq!(events, [Event::MoveAccepted { player: 1 }]);
 //! ```
 //!
+//! # The game
+//!
+//! [`rules`] holds the game's rules for Slayer and Team Slayer: who is alive,
+//! where players spawn ([`spawn`], the engine's choice of a starting location,
+//! and waves when none is free), what a death is worth, and when the match
+//! ends. The match module calls [`rules::play`], which applies the tick's
+//! deaths, judges the moves of the players who are alive with [`step`], and
+//! spawns the players who are due. A death is a [`rules::Death`]: the weapons'
+//! hit validation produces them; nothing here deals damage.
+//!
 //! # Determinism
 //!
 //! The library reads no clock, does no I/O and is `no_std`: `core` has no

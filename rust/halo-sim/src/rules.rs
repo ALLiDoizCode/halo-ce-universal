@@ -96,12 +96,7 @@ impl Rules {
     /// The engine's default Team Slayer variant: a team's 50 kills, a 10
     /// second respawn.
     pub fn team_slayer() -> Rules {
-        Rules {
-            teams: true,
-            score_limit: 50,
-            respawn_ticks: 10 * TICKS_PER_SECOND,
-            ..Rules::slayer()
-        }
+        Rules { teams: true, score_limit: 50, respawn_ticks: 10 * TICKS_PER_SECOND, ..Rules::slayer() }
     }
 
     fn wave_ticks(&self) -> u64 {
@@ -114,10 +109,14 @@ impl Rules {
 pub enum Life {
     Alive,
     /// Dead; the respawn timer runs out at this tick.
-    Dead { due: u64 },
+    Dead {
+        due: u64,
+    },
     /// The timer has run out (or the player has just joined) and no starting
     /// location was free: the player spawns in the wave at this tick.
-    Waiting { wave: u64 },
+    Waiting {
+        wave: u64,
+    },
 }
 
 /// One player of the match, as the rules hold them.
@@ -136,6 +135,9 @@ pub struct Contestant {
     /// Where, and facing which way, the player last spawned.
     pub spawn: [f32; 3],
     pub spawn_yaw: f32,
+    /// The tick the player last spawned on (0 for one placed by the caller): a
+    /// state of the player from before it is from where they were.
+    pub spawned_tick: u64,
     /// Ticks added to the respawn timer (a variant's growth).
     pub penalty: u32,
 }
@@ -151,6 +153,7 @@ impl Contestant {
             spawns: 0,
             spawn: [0.0; 3],
             spawn_yaw: 0.0,
+            spawned_tick: 0,
             penalty: 0,
         }
     }
@@ -200,7 +203,7 @@ impl Game {
     /// Whether a wave happens on this tick: every [`Rules::wave_ticks`] after the
     /// clock started (not the tick it starts on).
     pub fn is_wave(&self, tick: u64) -> bool {
-        tick > self.started_tick && (tick - self.started_tick) % self.rules.wave_ticks() == 0
+        tick > self.started_tick && (tick - self.started_tick).is_multiple_of(self.rules.wave_ticks())
     }
 
     /// The tick of the first wave after `tick`.
@@ -274,8 +277,14 @@ pub fn snapshot_game(store: &impl GameStore) -> Vec<u8> {
     let mut out = Vec::new();
     let r = &game.rules;
     out.push(r.teams as u8);
-    for v in [r.score_limit, r.time_limit_ticks, r.respawn_ticks, r.respawn_growth_ticks, r.suicide_penalty_ticks, r.wave_ticks]
-    {
+    for v in [
+        r.score_limit,
+        r.time_limit_ticks,
+        r.respawn_ticks,
+        r.respawn_growth_ticks,
+        r.suicide_penalty_ticks,
+        r.wave_ticks,
+    ] {
         out.extend_from_slice(&v.to_le_bytes());
     }
     out.extend_from_slice(&game.started_tick.to_le_bytes());
@@ -311,6 +320,7 @@ pub fn snapshot_game(store: &impl GameStore) -> Vec<u8> {
         for v in c.spawn.iter().chain([&c.spawn_yaw]) {
             out.extend_from_slice(&v.to_le_bytes());
         }
+        out.extend_from_slice(&c.spawned_tick.to_le_bytes());
         out.extend_from_slice(&c.penalty.to_le_bytes());
     }
     out
@@ -351,13 +361,33 @@ pub enum DeathRefusal {
 /// What the rules did in a tick.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GameEvent {
-    Died { victim: PlayerId, killer: Option<PlayerId>, kind: DeathKind, respawn_at: u64 },
+    Died {
+        victim: PlayerId,
+        killer: Option<PlayerId>,
+        kind: DeathKind,
+        respawn_at: u64,
+    },
     /// A player's score changed (`score` is what it is now).
-    Scored { player: PlayerId, delta: i32, score: i32 },
-    DeathRefused { victim: PlayerId, reason: DeathRefusal },
-    Spawned { player: PlayerId, position: [f32; 3], yaw: f32, wave: bool },
+    Scored {
+        player: PlayerId,
+        delta: i32,
+        score: i32,
+    },
+    DeathRefused {
+        victim: PlayerId,
+        reason: DeathRefusal,
+    },
+    Spawned {
+        player: PlayerId,
+        position: [f32; 3],
+        yaw: f32,
+        wave: bool,
+    },
     /// No starting location was free: the player spawns in the wave at this tick.
-    Waiting { player: PlayerId, wave_at: u64 },
+    Waiting {
+        player: PlayerId,
+        wave_at: u64,
+    },
     Over(Ending),
 }
 
@@ -521,14 +551,10 @@ pub fn spawn_due(
                 c.spawns += 1;
                 c.spawn = spot.position;
                 c.spawn_yaw = spot.yaw;
+                c.spawned_tick = tick;
                 game.set_contestant(c);
                 occupants.push(Occupant { position: spot.position, team: c.team });
-                events.push(GameEvent::Spawned {
-                    player: c.id,
-                    position: spot.position,
-                    yaw: spot.yaw,
-                    wave: in_wave,
-                });
+                events.push(GameEvent::Spawned { player: c.id, position: spot.position, yaw: spot.yaw, wave: in_wave });
             }
             None => {
                 let wave_at = state.next_wave(tick);

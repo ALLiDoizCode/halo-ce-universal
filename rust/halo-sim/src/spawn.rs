@@ -80,7 +80,6 @@ impl Start {
             .iter()
             .any(|t| matches!(*t, game_type::SLAYER | game_type::ALL | game_type::ALL_NON_CTF | game_type::ALL_NORMAL))
     }
-
 }
 
 /// A player in the world, as a rating sees them.
@@ -209,14 +208,7 @@ pub struct Spot {
 /// starts that the game allows, each rating scaled by the square root of a
 /// random number. `None` when none is free. With `overflow`, if none is, a
 /// spot beside one that is taken (see the module's list of what differs).
-pub fn pick(
-    map: &MapData,
-    teams: bool,
-    team: u8,
-    others: &[Occupant],
-    rng: &mut Rng,
-    overflow: bool,
-) -> Option<Spot> {
+pub fn pick(map: &MapData, teams: bool, team: u8, others: &[Occupant], rng: &mut Rng, overflow: bool) -> Option<Spot> {
     let mut best: Option<(f32, &Start)> = None;
     let mut allowed = 0u32;
     for start in map.starts.iter().filter(|s| s.is_for_slayer()) {
@@ -234,8 +226,7 @@ pub fn pick(
     }
     // every one is taken: beside them, from a random one on
     let first = rng.next_u32() % allowed;
-    let starts: Vec<&Start> =
-        map.starts.iter().filter(|s| s.is_for_slayer()).collect();
+    let starts: Vec<&Start> = map.starts.iter().filter(|s| s.is_for_slayer()).collect();
     for radius in RING_RADII {
         for i in 0..starts.len() {
             let start = starts[(first as usize + i) % starts.len()];
@@ -257,7 +248,8 @@ pub fn pick(
                 }
                 // not through a wall from the location
                 let from = [start.position[0], start.position[1], start.position[2] + map.movement.collision_radius];
-                let delta = [ground[0] - from[0], ground[1] - from[1], ground[2] + map.movement.collision_radius - from[2]];
+                let delta =
+                    [ground[0] - from[0], ground[1] - from[1], ground[2] + map.movement.collision_radius - from[2]];
                 if map.collision.test_vector(TEST_FRONT_FACING | TEST_BACK_FACING, from, delta, 1.0).is_some() {
                     continue;
                 }

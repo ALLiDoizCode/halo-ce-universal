@@ -280,6 +280,7 @@ symbols in this file:
 boolean network_game_distributed_client(void);
 /* port: the large-scale mode's adapter (port/linux/game/large_mode.c) */
 boolean large_mode_remote_player(long player_index);
+boolean large_mode_player_spawn_anywhere(long player_index);
 /* port: the comparison harness's (port/linux/game/scenario_harness.c) */
 void scenario_harness_control(long player_index, struct player_action *action);
 /* port/linux/game/network_distributed.c's */
@@ -1226,6 +1227,12 @@ long find_best_starting_location_index(
 	short best_starting_location_index;
 	real starting_location_rating;
 	real best_starting_location_rating;
+
+	/* port: the large-scale mode's server says where its local player spawns (the adapter puts
+	the unit there, as the engine makes it): the engine need only make one, wherever its
+	starting locations are taken by the other players' units */
+	if (large_mode_player_spawn_anywhere(player_index))
+		return 0;
 
 	scenario = global_scenario_get();
 	starting_location_count = scenario->players.count;

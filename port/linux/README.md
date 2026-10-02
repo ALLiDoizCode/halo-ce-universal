@@ -194,7 +194,7 @@ the setting for one start of the game. It has priority over the file.
 | `debug.gpu_skip_vertex_shaders`, `debug.gpu_debug_expression`, `debug.gpu_debug_flat`, `debug.gpu_debug_texture0` | off | `HALO_GPU_SKIP_VS`, `HALO_GPU_DEBUG_EXPR`, `HALO_GPU_DEBUG_FLAT`, `HALO_GPU_DEBUG_T0` | Tools to find problems in the graphics: skip the draws of a vertex shader, or replace the output of all pixel shaders with a GLSL expression (for example `t0.rgb`). |
 | `debug.network_test`, `debug.network_test_start`, `debug.network_test_kill`, `debug.network_test_score`, `debug.network_test_shoot`, `debug.network_test_vehicle`, `debug.network_test_pickup`, `debug.network_test_pickup_weapon`, `debug.test_input` | off | `HALO_NETWORK_TEST`, `HALO_NETWORK_TEST_START`, `HALO_NETWORK_TEST_KILL`, `HALO_NETWORK_TEST_SCORE`, `HALO_NETWORK_TEST_SHOOT`, `HALO_NETWORK_TEST_VEHICLE`, `HALO_NETWORK_TEST_PICKUP`, `HALO_NETWORK_TEST_PICKUP_WEAPON`, `HALO_TEST_INPUT` | Automatic tests of system link (`game/network_test.c`). Refer to `NETCODE.md`. |
 | `debug.scenario`, `debug.scenario_trace` | `""` | `HALO_SCENARIO`, `HALO_SCENARIO_TRACE` | The comparison harness: plays a scenario file with the first player of a network test game, alone, and writes a trace of the player's state. `tools/scenario_harness.py` runs it. Refer to `tools/scenarios/README.md`. |
-| `large.map`, `large.gateway`, `large.spacetimedb`, `large.database`, `large.root`, `large.name`, `large.log_players` | `""`, `127.0.0.1:7777`, `http://127.0.0.1:3000`, `""`, `""`, `""`, `false` | `HALO_LARGE_MAP`, `HALO_LARGE_GATEWAY`, `HALO_LARGE_SPACETIMEDB`, `HALO_LARGE_DATABASE`, `HALO_LARGE_ROOT`, `HALO_LARGE_NAME`, `HALO_LARGE_LOG` | The large-scale mode. Refer to "Large-scale mode". |
+| `large.map`, `large.gateway`, `large.spacetimedb`, `large.database`, `large.root`, `large.name`, `large.log_players`, `large.scoreboard` | `""`, `127.0.0.1:7777`, `http://127.0.0.1:3000`, `""`, `""`, `""`, `false`, `false` | `HALO_LARGE_MAP`, `HALO_LARGE_GATEWAY`, `HALO_LARGE_SPACETIMEDB`, `HALO_LARGE_DATABASE`, `HALO_LARGE_ROOT`, `HALO_LARGE_NAME`, `HALO_LARGE_LOG`, `HALO_LARGE_SCOREBOARD` | The large-scale mode. Refer to "Large-scale mode". |
 | `debug.network_latency`, `debug.network_loss` | `0` | `HALO_NETWORK_LATENCY`, `HALO_NETWORK_LOSS` | The game holds all the data that it receives for this number of milliseconds, and ignores this percentage of the datagrams. Use these settings to test the netcode as on the internet. |
 | `debug.telnet_console`, `debug.telnet_console_port` | `false`, `2323` | `HALO_TELNET_CONSOLE`, `HALO_TELNET_CONSOLE_PORT` | The game listens on 127.0.0.1, on this port, for a script console (connect with telnet). The console has no password, so only this computer can reach it. |
 
@@ -216,8 +216,8 @@ Setting `large.map` (for example, `bloodgulch`) starts a session from the
 settings, without the lobby: the game hosts a game of one machine on that map,
 as `debug.network_test` does, and when the map is loaded the library connects to
 `large.spacetimedb`, takes a seat in the match of the database `large.database`
-(a new SpacetimeDB identity for the session; the match must have spawn points
-and room), and joins the gateway at `large.gateway` over UDP as the player the
+(a new SpacetimeDB identity for the session; the match must have a map with
+starting locations for its game, and room), and joins the gateway at `large.gateway` over UDP as the player the
 seat is, proving it with an Ed25519 key pair whose public key is on the seat
 (`halo-wire`'s `auth`). The player leaves the match when the game ends.
 In this mode the distributed netcode does not run (`network_distributed.c`
@@ -252,6 +252,39 @@ unit (`large mode: drawn 7 tick 812 (x y z) team 1 player 3`, with the tick of
 the state it was driven from). The local player stands where the server has
 them, and tells the gateway where they are.
 
+### Spawning, deaths and the score
+
+The server owns them: the game's player is only where the server has put them.
+The match module (`rust/halo-sim`'s `rules`) spawns a player who joins at a
+starting location of the map by the engine's rules, or, when none is free,
+tells the player which respawn wave they are waiting for and spawns them in
+it. The match's public tables `standing` (each player's score, deaths, whether
+they are in the world and when they will be) and `game_state` (the game, its
+limits, the team scores and how it ended) come over the direct connection, as
+the roster does.
+
+- The engine makes the local player's unit only while the server says the
+  player is alive (the gate in `game_engine_should_spawn_player`, and
+  `find_best_starting_location_index`, which need not choose: the starting
+  locations are taken by the other players' units), and the adapter puts it
+  where the server spawned the player, facing as it says, at each spawn.
+- When the server says the player is dead the unit is killed, and the HUD says
+  `You will respawn in N seconds`; when it says the player waits for a wave,
+  `No spawn point is free: respawn wave in N seconds` (the engine's own
+  respawn timer and death message are not used: `game_engine_player_killed`
+  does nothing in the mode). Another player the server says is dead is not
+  drawn.
+- The scoreboard (hold the score button; it stays up when the game has ended,
+  with the winner in its title, until the server's next match is joined)
+  lists every player of the match from `standing`, in range or not, by score,
+  with each player's kills and deaths, in a column for each team in Team
+  Slayer, and scrolls as the engine's does (`game_engine_rasterize_large_scoreboard`).
+  `large.scoreboard` keeps it up all the time, for pictures.
+
+Each change of the local player's life is logged (`large mode: the server says
+the local player is waiting|alive|dead (spawns, score, deaths, team, tick,
+due)`), as is the unit being put where the server spawned the player.
+
 The test of the mode runs the game headless against a local server:
 
 ```
@@ -267,6 +300,11 @@ for the library and for the engine's units, with the server's. A player
 leaves the match and joins it again, to see the unit go and come back. With
 `HALO_SCREENSHOT_DIR` and `HALO_SCREENSHOT_EVERY` the game saves frames, and
 `HALO_HEADLESS_LOG` keeps its log. Without the data, it skips.
+A second test (`--test rules_headless`) runs a Slayer match of `halo-server` on
+the real Blood Gulch with 40 simulated players beside the game: the game is told
+to wait for a wave, spawned in it, killed and respawned by the server, and sees
+the match end at its score limit with the final scoreboard and the rotation move
+on.
 The library's own tests (`rust/halo-client/tests/boundary.rs` and
 `servers.rs`) need only `HALO_STDB_BIN`.
 

@@ -5,8 +5,8 @@
 use halo_map::game_type;
 use halo_sim::fixtures::{flat_floor_map, start_at, walled_floor_map, with_starts};
 use halo_sim::rules::{
-    begin, enter, enter_placed, leave, play, spawn_due, Contestant, Death, DeathKind, DeathRefusal, EndReason, GameEvent,
-    GameStore, Life, MemoryGame, Rules, Winner,
+    begin, enter, enter_placed, leave, play, spawn_due, Contestant, Death, DeathKind, DeathRefusal, EndReason,
+    GameEvent, GameStore, Life, MemoryGame, Rules, Winner,
 };
 use halo_sim::spawn::{settle, Start};
 use halo_sim::{Event, MapData, MemoryStore, PlayerInput, Rng, Store, TICKS_PER_SECOND};
@@ -88,6 +88,7 @@ fn a_player_who_joins_spawns_at_a_starting_location_of_the_game() {
     assert_eq!(m.store.player(7).unwrap().position, any.position, "the one start a Slayer game uses");
     assert_eq!(m.c(7).spawn, any.position);
     assert_eq!(m.c(7).spawns, 1);
+    assert_eq!(m.c(7).spawned_tick, 1, "the tick it happened on");
 }
 
 #[test]
@@ -133,7 +134,8 @@ fn players_are_never_put_on_top_of_one_another() {
         m.join(id, (id % 2) as u8);
     }
     m.run(10 * TICKS_PER_SECOND as u64);
-    let placed: Vec<[f32; 3]> = (0..60).filter(|id| m.alive(*id)).map(|id| m.store.player(id).unwrap().position).collect();
+    let placed: Vec<[f32; 3]> =
+        (0..60).filter(|id| m.alive(*id)).map(|id| m.store.player(id).unwrap().position).collect();
     assert!(placed.len() > 4, "the waves put more than the starts' worth in: {}", placed.len());
     for (i, a) in placed.iter().enumerate() {
         for b in &placed[i + 1..] {
@@ -354,7 +356,12 @@ fn a_suicide_and_a_death_nobody_caused_cost_a_point_and_ten_seconds_more() {
         kind: DeathKind::Suicide,
         respawn_at: respawn
     }));
-    assert!(events.contains(&GameEvent::Died { victim: 1, killer: None, kind: DeathKind::Suicide, respawn_at: respawn }));
+    assert!(events.contains(&GameEvent::Died {
+        victim: 1,
+        killer: None,
+        kind: DeathKind::Suicide,
+        respawn_at: respawn
+    }));
 }
 
 #[test]
@@ -586,7 +593,10 @@ fn the_match_ends_at_the_time_limit_and_the_top_score_wins() {
     assert!(!events.iter().any(|e| matches!(e, GameEvent::Over(_))));
     let events = m.tick(&[], &[]);
     assert_eq!(m.tick, 60 * TICKS_PER_SECOND as u64);
-    assert_eq!(events, [GameEvent::Over(halo_sim::rules::Ending { reason: EndReason::TimeLimit, winner: Winner::Player(0) })]);
+    assert_eq!(
+        events,
+        [GameEvent::Over(halo_sim::rules::Ending { reason: EndReason::TimeLimit, winner: Winner::Player(0) })]
+    );
 }
 
 #[test]

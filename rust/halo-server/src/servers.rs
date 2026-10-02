@@ -12,11 +12,17 @@
 //! 2. The root database's row for the server is rewritten to name it
 //!    (`set_server`): from then on the server list sends players there, and
 //!    clients that are in the last match follow.
-//! 3. It runs until [`match_is_over`] says it has ended.
-//! 4. A little before that the next match of the rotation is made, so that
-//!    the handover is a change of row and not a wait. The last match is kept
-//!    for `handover_secs` more (so that nobody is cut off before their client
-//!    has moved) and then its gateway is stopped and its database deleted.
+//! 3. The game's clock starts when the match is announced (`begin_game`). The
+//!    match ends when the game does: a player (a team, in team Slayer) reaches
+//!    the score limit, or the time limit runs out, which the match's own rules
+//!    count (`game_state`, which the orchestration reads). It then stays up
+//!    for `end_secs` with its final scoreboard, and [`match_is_over`] says it
+//!    is over.
+//! 4. When the end is near (a little before the time limit, or as the game
+//!    ends) the next match of the rotation is made, so that the handover is a
+//!    change of row and not a wait. The last match is kept for `handover_secs`
+//!    more (so that nobody is cut off before their client has moved) and then
+//!    its gateway is stopped and its database deleted.
 //!
 //! # Bans and names
 //!
@@ -197,13 +203,9 @@ impl ServerRun {
             if let Some(live) = &current {
                 let elapsed = live.matched.started.elapsed();
                 let scoreboard = Duration::from_secs(self.server.end_secs);
-                let over = match_is_over(
-                    &live.step,
-                    elapsed,
-                    live.ended.map(|(at, why)| (why, at.elapsed())),
-                    scoreboard,
-                )
-                .or_else(|| (!live.matched.is_connected()).then_some("its connection to SpacetimeDB was lost"));
+                let over =
+                    match_is_over(&live.step, elapsed, live.ended.map(|(at, why)| (why, at.elapsed())), scoreboard)
+                        .or_else(|| (!live.matched.is_connected()).then_some("its connection to SpacetimeDB was lost"));
                 // the next match, made ahead of time: before the time limit, or as the game ends
                 let limit = live.step.seconds as u64;
                 let prepare_from = limit.saturating_sub(PREPARE_SECS.min(limit / 2));

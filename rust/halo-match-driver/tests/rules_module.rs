@@ -135,11 +135,7 @@ fn only_the_owner_may_set_the_game_or_report_a_death() {
     let Some((server, owner)) = started_match("guards", 2, quick()) else { return };
     let _players = seat_players(&server, "guards", &owner, 1);
     let stranger = MatchClient::connect(&server.uri(), "guards");
-    for refused in [
-        stranger.report_death(0, None),
-        stranger.set_game(&Rules::team_slayer()),
-        stranger.begin_game(),
-    ] {
+    for refused in [stranger.report_death(0, None), stranger.set_game(&Rules::team_slayer()), stranger.begin_game()] {
         assert!(refused.unwrap_err().contains("owner"));
     }
     // a death of a player who is not there
@@ -214,7 +210,11 @@ fn the_match_ends_at_the_time_limit() {
     assert_eq!(owner.game().unwrap().ending, 0);
     wait_until("the end", || owner.game().unwrap().ending != 0);
     let game = owner.game().unwrap();
-    assert_eq!((game.ending, game.winner_kind, game.winner), (2, 1, 0), "a time limit, won by the player with the kill");
+    assert_eq!(
+        (game.ending, game.winner_kind, game.winner),
+        (2, 1, 0),
+        "a time limit, won by the player with the kill"
+    );
 }
 
 #[test]
