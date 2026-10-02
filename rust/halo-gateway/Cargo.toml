@@ -1,0 +1,22 @@
+[package]
+name = "halo-gateway"
+version = "0.1.0"
+description = "The large-scale mode's UDP gateway: players' per-tick traffic over UDP under a byte budget, one batched call a tick into the match module, plus the wire test harness"
+edition = "2021"
+publish = false
+
+# Its own workspace and Cargo.lock, like the module and the driver (rust/Cargo.toml
+# excludes it): it needs the SpacetimeDB client SDK, which the rest of rust/ does not.
+[workspace]
+
+[dependencies]
+spacetimedb-sdk = "=2.10.2"
+halo-sim = { path = "../halo-sim" }
+halo-wire = { path = "../halo-wire" }
+# the generated bindings of the match module, and the walkers and server
+# launcher the harness reuses
+halo-match-driver = { path = "../halo-match-driver" }
+halo-map = { path = "../halo-map" }
+
+[profile.release]
+debug = 1

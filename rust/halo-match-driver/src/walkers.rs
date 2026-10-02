@@ -15,6 +15,8 @@ pub struct Walkers {
     /// What the match should look like after the inputs applied so far.
     pub mirror: MemoryStore,
     headings: Vec<f32>,
+    /// Rejections each walker had when last synced with the server.
+    rejects_seen: Vec<u64>,
     rng: Rng,
     ids: Vec<u16>,
 }
@@ -43,7 +45,8 @@ impl Walkers {
             headings.push(rng.next_f32() * core::f32::consts::TAU);
             ids.push(id);
         }
-        (Walkers { map, mirror, headings, rng, ids }, spawn)
+        let rejects_seen = vec![0; ids.len()];
+        (Walkers { map, mirror, headings, rejects_seen, rng, ids }, spawn)
     }
 
     /// This tick's moves: each walker steps along its heading, staying on the
@@ -65,6 +68,31 @@ impl Walkers {
             inputs.push(PlayerInput { player: id, position, yaw: self.headings[i], pitch: 0.0 });
         }
         inputs
+    }
+
+    /// Take the server's word for where everyone is: a player who plans from
+    /// what the server holds is never ahead of it, however many of their
+    /// inputs were lost or delayed on the way. A walker the server rejected
+    /// since the last sync turns to a new heading. For walkers behind a lossy
+    /// link, where the local copy of [`Walkers::apply`] would drift.
+    pub fn sync_with_server<'a>(&mut self, rows: impl IntoIterator<Item = &'a crate::PlayerRow>) {
+        for row in rows {
+            // ids are 0..players, so a player's id is its index
+            let index = row.id as usize;
+            if index >= self.ids.len() {
+                continue;
+            }
+            self.mirror.set_player(Player {
+                id: row.id,
+                position: [row.x, row.y, row.z],
+                yaw: row.yaw,
+                pitch: row.pitch,
+            });
+            if row.rejected_moves > self.rejects_seen[index] {
+                self.rejects_seen[index] = row.rejected_moves;
+                self.headings[index] = self.rng.next_f32() * core::f32::consts::TAU;
+            }
+        }
     }
 
     /// Apply a tick's inputs to the local copy, as the server will.

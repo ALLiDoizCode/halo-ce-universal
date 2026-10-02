@@ -1,0 +1,137 @@
+//! What the gateway counts about itself, for the operator's log and for the
+//! tests.
+
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::Mutex;
+
+/// Keep at most this many timings (about 55 minutes of ticks); older ones are dropped.
+const MAX_TIMINGS: usize = 100_000;
+
+#[derive(Debug, Default)]
+pub struct Stats {
+    /// Ticks the gateway saw complete.
+    pub ticks: AtomicU64,
+    /// Ticks that never reached the gateway (a gap in the tick numbers).
+    pub ticks_skipped: AtomicU64,
+    /// Calls to the module's `submit_inputs`, and the inputs in them.
+    pub batches_submitted: AtomicU64,
+    pub inputs_submitted: AtomicU64,
+    /// Input datagrams that parsed.
+    pub inputs_received: AtomicU64,
+    /// ... dropped because a newer one was already held.
+    pub inputs_late: AtomicU64,
+    /// ... dropped because they did not come from the address bound to their player.
+    pub inputs_unbound: AtomicU64,
+    pub hellos: AtomicU64,
+    /// Datagrams that did not parse.
+    pub malformed: AtomicU64,
+    pub datagrams_sent: AtomicU64,
+    /// Bytes sent, counting IP and UDP headers.
+    pub wire_bytes_sent: AtomicU64,
+    pub states_sent: AtomicU64,
+    pub send_errors: AtomicU64,
+    /// Ticks that were still being sent when the next arrived.
+    pub send_overruns: AtomicU64,
+    /// Datagrams sent by each sending thread.
+    pub per_thread_datagrams: Vec<AtomicU64>,
+    timings: Mutex<Timings>,
+}
+
+#[derive(Debug, Default)]
+struct Timings {
+    /// Microseconds from a tick reaching the gateway to its last datagram being sent.
+    send_us: Vec<u32>,
+    /// Microseconds from the module stamping a tick to it reaching the gateway.
+    arrival_us: Vec<i64>,
+}
+
+/// Percentiles of a list of timings.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Spread {
+    pub p50: f64,
+    pub p99: f64,
+    pub max: f64,
+}
+
+impl Spread {
+    pub fn of(mut values: Vec<f64>) -> Spread {
+        values.sort_by(f64::total_cmp);
+        let at = |p: f64| values.get(((values.len().max(1) - 1) as f64 * p).round() as usize).copied().unwrap_or(0.0);
+        Spread { p50: at(0.5), p99: at(0.99), max: at(1.0) }
+    }
+}
+
+/// The counters at one moment, plus the timings so far as milliseconds.
+#[derive(Debug, Clone)]
+pub struct StatsSnapshot {
+    pub ticks: u64,
+    pub ticks_skipped: u64,
+    pub batches_submitted: u64,
+    pub inputs_submitted: u64,
+    pub inputs_received: u64,
+    pub inputs_late: u64,
+    pub inputs_unbound: u64,
+    pub hellos: u64,
+    pub malformed: u64,
+    pub datagrams_sent: u64,
+    pub wire_bytes_sent: u64,
+    pub states_sent: u64,
+    pub send_errors: u64,
+    pub send_overruns: u64,
+    pub per_thread_datagrams: Vec<u64>,
+    /// Sending one tick to every player: from the tick reaching the gateway to its last datagram sent, in ms.
+    pub send_ms: Spread,
+    /// How old a tick was when it reached the gateway, in ms.
+    pub arrival_ms: Spread,
+}
+
+impl Stats {
+    pub fn new(send_threads: usize) -> Stats {
+        Stats { per_thread_datagrams: (0..send_threads).map(|_| AtomicU64::new(0)).collect(), ..Stats::default() }
+    }
+
+    pub(crate) fn record_send(&self, micros: u32) {
+        let mut t = self.timings.lock().unwrap();
+        if t.send_us.len() >= MAX_TIMINGS {
+            t.send_us.remove(0);
+        }
+        t.send_us.push(micros);
+    }
+
+    pub(crate) fn record_arrival(&self, micros: i64) {
+        let mut t = self.timings.lock().unwrap();
+        if t.arrival_us.len() >= MAX_TIMINGS {
+            t.arrival_us.remove(0);
+        }
+        t.arrival_us.push(micros);
+    }
+
+    pub fn snapshot(&self) -> StatsSnapshot {
+        let (send, arrival) = {
+            let t = self.timings.lock().unwrap();
+            (
+                t.send_us.iter().map(|v| *v as f64 / 1e3).collect(),
+                t.arrival_us.iter().map(|v| *v as f64 / 1e3).collect(),
+            )
+        };
+        StatsSnapshot {
+            ticks: self.ticks.load(Relaxed),
+            ticks_skipped: self.ticks_skipped.load(Relaxed),
+            batches_submitted: self.batches_submitted.load(Relaxed),
+            inputs_submitted: self.inputs_submitted.load(Relaxed),
+            inputs_received: self.inputs_received.load(Relaxed),
+            inputs_late: self.inputs_late.load(Relaxed),
+            inputs_unbound: self.inputs_unbound.load(Relaxed),
+            hellos: self.hellos.load(Relaxed),
+            malformed: self.malformed.load(Relaxed),
+            datagrams_sent: self.datagrams_sent.load(Relaxed),
+            wire_bytes_sent: self.wire_bytes_sent.load(Relaxed),
+            states_sent: self.states_sent.load(Relaxed),
+            send_errors: self.send_errors.load(Relaxed),
+            send_overruns: self.send_overruns.load(Relaxed),
+            per_thread_datagrams: self.per_thread_datagrams.iter().map(|c| c.load(Relaxed)).collect(),
+            send_ms: Spread::of(send),
+            arrival_ms: Spread::of(arrival),
+        }
+    }
+}
