@@ -29,18 +29,14 @@
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use halo_gateway::harness::{Crowd, Impairment, Truth};
-use halo_gateway::{Gateway, GatewayConfig, UdpTransport};
-use halo_match_driver::server::{build_module, stdb_bin_dir, Server};
-use halo_match_driver::walkers::Walkers;
-use halo_match_driver::MatchClient;
+use halo_gateway::harness::{Crowd, Impairment, Rig, RigSetup, Truth};
+use halo_match_driver::server::{build_module, stdb_bin_dir};
 use halo_sim::MapData;
 use halo_wire::unit::Bounds;
 
-/// Players walking beside the game's, and the game's.
+/// Players seated and walking beside the game's, which takes the next seat.
 const OTHERS: u16 = 120;
 const ME: u16 = OTHERS;
 /// How long the game runs, from the moment its window opens, seconds. Booting
@@ -95,21 +91,18 @@ fn the_logged_players_are_the_ones_the_server_sent() {
         return;
     };
 
-    let server = Server::start(&stdb);
-    server.publish(&build_module(), "headless");
-    let client = MatchClient::connect(&server.uri(), "headless");
     let halo_map = halo_map::HaloMap::from_path(maps.join("bloodgulch.map")).expect("Blood Gulch");
     let anchors: Vec<[f32; 3]> = halo_map.player_starts.iter().map(|s| s.position).collect();
     let map = MapData::from(halo_map);
     let bounds = Bounds::from_world(map.world_bounds);
-    client.load_map(map.to_bytes()).unwrap();
-    // the game's player is the last: it stands where it spawns, nobody sends for it
-    let (mut walkers, spawn) = Walkers::new(map, &anchors, OTHERS + 1, 7);
-    client.add_players(&spawn).unwrap();
-    client.start();
-    let transport = Arc::new(UdpTransport::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-    let gateway = Gateway::start(GatewayConfig::new(server.uri(), "headless"), transport).expect("the gateway");
-    let crowd = Crowd::connect(gateway.local_addr(), 0..OTHERS, Impairment::none(), OTHERS as usize + 1, false);
+    let wasm = build_module();
+    let mut rig = Rig::start(
+        &stdb,
+        &wasm,
+        RigSetup { name: "headless", map, anchors: &anchors, players: OTHERS, budget: 90_000 },
+        |_| {},
+    );
+    let crowd = Crowd::connect(rig.gateway.local_addr(), 0..OTHERS, Impairment::none(), OTHERS as usize + 1, false);
     crowd.join_all(Duration::from_secs(20)).unwrap();
 
     // the game, started from its settings alone
@@ -123,10 +116,9 @@ fn the_logged_players_are_the_ones_the_server_sent() {
             .env("HALO_DATA_ROOT", &data)
             .env("HALO_SAVE_ROOT", work.join("saves"))
             .env("HALO_LARGE_MAP", "bloodgulch")
-            .env("HALO_LARGE_GATEWAY", gateway.local_addr().to_string())
-            .env("HALO_LARGE_SPACETIMEDB", server.uri())
+            .env("HALO_LARGE_GATEWAY", rig.gateway.local_addr().to_string())
+            .env("HALO_LARGE_SPACETIMEDB", rig.server.uri())
             .env("HALO_LARGE_DATABASE", "headless")
-            .env("HALO_LARGE_PLAYER", ME.to_string())
             .env("HALO_LARGE_LOG", "1")
             .env("HALO_NET_ONLINE", "0")
             .env("HALO_FULLSCREEN", "0")
@@ -146,10 +138,10 @@ fn the_logged_players_are_the_ones_the_server_sent() {
     let until = Instant::now() + Duration::from_secs(GAME_SECONDS as u64 + 40);
     let mut exit = None;
     while exit.is_none() && Instant::now() < until {
-        let Some(seen) = client.next_tick(Duration::from_secs(10)) else { panic!("no tick for 10 s") };
+        let Some(seen) = rig.client.next_tick(Duration::from_secs(10)) else { panic!("no tick for 10 s") };
         truth.record(&seen);
-        walkers.sync_with_server(seen.players.values());
-        crowd.send_inputs(&walkers.next_inputs());
+        rig.walkers.sync_with_server(seen.players.values());
+        crowd.send_inputs(&rig.walkers.next_inputs());
         exit = game_process.0.try_wait().unwrap();
     }
     let output = std::fs::read_to_string(&log_path).unwrap_or_default();
@@ -157,12 +149,12 @@ fn the_logged_players_are_the_ones_the_server_sent() {
     assert!(exit.is_some_and(|s| s.success()), "the game did not exit by itself; the end of its log:\n{}", tail());
 
     // the session: started, joined, and the local unit placed where the server has the player
-    assert!(output.contains("large mode: bloodgulch as player 120"), "the settings were not read:\n{}", tail());
+    assert!(output.contains("large mode: bloodgulch, database headless"), "the settings were not read:\n{}", tail());
     assert!(output.contains("the local unit is where the server has the player"), "never placed:\n{}", tail());
     let statuses: Vec<&str> = output.lines().filter(|l| l.contains("large mode: tick ")).collect();
     assert!(statuses.len() >= 5, "only {} status lines:\n{}", statuses.len(), tail());
     let last = statuses.last().unwrap();
-    assert!(last.contains("joined 1 slow 1 map 1"), "the last status line was {last:?}");
+    assert!(last.contains(&format!("joined 1 slow 1 map 1 player {ME} ")), "the last status line was {last:?}");
     assert!(!last.contains("inputs 0 "), "the game never sent an input: {last:?}");
 
     // the players it logged, against the truth
@@ -197,7 +189,7 @@ fn the_logged_players_are_the_ones_the_server_sent() {
     assert!(compared > 300, "only {compared} logged players could be compared; the end of the log:\n{}", tail());
     assert!(heard_of.len() > 20, "only {} different players were logged", heard_of.len());
 
-    let rejected = client.players()[&ME].rejected_moves;
+    let rejected = rig.client.players()[&ME].rejected_moves;
     println!("the game's player had {rejected} moves rejected");
     let _ = std::fs::remove_dir_all(&work);
 }

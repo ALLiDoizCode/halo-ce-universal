@@ -56,11 +56,12 @@ unsafe fn string(pointer: *const c_char) -> Option<String> {
     Some(unsafe { CStr::from_ptr(pointer) }.to_string_lossy().into_owned())
 }
 
-/// Start a session: connect to the gateway over UDP and to SpacetimeDB
-/// directly, as `player` (who must be in the match already). Returns 1 when
-/// the session has started, which is not yet being in the match (see
-/// [`halo_large_status`]), and 0 when it could not (see [`halo_large_error`]).
-/// A session already running is stopped first.
+/// Start a session: connect to SpacetimeDB directly, take a seat in the match
+/// (its `join`) and join the gateway over UDP as the player the seat is. A new
+/// SpacetimeDB identity is made for the session. Returns 1 when the session has
+/// started, which is not yet being in the match (see [`halo_large_status`]), and
+/// 0 when it could not (see [`halo_large_error`]). A session already running is
+/// stopped first.
 ///
 /// # Safety
 /// The three strings are NUL-terminated.
@@ -69,17 +70,12 @@ pub unsafe extern "C" fn halo_large_start(
     gateway: *const c_char,
     spacetimedb: *const c_char,
     database: *const c_char,
-    player: u32,
 ) -> u32 {
     guard(0, || {
         let (Some(gateway), Some(spacetimedb), Some(database)) =
             (unsafe { string(gateway) }, unsafe { string(spacetimedb) }, unsafe { string(database) })
         else {
             global().error = "a null string".into();
-            return 0;
-        };
-        let Ok(player) = u16::try_from(player) else {
-            global().error = format!("player {player} is not a player number");
             return 0;
         };
         // (the old session's drop joins its threads: not under the lock)
@@ -90,7 +86,7 @@ pub unsafe extern "C" fn halo_large_start(
             g.session.take()
         };
         drop(old);
-        match Session::start(Config { gateway, spacetimedb, database, player }) {
+        match Session::start(Config { gateway, spacetimedb, database, token: None }) {
             Ok(session) => {
                 global().session = Some(session);
                 1
@@ -124,11 +120,11 @@ pub extern "C" fn halo_large_stop() {
 /// |---|---|
 /// | 0 | 1 when the direct SpacetimeDB connection is up and subscribed |
 /// | 1 | how many maps the match has loaded (0: none yet) |
-/// | 2 | Hellos sent |
+/// | 2 | Hellos and Auths sent |
 /// | 3 | datagrams received |
 /// | 4 | bytes received |
-/// | 5 | datagrams ignored |
-/// | 6 | the newest tick a datagram has carried |
+/// | 5 | datagrams that did not decode |
+/// | 6 | the player this session is (the match's seat for it), or 0xFFFFFFFF before the match has given one |
 /// | 7 | inputs sent |
 ///
 /// # Safety
@@ -142,15 +138,16 @@ pub unsafe extern "C" fn halo_large_status(out: *mut u32) -> u32 {
         }
         let out = unsafe { std::slice::from_raw_parts_mut(out, 8) };
         out.fill(0);
+        out[6] = u32::MAX;
         let Some(session) = &g.session else { return 0 };
-        let (slow, counters, frame) = (session.slow(), session.counters(), session.frame());
+        let (slow, counters) = (session.slow(), session.counters());
         out[0] = slow.connected as u32;
         out[1] = slow.map_version as u32;
-        out[2] = counters.hellos_sent;
+        out[2] = counters.joins_sent;
         out[3] = counters.datagrams as u32;
         out[4] = counters.bytes as u32;
         out[5] = counters.ignored as u32;
-        out[6] = frame.tick;
+        out[6] = session.player().map_or(u32::MAX, |p| p as u32);
         out[7] = counters.inputs_sent as u32;
         session.joined() as u32
     })

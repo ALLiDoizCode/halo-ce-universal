@@ -201,13 +201,10 @@ static const struct config_setting config_settings[] =
 		"goes over UDP: host:port." },
 	{ "large.spacetimedb", _config_string, "\"http://127.0.0.1:3000\"", "HALO_LARGE_SPACETIMEDB", _environment_value,
 		_platform_desktop,
-		"The large-scale server's SpacetimeDB, which slow state comes from\n"
-		"directly: its URI." },
+		"The large-scale server's SpacetimeDB, which the player's seat and the\n"
+		"slow state come from directly: its URI." },
 	{ "large.database", _config_string, "\"\"", "HALO_LARGE_DATABASE", _environment_value, _platform_desktop,
 		"The database of the match to join (each match is its own)." },
-	{ "large.player", _config_integer, "0", "HALO_LARGE_PLAYER", _environment_value, _platform_desktop,
-		"The player to be in the match, 0 to 65535. The match must have it\n"
-		"already." },
 	{ "large.log_players", _config_boolean, "false", "HALO_LARGE_LOG", _environment_set_is_true, _platform_desktop,
 		"Log every player the gateway has sent, with their state, once a second\n"
 		"(for tests; the log has the session's own line every second anyway)." },

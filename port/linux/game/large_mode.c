@@ -15,8 +15,8 @@ A session starts from the settings, without the lobby:
   network_server_manager.c asks large_mode_active(), as it asks the comparison
   harness's);
 - when the game's map is loaded (large_mode_new_game) the library starts: it
-  connects to the gateway over UDP and to SpacetimeDB directly, and the player
-  large.player, who must already be in the match, joins;
+  connects to SpacetimeDB directly and takes a seat in the match, and joins the
+  gateway over UDP as the player the seat is;
 - every tick, just before the objects are updated (large_mode_game_tick), the
   local player's unit is put where the server has it (once), and its position
   and facing go to the gateway as that tick's input;
@@ -60,8 +60,7 @@ void platform_log(char const *format, ...);
 /* the library's (rust/halo-client/src/ffi.rs): `unsigned long` is 32 bits on
 every build that has it */
 typedef char large_mode_long_is_32_bits_assert[sizeof(unsigned long) == 4 ? 1 : -1];
-unsigned long halo_large_start(const char *gateway, const char *spacetimedb, const char *database,
-	unsigned long player);
+unsigned long halo_large_start(const char *gateway, const char *spacetimedb, const char *database);
 void halo_large_stop(void);
 unsigned long halo_large_status(unsigned long *out);
 unsigned long halo_large_frame(unsigned long *tick);
@@ -79,7 +78,6 @@ static struct
 	char gateway[128];
 	char spacetimedb[256];
 	char database[128];
-	long player;
 	boolean log_players;
 
 	/* running: the library has been started for this game, the local player's
@@ -103,17 +101,16 @@ static void large_mode_read_settings(
 	snprintf(large.gateway, sizeof(large.gateway), "%s", config_string("large.gateway"));
 	snprintf(large.spacetimedb, sizeof(large.spacetimedb), "%s", config_string("large.spacetimedb"));
 	snprintf(large.database, sizeof(large.database), "%s", config_string("large.database"));
-	large.player = config_integer("large.player");
 	large.log_players = config_boolean("large.log_players") != 0;
-	if (!large.database[0] || large.player < 0 || large.player > 0xFFFF)
+	if (!large.database[0])
 	{
-		platform_log("large mode: large.database names the match's database, and large.player (0 to 65535) the "
-			"player to be; neither can be missing: the game is played as usual");
+		platform_log("large mode: large.database names the match's database and cannot be missing: the game is "
+			"played as usual");
 		return;
 	}
 	large.active = TRUE;
-	platform_log("large mode: %s as player %ld of database %s, gateway %s, SpacetimeDB %s", large.map, large.player,
-		large.database, large.gateway, large.spacetimedb);
+	platform_log("large mode: %s, database %s, gateway %s, SpacetimeDB %s", large.map, large.database, large.gateway,
+		large.spacetimedb);
 }
 
 boolean large_mode_active(
@@ -153,8 +150,7 @@ void large_mode_new_game(
 	large.placed = FALSE;
 	large.logged_error[0] = 0;
 	large.logged_time = 0;
-	large.started = halo_large_start(large.gateway, large.spacetimedb, large.database,
-		(unsigned long)large.player) != 0;
+	large.started = halo_large_start(large.gateway, large.spacetimedb, large.database) != 0;
 	if (!large.started)
 		large_mode_log_error();
 }
@@ -201,10 +197,10 @@ static void large_mode_log(
 
 	joined = halo_large_status(status) != 0;
 	count = halo_large_frame(&tick);
-	platform_log("large mode: tick %ld joined %d slow %lu map %lu | hellos %lu datagrams %lu bytes %lu ignored %lu "
-		"inputs %lu | gateway tick %lu, %lu players",
-		game_time_get(), joined ? 1 : 0, status[0], status[1], status[2], status[3], status[4], status[5], status[7],
-		tick, count);
+	platform_log("large mode: tick %ld joined %d slow %lu map %lu player %lu | joins sent %lu datagrams %lu bytes %lu "
+		"undecoded %lu inputs %lu | gateway tick %lu, %lu players",
+		game_time_get(), joined ? 1 : 0, status[0], status[1], status[6], status[2], status[3], status[4], status[5],
+		status[7], tick, count);
 	if (!large.log_players)
 		return;
 	for (index = 0; index < count; index++)

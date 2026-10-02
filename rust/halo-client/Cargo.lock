@@ -442,6 +442,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "ed25519-compact"
+version = "2.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1454db4f2edb7f0e8fe0c5b375b0c978fc63244cc9f010d160e417eb10139aa8"
+
+[[package]]
 name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -662,6 +668,7 @@ dependencies = [
 name = "halo-client"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
  "halo-gateway",
  "halo-map",
  "halo-match-driver",
@@ -675,6 +682,7 @@ dependencies = [
 name = "halo-gateway"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
  "halo-map",
  "halo-match-driver",
  "halo-sim",
@@ -709,6 +717,7 @@ dependencies = [
 name = "halo-wire"
 version = "0.1.0"
 dependencies = [
+ "ed25519-compact",
  "halo-sim",
 ]
 
