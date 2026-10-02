@@ -16,12 +16,13 @@
 //!    for `handover_secs` more (so that nobody is cut off before their client
 //!    has moved) and then its gateway is stopped and its database deleted.
 //!
-//! # Bans
+//! # Bans and names
 //!
-//! The root database's `banned` table is the truth. Every change to it comes
-//! here as a [`BanChange`], and is applied to every match that exists (the
-//! match's own `set_ban` takes a seated player out, and refuses the identity's
-//! next `join`); each new match starts with all of them.
+//! The root database's `banned` table is the truth, and so are the names in
+//! `known_identity`. Every change to them comes here as a [`RootChange`], and
+//! is applied to every match that exists (the match's own `set_ban` takes a
+//! seated player out, and refuses the identity's next `join`; `set_name` puts a
+//! player's chosen name on the roster); each new match starts with all of them.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -35,7 +36,7 @@ use spacetimedb_sdk::Identity;
 use crate::config::{self, Rotation};
 use crate::maps::{LoadedMap, MapSource};
 use crate::matches::{Env, MatchSpec, Report, RunningMatch};
-use crate::root::{BanChange, Root};
+use crate::root::{Root, RootChange};
 
 /// How long before a match's end the next one is made.
 const PREPARE_SECS: u64 = 15;
@@ -108,17 +109,19 @@ pub struct ServerRun {
     shared: Arc<Shared>,
     server: config::Server,
     bans: BTreeMap<Identity, String>,
-    changes: Receiver<BanChange>,
+    names: BTreeMap<Identity, String>,
+    changes: Receiver<RootChange>,
     /// Matches made so far (numbers the next).
     made: u64,
     unix_secs: u64,
 }
 
 impl ServerRun {
-    pub fn new(shared: Arc<Shared>, server: config::Server, changes: Receiver<BanChange>) -> ServerRun {
+    pub fn new(shared: Arc<Shared>, server: config::Server, changes: Receiver<RootChange>) -> ServerRun {
         let bans = shared.root.bans().into_iter().map(|b| (b.identity, b.reason)).collect();
+        let names = shared.root.names().into_iter().collect();
         let unix_secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        ServerRun { shared, server, bans, changes, made: 0, unix_secs }
+        ServerRun { shared, server, bans, names, changes, made: 0, unix_secs }
     }
 
     fn say(&self, message: impl AsRef<str>) {
@@ -292,6 +295,7 @@ impl ServerRun {
             send_threads: self.server.send_threads,
             bind,
             bans: self.bans.iter().map(|(i, r)| (*i, r.clone())).collect(),
+            names: self.names.iter().map(|(i, n)| (*i, n.clone())).collect(),
         };
         let started = Instant::now();
         let matched = RunningMatch::start(&self.shared.env, spec)?;
@@ -356,11 +360,14 @@ impl ServerRun {
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => return,
             };
             match &change {
-                BanChange::Banned { identity, reason } => {
+                RootChange::Banned { identity, reason } => {
                     self.bans.insert(*identity, reason.clone());
                 }
-                BanChange::Lifted { identity } => {
+                RootChange::Lifted { identity } => {
                     self.bans.remove(identity);
+                }
+                RootChange::Named { identity, name } => {
+                    self.names.insert(*identity, name.clone());
                 }
             }
             let matches = current
@@ -370,17 +377,20 @@ impl ServerRun {
                 .chain(draining.iter().map(|(_, m)| m));
             for m in matches {
                 let result = match &change {
-                    BanChange::Banned { identity, reason } => m.set_ban(*identity, reason),
-                    BanChange::Lifted { identity } => m.clear_ban(*identity),
+                    RootChange::Banned { identity, reason } => m.set_ban(*identity, reason),
+                    RootChange::Lifted { identity } => m.clear_ban(*identity),
+                    RootChange::Named { identity, name } => m.set_name(*identity, name),
                 };
                 match (&change, result) {
-                    (BanChange::Banned { identity, reason }, Ok(())) => {
+                    (RootChange::Banned { identity, reason }, Ok(())) => {
                         self.say(format!("{} banned from {} ({reason})", identity.to_hex(), m.database))
                     }
-                    (BanChange::Lifted { identity }, Ok(())) => {
+                    (RootChange::Lifted { identity }, Ok(())) => {
                         self.say(format!("{} unbanned in {}", identity.to_hex(), m.database))
                     }
-                    (_, Err(e)) => self.say(format!("a ban change did not reach {}: {e}", m.database)),
+                    // (a name is not worth a line each: there is one for every player who joins)
+                    (RootChange::Named { .. }, Ok(())) => {}
+                    (_, Err(e)) => self.say(format!("a change did not reach {}: {e}", m.database)),
                 }
             }
         }

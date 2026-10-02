@@ -13,7 +13,7 @@ use halo_match_driver::root_bindings::Server as ServerRow;
 use halo_match_driver::server::{stdb_bin_dir, Server as Stdb};
 use halo_match_driver::{MatchClient, PlayerClient};
 use halo_server::admin::Admin;
-use halo_server::fixtures::{modules, scratch, test_config, FlatFloors};
+use halo_server::fixtures::{modules, register_at_root, scratch, test_config, FlatFloors};
 use halo_server::root::Root;
 use halo_server::servers::Log;
 use halo_wire::datagram::{ClientMessage, ServerMessage};
@@ -197,6 +197,54 @@ fn a_ban_reaches_the_running_match_and_every_match_after_it() {
     // lifting it lets the identity in, in the running match
     running.root().unban(identity(&cheat)).unwrap();
     wait_for("the ban to be lifted", 10, || next_cheat.join(KEY).ok());
+    running.stop().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_name_a_player_chose_at_the_root_is_on_the_roster_of_the_running_match_and_the_next() {
+    let _serial = serial();
+    let Some(bin) = stdb_bin_dir() else {
+        eprintln!("HALO_STDB_BIN is not set: skipping, this test needs a SpacetimeDB 2.10.x release");
+        return;
+    };
+    let dir = scratch("names");
+    let stdb = Stdb::start(&bin);
+    let url = stdb.uri();
+    std::fs::write(dir.join("owner.token"), &stdb.owner().token).unwrap();
+    let running =
+        halo_server::start(test_config(&dir, &url, None, &[("lounge", TWO_MAPS)]), Arc::new(FlatFloors), Log::new())
+            .expect("the server starts");
+    let first = wait_for("the first match", 30, || the_row(running.root()));
+    let (alice, bob) = (new_player(&url), new_player(&url));
+
+    // a player says who they are at the root, then takes a seat in the match: the roster shows the name
+    register_at_root(&url, &alice.token, "Alice").unwrap();
+    let client = PlayerClient::connect(&url, &first.database, &alice.token);
+    let watcher = MatchClient::connect_as(&url, &first.database, Some(&stdb.owner().token));
+    client.join(KEY).unwrap();
+    wait_for("the name on the roster", 10, || {
+        (watcher.roster().values().map(|r| r.name.clone()).collect::<Vec<_>>() == ["Alice"]).then_some(())
+    });
+    // a name chosen after the seat is taken replaces the one on the roster
+    register_at_root(&url, &alice.token, "Alice B").unwrap();
+    wait_for("the new name", 10, || {
+        (watcher.roster().values().next().is_some_and(|r| r.name == "Alice B")).then_some(())
+    });
+    // a player who never chose one is "Player <number>"
+    let other = PlayerClient::connect(&url, &first.database, &bob.token);
+    other.join(KEY).unwrap();
+    wait_for("the second player", 10, || (watcher.roster().len() == 2).then_some(()));
+    assert_eq!(watcher.roster()[&1].name, "Player 1");
+
+    // the next match starts knowing the names
+    let second = wait_for("the second match", 30, || the_row(running.root()).filter(|r| r.match_number == 2));
+    let client = PlayerClient::connect(&url, &second.database, &alice.token);
+    client.join(KEY).unwrap();
+    let watcher = MatchClient::connect_as(&url, &second.database, Some(&stdb.owner().token));
+    wait_for("the name in the next match", 10, || {
+        (watcher.roster().values().map(|r| r.name.clone()).collect::<Vec<_>>() == ["Alice B"]).then_some(())
+    });
     running.stop().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

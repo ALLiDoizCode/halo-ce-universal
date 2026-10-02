@@ -13,14 +13,25 @@ use halo_match_driver::root_bindings::{
 };
 use spacetimedb_sdk::{Compression, DbContext, Identity, Table, TableWithPrimaryKey};
 
-/// A change to the bans, as the root database made it.
+/// A change to what the matches are told of the root database's: the bans,
+/// and the names players have chosen.
 #[derive(Debug, Clone, PartialEq)]
-pub enum BanChange {
-    Banned { identity: Identity, reason: String },
-    Lifted { identity: Identity },
+pub enum RootChange {
+    Banned {
+        identity: Identity,
+        reason: String,
+    },
+    Lifted {
+        identity: Identity,
+    },
+    /// An identity's name (never empty: no name is not a change worth telling).
+    Named {
+        identity: Identity,
+        name: String,
+    },
 }
 
-type Sinks = Arc<Mutex<Vec<Sender<BanChange>>>>;
+type Sinks = Arc<Mutex<Vec<Sender<RootChange>>>>;
 
 pub struct Root {
     conn: DbConnection,
@@ -42,18 +53,34 @@ impl Root {
         {
             let sinks = sinks.clone();
             conn.db.banned().on_insert(move |_, row| {
-                send(&sinks, BanChange::Banned { identity: row.identity, reason: row.reason.clone() })
+                send(&sinks, RootChange::Banned { identity: row.identity, reason: row.reason.clone() })
             });
         }
         {
             let sinks = sinks.clone();
             conn.db.banned().on_update(move |_, _, row| {
-                send(&sinks, BanChange::Banned { identity: row.identity, reason: row.reason.clone() })
+                send(&sinks, RootChange::Banned { identity: row.identity, reason: row.reason.clone() })
             });
         }
         {
             let sinks = sinks.clone();
-            conn.db.banned().on_delete(move |_, row| send(&sinks, BanChange::Lifted { identity: row.identity }));
+            conn.db.banned().on_delete(move |_, row| send(&sinks, RootChange::Lifted { identity: row.identity }));
+        }
+        {
+            let sinks = sinks.clone();
+            conn.db.known_identity().on_insert(move |_, row| {
+                if !row.name.is_empty() {
+                    send(&sinks, RootChange::Named { identity: row.identity, name: row.name.clone() })
+                }
+            });
+        }
+        {
+            let sinks = sinks.clone();
+            conn.db.known_identity().on_update(move |_, old, row| {
+                if old.name != row.name && !row.name.is_empty() {
+                    send(&sinks, RootChange::Named { identity: row.identity, name: row.name.clone() })
+                }
+            });
         }
         let (applied_tx, applied) = mpsc::channel();
         conn.subscription_builder()
@@ -74,8 +101,8 @@ impl Root {
         self.conn.is_active()
     }
 
-    /// Where every later change to the bans is sent.
-    pub fn watch_bans(&self, sink: Sender<BanChange>) {
+    /// Where every later change to the bans and names is sent.
+    pub fn watch_changes(&self, sink: Sender<RootChange>) {
         self.sinks.lock().unwrap_or_else(|p| p.into_inner()).push(sink);
     }
 
@@ -84,6 +111,11 @@ impl Root {
         let mut bans: Vec<Banned> = self.conn.db.banned().iter().collect();
         bans.sort_by_key(|b| b.banned_us);
         bans
+    }
+
+    /// The names players have chosen, by identity.
+    pub fn names(&self) -> Vec<(Identity, String)> {
+        self.conn.db.known_identity().iter().filter(|k| !k.name.is_empty()).map(|k| (k.identity, k.name)).collect()
     }
 
     /// The identities that have said they are here (`register`).
@@ -140,7 +172,7 @@ impl Root {
     }
 }
 
-fn send(sinks: &Sinks, change: BanChange) {
+fn send(sinks: &Sinks, change: RootChange) {
     // a sink whose receiver is gone is dropped
     sinks.lock().unwrap_or_else(|p| p.into_inner()).retain(|sink| sink.send(change.clone()).is_ok());
 }

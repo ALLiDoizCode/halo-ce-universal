@@ -37,6 +37,8 @@ pub struct MatchSpec<'a> {
     pub bind: SocketAddr,
     /// The bans in force, which the match starts with.
     pub bans: Vec<(Identity, String)>,
+    /// The names players have chosen, which its roster shows.
+    pub names: Vec<(Identity, String)>,
 }
 
 pub struct RunningMatch {
@@ -100,6 +102,9 @@ impl RunningMatch {
         for (identity, reason) in &spec.bans {
             client.set_ban(*identity, reason)?;
         }
+        for (identity, name) in &spec.names {
+            client.set_name(*identity, name)?;
+        }
         client.start_and_wait()?;
 
         let mut config = GatewayConfig::new(env.uri.as_str(), spec.database.as_str());
@@ -146,6 +151,10 @@ impl RunningMatch {
 
     pub fn clear_ban(&self, identity: Identity) -> Result<(), String> {
         self.client.clear_ban(identity)
+    }
+
+    pub fn set_name(&self, identity: Identity, name: &str) -> Result<(), String> {
+        self.client.set_name(identity, name)
     }
 
     /// What happened since the last report: tick time from the server's

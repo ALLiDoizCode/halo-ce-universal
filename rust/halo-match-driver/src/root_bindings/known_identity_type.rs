@@ -8,6 +8,7 @@ use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 #[sats(crate = __lib)]
 pub struct KnownIdentity {
     pub identity: __sdk::Identity,
+    pub name: String,
     pub first_seen_us: i64,
     pub last_seen_us: i64,
 }
@@ -21,6 +22,7 @@ impl __sdk::InModule for KnownIdentity {
 /// Provides typed access to columns for query building.
 pub struct KnownIdentityCols {
     pub identity: __sdk::__query_builder::Col<KnownIdentity, __sdk::Identity>,
+    pub name: __sdk::__query_builder::Col<KnownIdentity, String>,
     pub first_seen_us: __sdk::__query_builder::Col<KnownIdentity, i64>,
     pub last_seen_us: __sdk::__query_builder::Col<KnownIdentity, i64>,
 }
@@ -30,6 +32,7 @@ impl __sdk::__query_builder::HasCols for KnownIdentity {
     fn cols(table_name: &'static str) -> Self::Cols {
         KnownIdentityCols {
             identity: __sdk::__query_builder::Col::new(table_name, "identity"),
+            name: __sdk::__query_builder::Col::new(table_name, "name"),
             first_seen_us: __sdk::__query_builder::Col::new(table_name, "first_seen_us"),
             last_seen_us: __sdk::__query_builder::Col::new(table_name, "last_seen_us"),
         }

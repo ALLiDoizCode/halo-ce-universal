@@ -111,7 +111,7 @@ pub fn start(config: Config, maps: Arc<dyn MapSource>, log: Log) -> Result<Runni
     let mut threads = Vec::new();
     for server in config.servers {
         let (tx, rx) = mpsc::channel();
-        shared.root.watch_bans(tx);
+        shared.root.watch_changes(tx);
         let run = ServerRun::new(shared.clone(), server.clone(), rx);
         let handle = std::thread::Builder::new()
             .name(format!("server-{}", server.id))

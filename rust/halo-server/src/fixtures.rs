@@ -6,9 +6,11 @@ use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use halo_match_driver::root_bindings::{register, DbConnection};
 use halo_match_driver::server::{build_module, build_root_module};
 use halo_sim::fixtures::flat_floor_map;
 use halo_sim::PlayerInput;
+use spacetimedb_sdk::DbContext;
 
 use crate::config::Config;
 use crate::maps::{LoadedMap, MapSource};
@@ -98,4 +100,26 @@ handover_secs = 1
         ));
     }
     Config::parse(&text, dir).expect("a valid configuration")
+}
+
+/// A player's first word to the server list: `register` at the root database
+/// `halo-root` on `url`, as the identity of `token`, under `name`. The module's
+/// answer (an error is the refusal of a banned identity).
+pub fn register_at_root(url: &str, token: &str, name: &str) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let conn = DbConnection::builder()
+        .with_uri(url)
+        .with_database_name("halo-root")
+        .with_token(Some(token.to_string()))
+        .build()
+        .map_err(|e| e.to_string())?;
+    conn.run_threaded();
+    conn.reducers
+        .register_then(name.to_string(), move |_, result| {
+            let _ = tx.send(result);
+        })
+        .map_err(|e| e.to_string())?;
+    let answer = rx.recv_timeout(std::time::Duration::from_secs(20)).map_err(|_| "no answer".to_string())?;
+    let _ = conn.disconnect();
+    answer.map_err(|e| e.to_string())?
 }

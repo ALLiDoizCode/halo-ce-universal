@@ -180,6 +180,11 @@ impl MatchClient {
         call_reducer("clear_ban", |cb| self.conn.reducers.clear_ban_then(identity, cb))
     }
 
+    /// The name an identity plays under, which the roster shows for its player.
+    pub fn set_name(&self, identity: spacetimedb_sdk::Identity, name: &str) -> Result<(), String> {
+        call_reducer("set_name", |cb| self.conn.reducers.set_name_then(identity, name.to_string(), cb))
+    }
+
     /// Name the identity that runs the gateway.
     pub fn set_gateway(&self, gateway: spacetimedb_sdk::Identity) -> Result<(), String> {
         call_reducer("set_gateway", |cb| self.conn.reducers.set_gateway_then(gateway, cb))

@@ -79,6 +79,8 @@ pub struct Server {
 pub struct KnownIdentity {
     #[primary_key]
     pub identity: Identity,
+    /// The name they play under (see [`clean_name`]); empty for none.
+    pub name: String,
     pub first_seen_us: i64,
     pub last_seen_us: i64,
 }
@@ -116,23 +118,41 @@ pub fn init(ctx: &ReducerContext) {
     ctx.db.root_config().insert(RootConfig { id: ONLY, owner: ctx.sender() });
 }
 
-/// Say that the caller is here: their identity is known from now on, which is
-/// how a player's identity shows in the list of who has played. Refused, with
-/// the reason, if the identity is banned.
+/// Longest name a player has: the engine's name field.
+pub const MAX_NAME: usize = 11;
+
+/// A name as the game shows it: letters, digits, spaces and `_ . -` only, the
+/// first [`MAX_NAME`] of them, trimmed; empty for nothing. (The match module
+/// cleans a name the same way.)
+pub fn clean_name(name: &str) -> String {
+    let kept: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '.' | '-'))
+        .take(MAX_NAME)
+        .collect();
+    kept.trim().to_string()
+}
+
+/// Say that the caller is here, under this name (which may be empty): their
+/// identity is known from now on, which is how a player's identity and name
+/// show in the list of who has played, and the orchestration carries the name
+/// to the matches' rosters. Refused, with the reason, if the identity is banned.
 #[reducer]
-pub fn register(ctx: &ReducerContext) -> Result<(), String> {
+pub fn register(ctx: &ReducerContext, name: String) -> Result<(), String> {
     let me = ctx.sender();
     if let Some(ban) = ctx.db.banned().identity().find(me) {
         return Err(format!("{BANNED_PREFIX}{}", ban.reason));
     }
+    let name = clean_name(&name);
     let now = now_us(ctx);
     match ctx.db.known_identity().identity().find(me) {
         Some(mut known) => {
             known.last_seen_us = now;
+            known.name = name;
             ctx.db.known_identity().identity().update(known);
         }
         None => {
-            ctx.db.known_identity().insert(KnownIdentity { identity: me, first_seen_us: now, last_seen_us: now });
+            ctx.db.known_identity().insert(KnownIdentity { identity: me, name, first_seen_us: now, last_seen_us: now });
         }
     }
     Ok(())

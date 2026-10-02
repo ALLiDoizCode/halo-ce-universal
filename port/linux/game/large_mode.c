@@ -62,7 +62,8 @@ command), in the main menu or in a game:
 On a server the game follows its rotation: when the list names another match
 for it, the game goes back to the lobby and joins that one. A server that
 bans the player, or is full, says so on the console. The identity is kept in
-the save root (u/large_identity), one file for each SpacetimeDB.
+the save root (u/large_identity), one file for each SpacetimeDB, and the name
+the player chose (large.name) goes with it to every server's roster.
 
 Without HALO_LARGE_MODE (the Android build, or a desktop build made without
 the library) the mode is not there: large_mode_active() is FALSE.
@@ -112,6 +113,7 @@ unsigned long halo_large_bounds(float *out);
 void halo_large_send_input(float x, float y, float z, float yaw, float pitch);
 unsigned long halo_large_error(char *buffer, unsigned long size);
 void halo_large_identity_dir(const char *folder);
+void halo_large_set_name(const char *name);
 unsigned long halo_large_browse_start(const char *spacetimedb, const char *database);
 void halo_large_browse_stop(void);
 unsigned long halo_large_browse_status(unsigned long *out);
@@ -875,6 +877,7 @@ static void large_mode_browse_start(
 		return;
 	snprintf(folder, sizeof(folder), "%s/u/large_identity", platform_save_root());
 	halo_large_identity_dir(folder);
+	halo_large_set_name(config_string("large.name"));
 	large.browsing = halo_large_browse_start(large.spacetimedb, large.root) != 0;
 	if (!large.browsing)
 		large_mode_log_error();

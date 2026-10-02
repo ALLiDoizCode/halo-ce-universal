@@ -404,6 +404,39 @@ fn a_banned_identity_is_turned_away_with_the_reason_and_a_ban_takes_a_seated_pla
 }
 
 #[test]
+fn the_name_an_identity_chose_is_on_the_roster_whenever_it_holds_a_seat() {
+    let Some((server, owner)) = seated_match("names") else { return };
+    let account = server.new_account();
+    let other = server.new_account();
+    let player = PlayerClient::connect(&server.uri(), "names", &account.token);
+    let stranger = MatchClient::connect(&server.uri(), "names");
+
+    // only the owner names; a name chosen before the seat is the seat's
+    is_refused(stranger.set_name(account.identity(), "Mallory"), "owner");
+    owner.set_name(account.identity(), "Alice").unwrap();
+    player.join(KEY_A).unwrap();
+    wait_until("the roster", || owner.roster().len() == 1);
+    assert_eq!(owner.roster()[&0].name, "Alice");
+
+    // a name chosen while seated replaces the placeholder at once, cleaned for the engine's field
+    owner.set_name(account.identity(), "Bob.Smith-99!! the Great").unwrap();
+    wait_until("the new name", || owner.roster()[&0].name == "Bob.Smith-9");
+    // another identity's name does not touch this seat
+    owner.set_name(other.identity(), "Carol").unwrap();
+    assert_eq!(owner.roster()[&0].name, "Bob.Smith-9");
+
+    // with none (or nothing the game can show) the player is "Player <number>" again
+    owner.set_name(account.identity(), "!!!").unwrap();
+    wait_until("the placeholder", || owner.roster()[&0].name == "Player 0");
+
+    // a seat taken later gets the name already chosen
+    let late = PlayerClient::connect(&server.uri(), "names", &other.token);
+    late.join(KEY_B).unwrap();
+    wait_until("the second player", || owner.roster().len() == 2);
+    assert_eq!(owner.roster()[&1].name, "Carol");
+}
+
+#[test]
 fn a_full_match_says_it_is_full_and_how_many_it_holds() {
     let Some((server, owner)) = seated_match("fullmsg") else { return };
     owner.set_capacity(1).unwrap();

@@ -34,6 +34,8 @@ struct Global {
     error: String,
     /// Where identities are kept ([`halo_large_identity_dir`]).
     identity_dir: Option<PathBuf>,
+    /// The name the player plays under ([`halo_large_set_name`]).
+    name: String,
     /// The server list's connection, and the list as [`halo_large_browse_list`] froze it.
     browser: Option<Browser>,
     servers: Vec<ServerEntry>,
@@ -44,6 +46,7 @@ static GLOBAL: Mutex<Global> = Mutex::new(Global {
     frame: Vec::new(),
     error: String::new(),
     identity_dir: None,
+    name: String::new(),
     browser: None,
     servers: Vec::new(),
 });
@@ -365,6 +368,20 @@ pub unsafe extern "C" fn halo_large_identity_dir(folder: *const c_char) {
     })
 }
 
+/// The name the player plays under, which the server list is told when
+/// [`halo_large_browse_start`] connects and which the matches show on their
+/// rosters (letters, digits, spaces and `_ . -`, the first 11 of them; empty for
+/// none). Set it before [`halo_large_browse_start`].
+///
+/// # Safety
+/// `name` is NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_set_name(name: *const c_char) {
+    guard((), || {
+        global().name = unsafe { string(name) }.unwrap_or_default();
+    })
+}
+
 /// Start listing the servers of the root database `database` on the
 /// SpacetimeDB at `spacetimedb` (a URI), as the player's own identity. Returns
 /// 1 when listing has started, which is not yet having the list (see
@@ -380,14 +397,14 @@ pub unsafe extern "C" fn halo_large_browse_start(spacetimedb: *const c_char, dat
             global().error = "a null string".into();
             return 0;
         };
-        let (old, identity) = {
+        let (old, identity, name) = {
             let mut g = global();
             g.servers.clear();
             g.error.clear();
-            (g.browser.take(), IdentityFile::new(g.identity_dir.as_deref(), &spacetimedb))
+            (g.browser.take(), IdentityFile::new(g.identity_dir.as_deref(), &spacetimedb), g.name.clone())
         };
         drop(old);
-        match Browser::start(&spacetimedb, &database, identity) {
+        match Browser::start(&spacetimedb, &database, identity, &name) {
             Ok(browser) => {
                 global().browser = Some(browser);
                 1

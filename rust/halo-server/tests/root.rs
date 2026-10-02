@@ -6,12 +6,12 @@
 
 use std::time::{Duration, Instant};
 
-use halo_match_driver::root_bindings::{register, DbConnection, Server as ServerRow};
+use halo_match_driver::root_bindings::Server as ServerRow;
 use halo_match_driver::server::{stdb_bin_dir, Server as Stdb};
 use halo_server::admin::Admin;
-use halo_server::fixtures::modules;
+use halo_server::fixtures::{modules, register_at_root};
 use halo_server::root::Root;
-use spacetimedb_sdk::{DbContext, Identity};
+use spacetimedb_sdk::Identity;
 
 fn wait_for(what: &str, mut check: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -37,26 +37,6 @@ fn row(id: &str, database: &str) -> ServerRow {
         match_started_us: 0,
         updated_us: 0,
     }
-}
-
-/// `register` as the connection's identity, and the module's answer.
-fn register_as(stdb: &Stdb, token: &str) -> Result<(), String> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let conn = DbConnection::builder()
-        .with_uri(stdb.uri())
-        .with_database_name("halo-root")
-        .with_token(Some(token.to_string()))
-        .build()
-        .expect("connect");
-    conn.run_threaded();
-    conn.reducers
-        .register_then(move |_, result| {
-            let _ = tx.send(result);
-        })
-        .unwrap();
-    let answer = rx.recv_timeout(Duration::from_secs(20)).expect("an answer").map_err(|e| e.to_string())?;
-    let _ = conn.disconnect();
-    answer
 }
 
 #[test]
@@ -95,16 +75,19 @@ fn only_the_owner_writes_the_list_and_the_bans_and_a_banned_identity_cannot_regi
     assert!(stranger.unban(identity).unwrap_err().contains("owner"));
 
     // registering makes an identity known, and a ban turns it away with the reason
-    register_as(&stdb, &stranger_account.token).unwrap();
+    register_at_root(&stdb.uri(), &stranger_account.token, "Alice <b>Smith</b> the Third").unwrap();
     wait_for("the identity to be known", || owner.known_identities().contains(&identity));
+    // (a name is what the game can show: letters, digits, spaces and _ . -, at most 11)
+    assert_eq!(owner.names(), [(identity, "Alice bSmit".to_string())]);
     owner.ban(identity, "abusive chat").unwrap();
-    let refused = register_as(&stdb, &stranger_account.token).unwrap_err();
+    let refused = register_at_root(&stdb.uri(), &stranger_account.token, "").unwrap_err();
     assert!(refused.contains("banned: abusive chat"), "told: {refused}");
     wait_for("the ban to be seen", || stranger.bans().iter().any(|b| b.identity == identity));
     // a ban's reason can be changed, and it goes when lifted
     owner.ban(identity, "abusive chat, again").unwrap();
-    assert!(register_as(&stdb, &stranger_account.token).unwrap_err().contains("abusive chat, again"));
+    assert!(register_at_root(&stdb.uri(), &stranger_account.token, "").unwrap_err().contains("abusive chat, again"));
     owner.unban(identity).unwrap();
-    register_as(&stdb, &stranger_account.token).unwrap();
+    register_at_root(&stdb.uri(), &stranger_account.token, "Alice").unwrap();
+    wait_for("the new name", || owner.names() == [(identity, "Alice".to_string())]);
     wait_for("the ban to be gone", || owner.bans().is_empty());
 }

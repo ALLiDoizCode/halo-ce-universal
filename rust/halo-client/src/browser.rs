@@ -75,6 +75,8 @@ struct Inner {
     spacetimedb: String,
     database: String,
     identity: IdentityFile,
+    /// The name the player plays under, which the root database is told.
+    name: String,
     token: Mutex<Option<String>>,
     state: Mutex<State>,
     stop: AtomicBool,
@@ -94,12 +96,13 @@ pub struct Browser {
 impl Browser {
     /// Start listing the servers of the root database `database` on the
     /// SpacetimeDB at `spacetimedb`; returns at once, whether or not it is reachable.
-    pub fn start(spacetimedb: &str, database: &str, identity: IdentityFile) -> Result<Browser, String> {
+    pub fn start(spacetimedb: &str, database: &str, identity: IdentityFile, name: &str) -> Result<Browser, String> {
         let token = identity.load();
         let inner = Arc::new(Inner {
             spacetimedb: spacetimedb.to_string(),
             database: database.to_string(),
             identity,
+            name: name.to_string(),
             token: Mutex::new(token),
             state: Mutex::new(State::default()),
             stop: AtomicBool::new(false),
@@ -203,7 +206,7 @@ fn connect(inner: &Arc<Inner>) -> Result<DbConnection, String> {
                 .subscribe(["SELECT * FROM server"]);
             // say who is here: the root database turns a banned identity away
             let told = connected.clone();
-            let _ = connection.reducers.register_then(move |_, result| match result {
+            let _ = connection.reducers.register_then(connected.name.clone(), move |_, result| match result {
                 Ok(Ok(())) => told.state().banned = None,
                 Ok(Err(message)) => {
                     let refusal = Refusal::from_join_error(&message);

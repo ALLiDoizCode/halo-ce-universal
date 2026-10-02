@@ -20,6 +20,7 @@ pub mod match_config_type;
 pub mod match_state_type;
 pub mod match_tick_table;
 pub mod match_tick_type;
+pub mod member_name_type;
 pub mod player_row_type;
 pub mod player_table;
 pub mod remove_players_reducer;
@@ -32,6 +33,7 @@ pub mod set_away_grace_reducer;
 pub mod set_ban_reducer;
 pub mod set_capacity_reducer;
 pub mod set_gateway_reducer;
+pub mod set_name_reducer;
 pub mod set_spawn_points_reducer;
 pub mod spawn_point_type;
 pub mod start_reducer;
@@ -53,6 +55,7 @@ pub use match_config_type::MatchConfig;
 pub use match_state_type::MatchState;
 pub use match_tick_table::*;
 pub use match_tick_type::MatchTick;
+pub use member_name_type::MemberName;
 pub use player_row_type::PlayerRow;
 pub use player_table::*;
 pub use remove_players_reducer::remove_players;
@@ -65,6 +68,7 @@ pub use set_away_grace_reducer::set_away_grace;
 pub use set_ban_reducer::set_ban;
 pub use set_capacity_reducer::set_capacity;
 pub use set_gateway_reducer::set_gateway;
+pub use set_name_reducer::set_name;
 pub use set_spawn_points_reducer::set_spawn_points;
 pub use spawn_point_type::SpawnPoint;
 pub use start_reducer::start;
@@ -91,6 +95,7 @@ pub enum Reducer {
     SetBan { identity: __sdk::Identity, reason: String },
     SetCapacity { capacity: u16 },
     SetGateway { gateway: __sdk::Identity },
+    SetName { identity: __sdk::Identity, name: String },
     SetSpawnPoints { batch: Vec<u8> },
     Start,
     Stop,
@@ -115,6 +120,7 @@ impl __sdk::Reducer for Reducer {
             Reducer::SetBan { .. } => "set_ban",
             Reducer::SetCapacity { .. } => "set_capacity",
             Reducer::SetGateway { .. } => "set_gateway",
+            Reducer::SetName { .. } => "set_name",
             Reducer::SetSpawnPoints { .. } => "set_spawn_points",
             Reducer::Start => "start",
             Reducer::Stop => "stop",
@@ -150,6 +156,9 @@ impl __sdk::Reducer for Reducer {
             }
             Reducer::SetGateway { gateway } => {
                 __sats::bsatn::to_vec(&set_gateway_reducer::SetGatewayArgs { gateway: gateway.clone() })
+            }
+            Reducer::SetName { identity, name } => {
+                __sats::bsatn::to_vec(&set_name_reducer::SetNameArgs { identity: identity.clone(), name: name.clone() })
             }
             Reducer::SetSpawnPoints { batch } => {
                 __sats::bsatn::to_vec(&set_spawn_points_reducer::SetSpawnPointsArgs { batch: batch.clone() })

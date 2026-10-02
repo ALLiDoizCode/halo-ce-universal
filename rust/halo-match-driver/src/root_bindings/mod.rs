@@ -46,7 +46,7 @@ pub use unban_identity_reducer::unban_identity;
 pub enum Reducer {
     BanIdentity { identity: __sdk::Identity, reason: String },
     ClearServers,
-    Register,
+    Register { name: String },
     RemoveServer { id: String },
     SetServer { row: Server },
     SetServerPlayers { id: String, players: u32 },
@@ -62,7 +62,7 @@ impl __sdk::Reducer for Reducer {
         match self {
             Reducer::BanIdentity { .. } => "ban_identity",
             Reducer::ClearServers => "clear_servers",
-            Reducer::Register => "register",
+            Reducer::Register { .. } => "register",
             Reducer::RemoveServer { .. } => "remove_server",
             Reducer::SetServer { .. } => "set_server",
             Reducer::SetServerPlayers { .. } => "set_server_players",
@@ -80,7 +80,7 @@ impl __sdk::Reducer for Reducer {
                 })
             }
             Reducer::ClearServers => __sats::bsatn::to_vec(&clear_servers_reducer::ClearServersArgs {}),
-            Reducer::Register => __sats::bsatn::to_vec(&register_reducer::RegisterArgs {}),
+            Reducer::Register { name } => __sats::bsatn::to_vec(&register_reducer::RegisterArgs { name: name.clone() }),
             Reducer::RemoveServer { id } => {
                 __sats::bsatn::to_vec(&remove_server_reducer::RemoveServerArgs { id: id.clone() })
             }

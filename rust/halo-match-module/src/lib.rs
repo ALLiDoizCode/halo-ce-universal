@@ -212,6 +212,16 @@ pub struct Ban {
     reason: String,
 }
 
+/// A name an identity has chosen (the root database's), for the roster to
+/// show over its player. Private; the orchestration keeps it in step with the
+/// root database's `known_identity`, as it does the bans.
+#[table(accessor = member_name)]
+pub struct MemberName {
+    #[primary_key]
+    identity: Identity,
+    name: String,
+}
+
 /// Who runs the match. Private.
 #[table(accessor = match_config)]
 pub struct MatchConfig {
@@ -317,9 +327,24 @@ fn to_player(row: &PlayerRow) -> Player {
     Player { id: row.id, position: [row.x, row.y, row.z], yaw: row.yaw, pitch: row.pitch }
 }
 
-/// Put `id` on the roster, on the team with fewer players, with a name until
-/// the player has one of their own.
-fn add_to_roster(ctx: &ReducerContext, id: u16) {
+/// Longest name a player has: the engine's name field.
+pub const MAX_NAME: usize = 11;
+
+/// A name as the roster shows it: letters, digits, spaces and `_ . -` only,
+/// the first [`MAX_NAME`] of them, trimmed; `None` for nothing.
+pub fn clean_name(name: &str) -> Option<String> {
+    let kept: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '.' | '-'))
+        .take(MAX_NAME)
+        .collect();
+    let kept = kept.trim().to_string();
+    (!kept.is_empty()).then_some(kept)
+}
+
+/// Put `id` on the roster, on the team with fewer players, with the name its
+/// identity has chosen, or a placeholder until the player has one of their own.
+fn add_to_roster(ctx: &ReducerContext, id: u16, identity: Option<Identity>) {
     if ctx.db.roster().player().find(id).is_some() {
         return;
     }
@@ -328,7 +353,8 @@ fn add_to_roster(ctx: &ReducerContext, id: u16) {
         counts[(row.team % TEAMS) as usize] += 1;
     }
     let team = if counts[1] < counts[0] { 1 } else { 0 };
-    ctx.db.roster().insert(RosterRow { player: id, team, name: format!("Player {id}") });
+    let name = identity.and_then(|i| ctx.db.member_name().identity().find(i)).map(|m| m.name);
+    ctx.db.roster().insert(RosterRow { player: id, team, name: name.unwrap_or_else(|| format!("Player {id}")) });
 }
 
 /// `halo_sim::Store` over the `player` table. Position writes keep the
@@ -451,7 +477,7 @@ pub fn add_players(ctx: &ReducerContext, batch: Vec<u8>) -> Result<(), String> {
         }
     }
     for p in players {
-        add_to_roster(ctx, p.player);
+        add_to_roster(ctx, p.player, None);
         ctx.db.player().insert(PlayerRow {
             id: p.player,
             x: p.position[0],
@@ -527,7 +553,7 @@ pub fn join(ctx: &ReducerContext, udp_key: Vec<u8>) -> Result<(), String> {
         last_reject: REJECT_NONE,
         last_reject_tick: 0,
     });
-    add_to_roster(ctx, id);
+    add_to_roster(ctx, id, Some(ctx.sender()));
     ctx.db.seat().insert(Seat {
         player: id,
         owner: ctx.sender(),
@@ -573,6 +599,35 @@ pub fn set_ban(ctx: &ReducerContext, identity: Identity, reason: String) -> Resu
     }
     if let Some(seat) = ctx.db.seat().owner().find(identity) {
         remove_player(ctx, seat.player);
+    }
+    Ok(())
+}
+
+/// The name an identity plays under (`clean_name` of it; none, or nothing left
+/// of it, forgets the name): shown on the roster for its player now, if it has
+/// a seat, and whenever it takes one.
+#[reducer]
+pub fn set_name(ctx: &ReducerContext, identity: Identity, name: String) -> Result<(), String> {
+    require_owner(ctx)?;
+    let cleaned = clean_name(&name);
+    match &cleaned {
+        Some(name) => {
+            let row = MemberName { identity, name: name.clone() };
+            if ctx.db.member_name().identity().find(identity).is_some() {
+                ctx.db.member_name().identity().update(row);
+            } else {
+                ctx.db.member_name().insert(row);
+            }
+        }
+        None => {
+            ctx.db.member_name().identity().delete(identity);
+        }
+    }
+    if let Some(seat) = ctx.db.seat().owner().find(identity) {
+        if let Some(mut row) = ctx.db.roster().player().find(seat.player) {
+            row.name = cleaned.unwrap_or_else(|| format!("Player {}", seat.player));
+            ctx.db.roster().player().update(row);
+        }
     }
     Ok(())
 }

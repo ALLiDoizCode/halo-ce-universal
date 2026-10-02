@@ -147,6 +147,7 @@ fn a_player_lists_servers_in_the_game_joins_one_follows_its_rotation_and_is_bann
             .env("HALO_LARGE_ROOT", "halo-root")
             .env("HALO_LARGE_SPACETIMEDB", stdb.uri())
             .env("HALO_LARGE_LOG", "1")
+            .env("HALO_LARGE_NAME", "Tester")
             .env("HALO_TELNET_CONSOLE", "1")
             .env("HALO_TELNET_CONSOLE_PORT", telnet.to_string())
             .env("HALO_NET_ONLINE", "0")
@@ -188,8 +189,11 @@ fn a_player_lists_servers_in_the_game_joins_one_follows_its_rotation_and_is_bann
     assert!(log.contains("large mode: joining lounge (bloodgulch)"), "the game joined the lounge's first match");
     let watch = |database: &str| MatchClient::connect_as(&stdb.uri(), database, Some(&stdb.owner().token));
     let first = running.root().servers().into_iter().find(|s| s.id == "lounge").unwrap();
-    let seats = watch(&first.database).seats();
+    let first_match = watch(&first.database);
+    let seats = first_match.seats();
     assert_eq!(seats.len(), 1);
+    let names: Vec<String> = first_match.roster().values().map(|r| r.name.clone()).collect();
+    assert_eq!(names, ["Tester"], "the name the player chose is on the roster");
     assert_eq!(seats.values().next().unwrap().owner.to_hex().to_string(), me, "the seat is the player's identity");
     let listed = console.say("servers");
     assert!(

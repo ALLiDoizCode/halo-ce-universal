@@ -255,6 +255,30 @@ fn the_player_is_the_same_identity_on_every_server_and_in_every_session_because_
 }
 
 #[test]
+fn the_name_the_player_chose_follows_their_identity_to_every_roster() {
+    let _serial = serial();
+    let Some(world) = World::start("name", &[("lounge", LOUNGE), ("arena", ARENA)]) else { return };
+    let name = cstring("Alice <3 Halo");
+    unsafe { halo_large_set_name(name.as_ptr() as *const c_char) };
+    browse(&world);
+    list(2);
+    let me = Identity::from_hex(wait_for("the identity", || Some(identity()).filter(|i| !i.is_empty()))).unwrap();
+    // the root database knows the identity under a name the game can show
+    wait_for("the name at the root", || (world.root().names() == [(me, "Alice 3 Hal".to_string())]).then_some(()));
+
+    // on one server and then the other, the roster shows it
+    for server in ["lounge", "arena"] {
+        halo_large_stop();
+        join(&world, find(server));
+        wait_for("the welcome", || (status().0 == 1).then_some(()));
+        let watcher = MatchClient::connect_as(&world.uri(), &text(find(server), 5), Some(&world.stdb.owner().token));
+        wait_for("the name on the roster", || {
+            (watcher.roster().values().map(|r| r.name.clone()).collect::<Vec<_>>() == ["Alice 3 Hal"]).then_some(())
+        });
+    }
+}
+
+#[test]
 fn a_banned_player_is_told_why_while_playing_and_when_they_look_at_the_list_again() {
     let _serial = serial();
     let Some(world) = World::start("ban", &[("lounge", LOUNGE)]) else { return };
@@ -293,8 +317,21 @@ fn a_banned_player_is_told_why_while_playing_and_when_they_look_at_the_list_agai
     halo_large_browse_stop();
     browse(&world);
     list(1);
-    join(&world, find("lounge"));
-    wait_for("the welcome after the ban was lifted", || (status().0 == 1).then_some(()));
+    // (the lifted ban reaches the match through the orchestration a moment after the root; a join
+    // that came before it is refused, and a banned player's client does not ask again by itself)
+    let deadline = Instant::now() + WAIT;
+    loop {
+        join(&world, find("lounge"));
+        let tried = Instant::now();
+        while status().0 != 1 && refusal().0 == 0 && tried.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        if status().0 == 1 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "never welcomed after the ban was lifted; refusal {:?}", refusal());
+        std::thread::sleep(Duration::from_millis(200));
+    }
     assert_eq!(refusal().0, 0);
 }
 

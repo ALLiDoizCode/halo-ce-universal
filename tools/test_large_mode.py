@@ -77,7 +77,7 @@ def test_the_library_passes_only_floats_32_bit_integers_and_pointers():
             "halo_large_identity_dir", "halo_large_browse_start", "halo_large_browse_stop",
             "halo_large_browse_status", "halo_large_browse_list", "halo_large_browse_entry",
             "halo_large_browse_text", "halo_large_browse_find", "halo_large_browse_message",
-            "halo_large_identity", "halo_large_refusal", "halo_large_member"} <= set(functions)
+            "halo_large_identity", "halo_large_refusal", "halo_large_set_name", "halo_large_member"} <= set(functions)
     for name, (parameters, result) in functions.items():
         # (rust_c_type refused anything else already) nothing comes back but a 32-bit integer
         assert result in ("void", "unsignedlong"), f"{name} returns {result}"
