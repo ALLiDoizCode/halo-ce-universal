@@ -14,14 +14,16 @@
 //! [`parity_output`] for a host to call; the test in `tests/` does so.
 
 use halo_sim::fixtures::{flat_floor_map, FLOOR_HALF_SIZE};
-use halo_sim::{snapshot, step, Event, MemoryStore, Player, PlayerInput, RejectReason, Rng, Store, MAX_MOVE_SPEED};
+use halo_sim::{snapshot, step, Event, MemoryStore, Player, PlayerInput, RejectReason, Rng, Store};
 
 pub const PLAYERS: u16 = 24;
 
 /// Accepted, then each [`RejectReason`] in declaration order.
 const EVENT_KINDS: usize = 7;
 
-const MAX_STEP: f32 = MAX_MOVE_SPEED / halo_sim::TICKS_PER_SECOND as f32;
+fn max_step() -> f32 {
+    flat_floor_map().max_move_speed() / halo_sim::TICKS_PER_SECOND as f32
+}
 
 struct Fnv(u64);
 
@@ -73,12 +75,12 @@ pub fn run(seed: u64, ticks: u32) -> Vec<u8> {
             let kind = rng.next_u32() % 100;
             let mut to = p;
             let walk = |rng: &mut Rng, to: &mut [f32; 3]| {
-                to[0] += signed(rng) * MAX_STEP * 1.2;
-                to[1] += signed(rng) * MAX_STEP * 1.2;
+                to[0] += signed(rng) * max_step() * 1.2;
+                to[1] += signed(rng) * max_step() * 1.2;
             };
             match kind {
                 0..=77 => walk(&mut rng, &mut to),
-                78..=84 => to[0] += MAX_STEP * (1.5 + rng.next_f32()),
+                78..=84 => to[0] += max_step() * (1.5 + rng.next_f32()),
                 85..=89 => {
                     walk(&mut rng, &mut to);
                     to[2] = -0.1 * rng.next_f32();

@@ -11,6 +11,7 @@ use std::path::Path;
 
 use crate::collision::{Bsp2dNode, Bsp2dReference, Bsp3dNode, CollisionBsp, Edge, Leaf, Plane3d, Surface, Vertex};
 use crate::error::{malformed, MapError, Result};
+use crate::movement::Movement;
 use crate::reader::{Raw, Space};
 
 /// physical_memory_map.c: TAG_CACHE_BASE_ADDRESS, where tag data is loaded
@@ -28,6 +29,37 @@ const SCN_PLAYERS: usize = 0x354;
 const SCN_NETGAME_FLAGS: usize = 0x378;
 const SCN_NETGAME_EQUIPMENT: usize = 0x384;
 const SCN_STRUCTURE_BSP_REFERENCES: usize = 0x5A4;
+
+// struct game_globals (0x1AC bytes), the tag of group 'matg'
+const GLOBALS_SIZE: usize = 0x1AC;
+const GLOBALS_MULTIPLAYER_INFORMATION: usize = 0x164;
+const GLOBALS_PLAYER_INFORMATION: usize = 0x170;
+const SZ_MULTIPLAYER_INFORMATION: usize = 0xA0;
+const SZ_PLAYER_INFORMATION: usize = 0xF4;
+/// game_globals_multiplayer_information: the player's unit, a tag reference
+const MPI_UNIT: usize = 0x10;
+// game_globals_player_information
+const PI_RUN_FORWARD_SPEED: usize = 0x34;
+const PI_RUN_BACKWARD_SPEED: usize = 0x38;
+const PI_RUN_SIDEWAYS_SPEED: usize = 0x3C;
+const PI_RUN_ACCELERATION: usize = 0x40;
+const PI_SNEAK_FORWARD_SPEED: usize = 0x44;
+const PI_SNEAK_BACKWARD_SPEED: usize = 0x48;
+const PI_SNEAK_SIDEWAYS_SPEED: usize = 0x4C;
+const PI_SNEAK_ACCELERATION: usize = 0x50;
+const PI_AIRBORNE_ACCELERATION: usize = 0x54;
+// struct biped_definition (0x4F4 bytes), whose biped part starts at 0x2F0
+const BIPED_SIZE: usize = 0x4F4;
+const BIPED_DOWNHILL_VELOCITY_SCALE: usize = 0x2F0 + 0x74;
+const BIPED_UPHILL_VELOCITY_SCALE: usize = 0x2F0 + 0x80;
+const BIPED_COLLISION_HEIGHT_STANDING: usize = 0x2F0 + 0x134;
+const BIPED_COLLISION_HEIGHT_CROUCHING: usize = 0x2F0 + 0x138;
+const BIPED_COLLISION_RADIUS: usize = 0x2F0 + 0x13C;
+const BIPED_RUNTIME_MINIMUM_NORMAL_K: usize = 0x2F0 + 0x1E0;
+const BIPED_RUNTIME_DOWNHILL_K0: usize = 0x2F0 + 0x1E4;
+const BIPED_RUNTIME_DOWNHILL_K1: usize = 0x2F0 + 0x1E8;
+const BIPED_RUNTIME_UPHILL_K0: usize = 0x2F0 + 0x1EC;
+const BIPED_RUNTIME_UPHILL_K1: usize = 0x2F0 + 0x1F0;
 
 // element sizes
 const SZ_PLAYER_START: usize = 0x34;
@@ -159,6 +191,8 @@ pub struct HaloMap {
     /// `x0, x1, y0, y1, z0, z1` in world units.
     pub world_bounds: [f32; 6],
     pub collision: CollisionBsp,
+    /// What the tags say of how a player moves on foot.
+    pub movement: Movement,
     /// How many collision materials the structure BSP has.
     pub collision_material_count: usize,
     pub player_starts: Vec<PlayerStart>,
@@ -356,6 +390,8 @@ fn parse(data: &[u8], compressed: bool) -> Result<HaloMap> {
         vehicles.push(VehiclePlacement { position: raw.f32s(o + 8)?, rotation: raw.f32s(o + 0x14)?, tag_name });
     }
 
+    let movement = parse_movement(&raw, &tags_space, &tags)?;
+
     // struct scenario_structure_bsp_reference { file_offset, file_size,
     // base_address, pad, tag_reference }; a multiplayer map has one
     let (bsp_refs, bp) = tags_space.block(&raw, scn + SCN_STRUCTURE_BSP_REFERENCES, SZ_BSP_REFERENCE)?;
@@ -398,12 +434,68 @@ fn parse(data: &[u8], compressed: bool) -> Result<HaloMap> {
         structure_bsp_name,
         world_bounds,
         collision,
+        movement,
         collision_material_count,
         player_starts,
         netgame_flags,
         netgame_equipment,
         vehicles,
     })
+}
+
+/// The movement values: the globals tag's player information, and the tag of
+/// the biped a multiplayer player is (the globals' multiplayer information
+/// names it).
+fn parse_movement(raw: &Raw, space: &Space, tags: &[TagInstance]) -> Result<Movement> {
+    let Some(globals) = tags.iter().find(|t| t.group == "matg") else {
+        return malformed("the map has no globals tag");
+    };
+    let g = space.resolve(globals.base_address, GLOBALS_SIZE)?;
+
+    let (n, mpi) = space.block(raw, g + GLOBALS_MULTIPLAYER_INFORMATION, SZ_MULTIPLAYER_INFORMATION)?;
+    if n == 0 {
+        return malformed("the globals tag has no multiplayer information");
+    }
+    // the unit's tag reference: the datum index is its fourth word
+    let unit_index = raw.u32(mpi + MPI_UNIT + 0xC)?;
+    let Some(biped_tag) = tags.get((unit_index & 0xFFFF) as usize).filter(|t| t.tag_index == unit_index) else {
+        return malformed("the multiplayer unit is not a tag of the map");
+    };
+    if biped_tag.group != "bipd" {
+        return malformed(format!("the multiplayer unit has group '{}', not a biped", biped_tag.group));
+    }
+    let b = space.resolve(biped_tag.base_address, BIPED_SIZE)?;
+
+    let (n, pi) = space.block(raw, g + GLOBALS_PLAYER_INFORMATION, SZ_PLAYER_INFORMATION)?;
+    if n == 0 {
+        return malformed("the globals tag has no player information");
+    }
+
+    let movement = Movement {
+        run_forward_speed: raw.f32(pi + PI_RUN_FORWARD_SPEED)?,
+        run_backward_speed: raw.f32(pi + PI_RUN_BACKWARD_SPEED)?,
+        run_sideways_speed: raw.f32(pi + PI_RUN_SIDEWAYS_SPEED)?,
+        run_acceleration: raw.f32(pi + PI_RUN_ACCELERATION)?,
+        sneak_forward_speed: raw.f32(pi + PI_SNEAK_FORWARD_SPEED)?,
+        sneak_backward_speed: raw.f32(pi + PI_SNEAK_BACKWARD_SPEED)?,
+        sneak_sideways_speed: raw.f32(pi + PI_SNEAK_SIDEWAYS_SPEED)?,
+        sneak_acceleration: raw.f32(pi + PI_SNEAK_ACCELERATION)?,
+        airborne_acceleration: raw.f32(pi + PI_AIRBORNE_ACCELERATION)?,
+        collision_radius: raw.f32(b + BIPED_COLLISION_RADIUS)?,
+        collision_height_standing: raw.f32(b + BIPED_COLLISION_HEIGHT_STANDING)?,
+        collision_height_crouching: raw.f32(b + BIPED_COLLISION_HEIGHT_CROUCHING)?,
+        minimum_normal_k: raw.f32(b + BIPED_RUNTIME_MINIMUM_NORMAL_K)?,
+        downhill_k0: raw.f32(b + BIPED_RUNTIME_DOWNHILL_K0)?,
+        downhill_k1: raw.f32(b + BIPED_RUNTIME_DOWNHILL_K1)?,
+        downhill_velocity_scale: raw.f32(b + BIPED_DOWNHILL_VELOCITY_SCALE)?,
+        uphill_k0: raw.f32(b + BIPED_RUNTIME_UPHILL_K0)?,
+        uphill_k1: raw.f32(b + BIPED_RUNTIME_UPHILL_K1)?,
+        uphill_velocity_scale: raw.f32(b + BIPED_UPHILL_VELOCITY_SCALE)?,
+    };
+    if !movement.is_sane() {
+        return malformed(format!("the movement values of the tags are not usable: {movement:?}"));
+    }
+    Ok(movement)
 }
 
 /// struct collision_bsp (0x60): eight tag blocks in the order bsp3d nodes,

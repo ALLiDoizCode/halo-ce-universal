@@ -1,0 +1,20 @@
+# Sliding along a wall: from the same place as walk_wall, the player runs at
+# the wall at an angle (about 29 degrees to it, away from the corner of the
+# room), has to be stopped in x by it and carry on along it in y, at the part
+# of the running speed that is along the wall.
+scenario slide_wall
+map bloodgulch
+# <name> <x> <y> <z> <yaw, radians>: a little above the ground, so that the
+# player settles on it in the first ticks
+start base_wall 98.49 -157.64 1.76 -0.5
+ticks 100
+# settle, then run (the wall is at x = 100.486, facing back along -x)
+input 30 100 forward=1.0
+
+# what the Rust simulation may differ from the C engine by (starting values,
+# to be tuned by the features' tickets as the comparison shows what is
+# reachable); a run of the C engine against itself allows none
+tolerance position 0.25
+tolerance velocity 0.25
+tolerance facing 0.02
+tolerance state 0
