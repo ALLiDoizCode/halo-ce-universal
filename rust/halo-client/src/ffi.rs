@@ -27,7 +27,7 @@ use halo_sim::walk::Controls;
 use crate::browser::{Browser, ServerEntry};
 use crate::identity::IdentityFile;
 use crate::local::Local;
-use crate::session::{Config, RefusalKind, RemoteUnit, Session};
+use crate::session::{Config, LifeState, Member, RefusalKind, RemoteUnit, Session, Standing};
 
 #[derive(Default)]
 struct Global {
@@ -36,6 +36,9 @@ struct Global {
     local: Option<Local>,
     /// What [`halo_large_frame`] froze, for [`halo_large_unit`] to read.
     frame: Vec<RemoteUnit>,
+    /// What [`halo_large_scoreboard_freeze`] froze, best first, for
+    /// [`halo_large_scoreboard_row`] to read.
+    board: Vec<(u16, Standing, Member)>,
     error: String,
     /// Where identities are kept ([`halo_large_identity_dir`]).
     identity_dir: Option<PathBuf>,
@@ -50,6 +53,7 @@ static GLOBAL: Mutex<Global> = Mutex::new(Global {
     session: None,
     local: None,
     frame: Vec::new(),
+    board: Vec::new(),
     error: String::new(),
     identity_dir: None,
     name: String::new(),
@@ -366,6 +370,162 @@ pub unsafe extern "C" fn halo_large_bounds(out: *mut f32) -> u32 {
         }
         let Some(bounds) = g.session.as_ref().and_then(|s| s.slow().bounds) else { return 0 };
         unsafe { std::slice::from_raw_parts_mut(out, 6) }.copy_from_slice(&bounds.to_world());
+        1
+    })
+}
+
+/// How the local player is doing, as the server says (the match's `standing`
+/// table): `info` has eight `unsigned long`s,
+///
+/// | index | |
+/// |---|---|
+/// | 0 | 0 alive, 1 dead, 2 waiting for a wave (no starting location was free) |
+/// | 1 | the server tick the player spawns on: when dead, the respawn timer's end; when waiting, the wave's; 0 when alive |
+/// | 2 | counts the player's spawns: a change says they are somewhere new |
+/// | 3 | the score (a signed number) |
+/// | 4 | deaths |
+/// | 5 | the team (0 red, 1 blue) |
+/// | 6 | the server's tick now (the ticks above are on this clock; 30 a second): from the game's row, twice a second, and the time since |
+/// | 7 | the tick the player last spawned on |
+///
+/// and `position` four `float`s, `x y z yaw`: where the server last spawned the
+/// player. Returns 1, or 0 before the server has said.
+///
+/// # Safety
+/// `info` points to eight writable `unsigned long`s, `position` to four writable `float`s.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_life(info: *mut u32, position: *mut f32) -> u32 {
+    guard(0, || {
+        let g = global();
+        if info.is_null() || position.is_null() {
+            return 0;
+        }
+        let Some(session) = &g.session else { return 0 };
+        let Some(life) = session.life() else { return 0 };
+        let state = match life.state {
+            LifeState::Alive => 0,
+            LifeState::Dead => 1,
+            LifeState::Waiting => 2,
+        };
+        unsafe {
+            std::slice::from_raw_parts_mut(info, 8).copy_from_slice(&[
+                state,
+                life.due_tick as u32,
+                life.spawns,
+                life.score as u32,
+                life.deaths,
+                life.team as u32,
+                session.server_tick(),
+                life.spawned_tick as u32,
+            ]);
+            std::slice::from_raw_parts_mut(position, 4).copy_from_slice(&life.spawn);
+        }
+        1
+    })
+}
+
+/// The game, as the server says (the match's `game_state` table): `out` has
+/// ten `unsigned long`s,
+///
+/// | index | |
+/// |---|---|
+/// | 0 | 1 in Team Slayer |
+/// | 1 | the score limit (0 for none) |
+/// | 2 | the time limit in ticks (0 for none), from the tick in 3 |
+/// | 3 | the tick the match's clock started on |
+/// | 4 | ticks between waves |
+/// | 5 | the red team's score (a signed number) |
+/// | 6 | the blue team's |
+/// | 7 | 0 while the match is on, 1 when a score limit ended it, 2 a time limit |
+/// | 8 | who won: 0 nobody, 1 a player, 2 a team |
+/// | 9 | the winning player's number, or team (0 red, 1 blue) |
+///
+/// Returns 1, or 0 before the server has said.
+///
+/// # Safety
+/// `out` points to ten writable `unsigned long`s.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_game(out: *mut u32) -> u32 {
+    guard(0, || {
+        let g = global();
+        if out.is_null() {
+            return 0;
+        }
+        let Some(game) = g.session.as_ref().and_then(|s| s.game()) else { return 0 };
+        unsafe {
+            std::slice::from_raw_parts_mut(out, 10).copy_from_slice(&[
+                game.teams as u32,
+                game.score_limit,
+                game.time_limit_ticks,
+                game.started_tick as u32,
+                game.wave_ticks,
+                game.red_score as u32,
+                game.blue_score as u32,
+                game.ending as u32,
+                game.winner_kind as u32,
+                game.winner as u32,
+            ]);
+        }
+        1
+    })
+}
+
+/// Freeze the scoreboard for [`halo_large_scoreboard_row`] to read: every
+/// player of the match, in range or not, best first (by score, then fewer
+/// deaths, then player number), and return how many there are.
+#[no_mangle]
+pub extern "C" fn halo_large_scoreboard_freeze() -> u32 {
+    guard(0, || {
+        let mut g = global();
+        let mut board = g.session.as_ref().map(|s| s.scoreboard()).unwrap_or_default();
+        board.sort_by_key(|(id, s, _)| (std::cmp::Reverse(s.score), s.deaths, *id));
+        g.board = board;
+        g.board.len() as u32
+    })
+}
+
+/// One row of the frozen scoreboard, `index` below the count
+/// [`halo_large_scoreboard_freeze`] returned: `out` has seven `unsigned long`s,
+/// the player's number, team (0 red, 1 blue), score (a signed number), deaths,
+/// life (as [`halo_large_life`]'s first), place (1 for the best, and the same
+/// for a tie), and 1 if the player is this session's own; `name` is filled with
+/// the player's name, UTF-8, NUL-terminated and cut to `size`. Returns 1, or 0
+/// when there is no such row.
+///
+/// # Safety
+/// `out` points to seven writable `unsigned long`s, `name` to `size` writable `char`s.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_scoreboard_row(index: u32, out: *mut u32, name: *mut c_char, size: u32) -> u32 {
+    guard(0, || {
+        let g = global();
+        if out.is_null() || name.is_null() || size == 0 {
+            return 0;
+        }
+        let Some((player, standing, member)) = g.board.get(index as usize) else { return 0 };
+        // (a tie is the same place: the place of the first with the score)
+        let place = g.board.iter().position(|(_, s, _)| s.score == standing.score).unwrap_or(index as usize) + 1;
+        let own = g.session.as_ref().and_then(|s| s.player()) == Some(*player);
+        let life = match standing.state {
+            LifeState::Alive => 0,
+            LifeState::Dead => 1,
+            LifeState::Waiting => 2,
+        };
+        let bytes = member.name.as_bytes();
+        let length = bytes.len().min(size as usize - 1);
+        // SAFETY: the sizes are the caller's
+        unsafe {
+            std::slice::from_raw_parts_mut(out, 7).copy_from_slice(&[
+                *player as u32,
+                member.team as u32,
+                standing.score as u32,
+                standing.deaths,
+                life,
+                place as u32,
+                own as u32,
+            ]);
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), name as *mut u8, length);
+            *name.add(length) = 0;
+        }
         1
     })
 }

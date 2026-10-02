@@ -4,6 +4,7 @@ use halo_map::collision::CollisionBsp;
 use halo_map::{HaloMap, Movement};
 
 use crate::math::sqrt;
+use crate::spawn::Start;
 
 /// What the simulation reads from a map: its collision BSP and bounds, and
 /// the tags' movement values. The server keeps one per match and passes it by
@@ -15,6 +16,9 @@ pub struct MapData {
     pub world_bounds: [f32; 6],
     /// How a player moves on foot, as the map's tags say.
     pub movement: Movement,
+    /// The player starting locations, settled on the ground (see
+    /// [`crate::spawn`]). Where [`crate::rules`] spawns players.
+    pub starts: Vec<Start>,
 }
 
 impl MapData {
@@ -36,12 +40,23 @@ impl MapData {
 
     /// The map as bytes, for a server to keep in one row: the six world
     /// bounds and the [`Movement::COUNT`] movement values (all little-endian
-    /// `f32`) followed by
+    /// `f32`), the starting locations (a `u32` count, then for each its
+    /// position and yaw as `f32`s, its team and four game types as `i16`s),
+    /// and
     /// [`CollisionBsp::to_bytes`](halo_map::collision::CollisionBsp::to_bytes).
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         for v in self.world_bounds.iter().chain(self.movement.to_array().iter()) {
             out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&(self.starts.len() as u32).to_le_bytes());
+        for start in &self.starts {
+            for v in start.position.iter().chain([&start.yaw]) {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            for v in core::iter::once(&start.team).chain(&start.game_types) {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
         }
         out.extend_from_slice(&self.collision.to_bytes());
         out
@@ -54,9 +69,24 @@ impl MapData {
         let Some((bounds, rest)) = bytes.split_at_checked(BOUNDS) else {
             return Err(halo_map::MapError::Malformed("map data is shorter than its bounds".into()));
         };
-        let Some((movement_bytes, collision)) = rest.split_at_checked(MOVEMENT) else {
+        let Some((movement_bytes, rest)) = rest.split_at_checked(MOVEMENT) else {
             return Err(halo_map::MapError::Malformed("map data is shorter than its movement values".into()));
         };
+        let short = || halo_map::MapError::Malformed("map data is shorter than its starting locations".into());
+        let (count, rest) = rest.split_at_checked(4).ok_or_else(short)?;
+        let count = u32::from_le_bytes(count.try_into().unwrap()) as usize;
+        let (start_bytes, collision) =
+            count.checked_mul(Start::BYTES).and_then(|n| rest.split_at_checked(n)).ok_or_else(short)?;
+        let starts = start_bytes
+            .as_chunks::<{ Start::BYTES }>()
+            .0
+            .iter()
+            .map(|b| {
+                let f = |i: usize| f32::from_le_bytes(b[4 * i..4 * i + 4].try_into().unwrap());
+                let h = |i: usize| i16::from_le_bytes(b[16 + 2 * i..18 + 2 * i].try_into().unwrap());
+                Start { position: [f(0), f(1), f(2)], yaw: f(3), team: h(0), game_types: [h(1), h(2), h(3), h(4)] }
+            })
+            .collect();
         let mut world_bounds = [0.0; 6];
         for (v, b) in world_bounds.iter_mut().zip(bounds.as_chunks::<4>().0) {
             *v = f32::from_le_bytes(*b);
@@ -69,13 +99,25 @@ impl MapData {
         if !movement.is_sane() {
             return Err(halo_map::MapError::Malformed("the map's movement values are not usable".into()));
         }
-        Ok(MapData { collision: CollisionBsp::from_bytes(collision)?, world_bounds, movement })
+        Ok(MapData { collision: CollisionBsp::from_bytes(collision)?, world_bounds, movement, starts })
     }
 }
 
 impl From<HaloMap> for MapData {
     fn from(map: HaloMap) -> MapData {
-        MapData { collision: map.collision, world_bounds: map.world_bounds, movement: map.movement }
+        let mut data = MapData {
+            collision: map.collision,
+            world_bounds: map.world_bounds,
+            movement: map.movement,
+            starts: Vec::new(),
+        };
+        let starts: Vec<Start> = map
+            .player_starts
+            .iter()
+            .map(|s| Start { position: s.position, yaw: s.facing, team: s.team_index, game_types: s.game_types })
+            .collect();
+        data.starts = starts.into_iter().map(|s| crate::spawn::settle(&data, s)).collect();
+        data
     }
 }
 

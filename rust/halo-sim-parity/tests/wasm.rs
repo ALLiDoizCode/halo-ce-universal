@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use halo_sim_parity::{event_counts, run};
+use halo_sim_parity::{event_counts, match_event_counts, run, run_match};
 use wasmi::{Engine, Linker, Module, Store};
 
 const TICKS: u32 = 10_000;
@@ -54,7 +54,15 @@ impl Wasm {
     }
 
     fn run(&mut self, seed: u64, ticks: u32) -> Vec<u8> {
-        let run = self.instance.get_typed_func::<(u32, u32, u32), u32>(&self.store, "parity_run").unwrap();
+        self.call("parity_run", seed, ticks)
+    }
+
+    fn run_match(&mut self, seed: u64, ticks: u32) -> Vec<u8> {
+        self.call("parity_match_run", seed, ticks)
+    }
+
+    fn call(&mut self, export: &str, seed: u64, ticks: u32) -> Vec<u8> {
+        let run = self.instance.get_typed_func::<(u32, u32, u32), u32>(&self.store, export).unwrap();
         let len = run.call(&mut self.store, (seed as u32, (seed >> 32) as u32, ticks)).unwrap() as usize;
         let ptr = self.instance.get_typed_func::<(), u32>(&self.store, "parity_output").unwrap();
         let ptr = ptr.call(&mut self.store, ()).unwrap() as usize;
@@ -78,8 +86,30 @@ fn the_wasm_build_gives_byte_identical_state_to_the_native_build_over_10000_tick
     }
 }
 
+/// The game's rules (spawning, waves, deaths, scores, the end) over a long
+/// match: the starting locations are chosen with square roots and a random
+/// source, the scores with integers, and all of it must agree.
+#[test]
+fn the_wasm_build_plays_a_match_byte_identically_to_the_native_build() {
+    let mut wasm = Wasm::load(&build_wasm());
+    for seed in [1, 2, 3, 0xDEAD_BEEF_0BAD_F00D] {
+        let native = run_match(seed, 6_000);
+        let wasm_result = wasm.run_match(seed, 6_000);
+        assert_eq!(wasm_result.len(), native.len(), "seed {seed:#x}");
+        assert!(wasm_result == native, "seed {seed:#x}: the wasm and native matches differ");
+
+        // the match really played: every kind of event, bar none
+        let counts = match_event_counts(&native);
+        assert!(
+            counts[..6].iter().all(|&c| c > 5) && counts[6] >= 1,
+            "seed {seed:#x}: the match was too thin: {counts:?}"
+        );
+    }
+}
+
 #[test]
 fn different_seeds_give_different_results() {
     // guards the comparison above against comparing two empty or constant results
     assert_ne!(run(1, 300), run(2, 300));
+    assert_ne!(run_match(1, 600), run_match(3, 600));
 }

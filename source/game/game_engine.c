@@ -1674,6 +1674,16 @@ enum
 
 /* network_distributed.c's */
 long distributed_player_ping(short player_index);
+/* the large-scale mode's adapter (port/linux/game/large_mode.c) */
+boolean large_mode_active(void);
+boolean large_mode_player_spawn(long player_index, boolean *spawn);
+boolean large_mode_state_message(long player_index, wchar_t *buffer, long count);
+boolean large_mode_scoreboard_active(void);
+boolean large_mode_scoreboard_forced(void);
+boolean large_mode_scoreboard_teams(void);
+long large_mode_scoreboard_freeze(void);
+boolean large_mode_scoreboard_row(long index, long *values, wchar_t *name, long name_size);
+void large_mode_scoreboard_title(wchar_t *buffer, long size);
 /* port_config.c's */
 int config_boolean(const char *name);
 const char *config_string(const char *name);
@@ -1807,6 +1817,235 @@ static void game_engine_scoreboard_closed(
 	}
 }
 
+/* port: the large-scale mode's scoreboard (port/linux/game/large_mode.c): every
+player of the match, in range or not, from the server's standing table (the
+engine's players are only the nearest 127, and its scores are not the
+server's); laid out as game_engine_rasterize_scoreboard lays out the engine's,
+with the player's kills and deaths where it has the ping, and the players who
+are not in the world (dead, or waiting for a respawn wave) dimmed. */
+enum
+{
+	LARGE_SCOREBOARD_MAXIMUM_PLAYERS = 512,
+	LARGE_SCOREBOARD_NAME_SIZE = 16,
+};
+
+static void game_engine_rasterize_large_scoreboard(
+	long player_index,
+	real alpha)
+{
+	/* (static: five hundred rows are too many for the stack) */
+	static long values[LARGE_SCOREBOARD_MAXIMUM_PLAYERS][7];
+	static wchar_t names[LARGE_SCOREBOARD_MAXIMUM_PLAYERS][LARGE_SCOREBOARD_NAME_SIZE];
+	static short lists[2][LARGE_SCOREBOARD_MAXIMUM_PLAYERS];
+	long list_counts[2] = { 0, 0 };
+	wchar_t row_string[256];
+	wchar_t title_string[160];
+	real_argb_color text_color;
+	real_argb_color team_colors[2];
+	real_argb_color color;
+	rectangle2d bounds = render.camera.window_bounds;
+	boolean has_teams = large_mode_scoreboard_teams();
+	boolean team_columns;
+	long font_index = hud_get_font_index();
+	long line_height;
+	long rows;
+	long columns;
+	long count;
+	long total;
+	long page;
+	long shown_rows;
+	long index;
+	short width;
+	short left;
+	short top;
+
+	if (font_index == NONE)
+		return;
+	offset_rectangle2d(&bounds, -render.camera.viewport_bounds.x0, -render.camera.viewport_bounds.y0);
+	{
+		struct font_header *font = font_definition_get(font_index);
+
+		line_height = font->leading_height + font->descending_height + font->ascending_height;
+	}
+	if (line_height <= 0)
+		return;
+	width = (short)((bounds.x1 - bounds.x0) / SCOREBOARD_SCALE);
+	rows = (long)((bounds.y1 - SCOREBOARD_LAYOUT_TOP_ROWS * line_height) / SCOREBOARD_SCALE / line_height) - 2 -
+		SCOREBOARD_BOTTOM_ROWS;
+	rows = MAX(rows, 1);
+	count = MIN(large_mode_scoreboard_freeze(), LARGE_SCOREBOARD_MAXIMUM_PLAYERS);
+	team_columns = has_teams && scoreboard_team_columns() && width >= 2 * SCOREBOARD_COLUMN_WIDTH + SCOREBOARD_COLUMN_GAP;
+	for (index = 0; index < count; index++)
+	{
+		short list;
+
+		if (!large_mode_scoreboard_row(index, values[index], names[index], LARGE_SCOREBOARD_NAME_SIZE))
+		{
+			count = index;
+			break;
+		}
+		list = team_columns ? (short)PIN(values[index][1], 0, 1) : 0;
+		lists[list][list_counts[list]++] = (short)index;
+	}
+	if (team_columns)
+	{
+		columns = 2;
+		total = MAX(list_counts[0], list_counts[1]);
+		page = rows;
+	}
+	else
+	{
+		columns = list_counts[0] > rows && width >= 2 * SCOREBOARD_COLUMN_WIDTH + SCOREBOARD_COLUMN_GAP ? 2 : 1;
+		total = list_counts[0];
+		page = rows * columns;
+	}
+	/* (opened, at the viewer's own player's page; then where the wheel and Page Up/Down take it) */
+	{
+		long notches = 0;
+		long pages = 0;
+
+		platform_scoreboard_scroll(TRUE, &notches, &pages);
+		if (!scoreboard_open)
+		{
+			scoreboard_open = TRUE;
+			scoreboard_scroll = 0;
+			for (index = 0; index < 2; index++)
+			{
+				long position;
+
+				for (position = 0; position < list_counts[index]; position++)
+				{
+					if (values[lists[index][position]][6])
+						scoreboard_scroll = position / page * page;
+				}
+			}
+		}
+		scoreboard_scroll += notches * SCOREBOARD_WHEEL_STEP + pages * page;
+		scoreboard_scroll = PIN(scoreboard_scroll, 0, MAX(total - page, 0));
+	}
+	left = (short)(bounds.x0 + (width - (columns * SCOREBOARD_COLUMN_WIDTH + (columns - 1) * SCOREBOARD_COLUMN_GAP)) / 2);
+	shown_rows = MIN(rows, total);
+	if (total > page)
+		shown_rows++;
+	{
+		real height = (2 + shown_rows) * line_height * SCOREBOARD_SCALE;
+
+		top = (short)(bounds.y0 + ((bounds.y1 - bounds.y0) - height) / 2);
+		top = MAX(top, (short)(SCOREBOARD_MINIMUM_TOP_ROWS * line_height));
+		{
+			pixel32 background = scoreboard_background_color();
+			real padding = 0.5f * line_height * SCOREBOARD_SCALE;
+			real block_width = (columns * SCOREBOARD_COLUMN_WIDTH + (columns - 1) * SCOREBOARD_COLUMN_GAP) * SCOREBOARD_SCALE;
+			real block_left = bounds.x0 + (left - bounds.x0) * SCOREBOARD_SCALE;
+
+			if (background >> 24)
+			{
+				rectangle2d panel;
+				long panel_alpha = (long)((background >> 24) * PIN(alpha, 0.0f, 1.0f) + 0.5f);
+
+				panel.x0 = (short)(block_left - padding);
+				panel.x1 = (short)(block_left + block_width + padding + 8.0f * SCOREBOARD_SCALE);
+				panel.y0 = (short)(top - padding);
+				panel.y1 = (short)(top + height + padding);
+				draw_quad(&panel, ((pixel32)panel_alpha << 24) | (background & 0x00FFFFFF));
+			}
+		}
+	}
+	rasterizer_text_set_scale(SCOREBOARD_SCALE, (real)bounds.x0, (real)top);
+
+	team_colors[0].alpha = alpha;
+	team_colors[0].red = 0.6f;
+	team_colors[0].green = 0.3f;
+	team_colors[0].blue = 0.3f;
+	team_colors[1].alpha = alpha;
+	team_colors[1].red = 0.3f;
+	team_colors[1].green = 0.3f;
+	team_colors[1].blue = 0.6f;
+
+	large_mode_scoreboard_title(title_string, NUMBEROF(title_string));
+	color.alpha = alpha;
+	color.red = color.green = color.blue = 0.7f;
+	scoreboard_draw_row(title_string, FALSE, &color, 0, top, left, FALSE);
+
+	usprintf(row_string, L"\tPlace\tPlayer\tKills\tDied");
+	{
+		long column;
+
+		for (column = 0; column < columns; column++)
+		{
+			if (team_columns)
+			{
+				color = team_colors[column];
+				color.red = MIN(color.red + 0.25f, 1.0f);
+				color.green = MIN(color.green + 0.25f, 1.0f);
+				color.blue = MIN(color.blue + 0.25f, 1.0f);
+			}
+			else
+			{
+				color.alpha = alpha;
+				color.red = color.green = color.blue = 0.5f;
+			}
+			scoreboard_draw_row(row_string, FALSE, &color, 1, top,
+				(short)(left + column * (SCOREBOARD_COLUMN_WIDTH + SCOREBOARD_COLUMN_GAP)), TRUE);
+		}
+	}
+
+	/* each slot of the page: a team column's row, or a place in the list */
+	for (index = 0; index < rows * columns; index++)
+	{
+		long column = team_columns ? index % 2 : index / rows;
+		long row = team_columns ? index / 2 : index % rows;
+		long list = team_columns ? column : 0;
+		long position = scoreboard_scroll + (team_columns ? row : index);
+		long *entry;
+		wchar_t const *name;
+		real_argb_color *row_color;
+
+		if (row >= rows || position >= list_counts[list])
+			continue;
+		entry = values[lists[list][position]];
+		name = names[lists[list][position]];
+		color = *hud_get_text_color(&text_color);
+		color.alpha = alpha;
+		row_color = has_teams ? &team_colors[PIN(entry[1], 0, 1)] : &color;
+		/* (a player who is not in the world is dimmed: the row's copy of the colour) */
+		if (entry[4] != 0)
+		{
+			color = *row_color;
+			color.red *= 0.55f;
+			color.green *= 0.55f;
+			color.blue *= 0.55f;
+			row_color = &color;
+		}
+		usprintf(
+			row_string,
+			L"\t%ld\t%s\t%ld\t%ld",
+			entry[5],
+			name,
+			entry[2],
+			entry[3]);
+		scoreboard_draw_row(
+			row_string,
+			entry[6] != 0,
+			row_color,
+			2 + row,
+			top,
+			(short)(left + column * (SCOREBOARD_COLUMN_WIDTH + SCOREBOARD_COLUMN_GAP)),
+			TRUE);
+	}
+	if (total > page)
+	{
+		long first = scoreboard_scroll + 1;
+		long last = MIN(scoreboard_scroll + page, total);
+
+		color.alpha = alpha;
+		color.red = color.green = color.blue = 0.6f;
+		usprintf(row_string, L"%ld-%ld of %ld   (Page Up / Page Down, mouse wheel)", first, last, total);
+		scoreboard_draw_row(row_string, FALSE, &color, 2 + rows, top, left, FALSE);
+	}
+	rasterizer_text_set_scale(1.0f, 0.0f, 0.0f);
+}
+
 static void game_engine_rasterize_scoreboard(
 	long player_index,
 	real alpha)
@@ -1844,6 +2083,12 @@ static void game_engine_rasterize_scoreboard(
 	wchar_t *column_name;
 	wchar_t *score_name;
 
+	/* port: the large-scale mode lists every player of the match from the server's state */
+	if (large_mode_scoreboard_active())
+	{
+		game_engine_rasterize_large_scoreboard(player_index, alpha);
+		return;
+	}
 	if (font_index == NONE)
 		return;
 	offset_rectangle2d(&bounds, -render.camera.viewport_bounds.x0, -render.camera.viewport_bounds.y0);
@@ -3468,7 +3713,9 @@ static void game_engine_post_rasterize_in_game(
 	fade = game_engine_globals.hud_message_timers[local_player_index];
 	if ((!gamepad ||
 		!gamepad->buttons[_gamepad_binary_button_back]) &&
-		game_engine_globals.postgame_state != game_engine_mode_postgame_delay)
+		game_engine_globals.postgame_state != game_engine_mode_postgame_delay &&
+		/* (port: the large-scale mode's, once its game has ended) */
+		!large_mode_scoreboard_forced())
 	{
 		/* a frame is no longer a tick (render_interpolation.c): fade in half
 		a second, not in 15 frames */
@@ -4252,6 +4499,12 @@ void game_engine_player_killed(
 		dead_player_index != NONE);
 
 	if (!game_engine)
+		return;
+
+	/* port: the large-scale mode's deaths, scores and respawns are the server's, and the
+	engine's own count of this one (a unit killed because the server says the player died)
+	is neither a suicide nor anything to show */
+	if (large_mode_active())
 		return;
 
 	/* the distributed netcode: a client's copy of a death has the host's
@@ -8121,7 +8374,12 @@ boolean game_engine_get_state_message(
 			player->state_message = NONE;
 		}
 
-		if (player->unit_index == NONE)
+		/* port: how long until the respawn, or the wave, as the large-scale mode's server says */
+		if (player->unit_index == NONE && large_mode_state_message(player_index, message, message_character_count))
+		{
+			result = TRUE;
+		}
+		else if (player->unit_index == NONE)
 		{
 			state_message_parameter = 0;
 			if (player->quit_out_of_game == TRUE)
@@ -8215,6 +8473,10 @@ boolean game_engine_should_spawn_player(
 	if (game_engine)
 	{
 		struct player_datum *player = player_get(player_index);
+
+		/* port: in the large-scale mode the server says when the local player is in the world */
+		if (large_mode_player_spawn(player_index, &should_spawn))
+			return should_spawn;
 
 		if (player->quit_out_of_game == TRUE)
 		{

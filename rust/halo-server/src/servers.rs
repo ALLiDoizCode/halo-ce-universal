@@ -5,16 +5,24 @@
 //! # A match's life
 //!
 //! 1. A fresh database is published from the match module, loaded with the
-//!    map, spawn points, capacity and the bans in force, started, and given a
+//!    map (its player starting locations are where the game's rules spawn
+//!    players), the game's rules and limits, the capacity and the bans in
+//!    force, started, and given a
 //!    gateway on the server's next UDP port.
 //! 2. The root database's row for the server is rewritten to name it
 //!    (`set_server`): from then on the server list sends players there, and
 //!    clients that are in the last match follow.
-//! 3. It runs until [`match_is_over`] says it has ended.
-//! 4. A little before that the next match of the rotation is made, so that
-//!    the handover is a change of row and not a wait. The last match is kept
-//!    for `handover_secs` more (so that nobody is cut off before their client
-//!    has moved) and then its gateway is stopped and its database deleted.
+//! 3. The game's clock starts when the match is announced (`begin_game`). The
+//!    match ends when the game does: a player (a team, in team Slayer) reaches
+//!    the score limit, or the time limit runs out, which the match's own rules
+//!    count (`game_state`, which the orchestration reads). It then stays up
+//!    for `end_secs` with its final scoreboard, and [`match_is_over`] says it
+//!    is over.
+//! 4. When the end is near (a little before the time limit, or as the game
+//!    ends) the next match of the rotation is made, so that the handover is a
+//!    change of row and not a wait. The last match is kept for `handover_secs`
+//!    more (so that nobody is cut off before their client has moved) and then
+//!    its gateway is stopped and its database deleted.
 //!
 //! # Bans and names
 //!
@@ -81,12 +89,28 @@ impl Default for Log {
     }
 }
 
-/// Why a match is over, if it is. Today only the rotation's time limit ends
-/// one: the game types' own endings (a score reached, the clock of the
-/// game's rules) are the rules ticket's to add here, by looking at the
-/// match's state. Nothing else in the orchestration needs to change for them.
-pub fn match_is_over(step: &Rotation, elapsed: Duration) -> Option<&'static str> {
-    (step.seconds > 0 && elapsed >= Duration::from_secs(step.seconds as u64)).then_some("its time is up")
+/// How long past its time limit and its final scoreboard a match whose game
+/// has not ended is left running before the orchestration ends it anyway.
+const END_GRACE_SECS: u64 = 10;
+
+/// Why a match is over, if it is. The game ends it (a player or a team
+/// reaches the score limit, or the time limit runs out, which the match's
+/// rules count): `ended` is that reason and how long ago it was, and the
+/// match is over once its final scoreboard has been up for `scoreboard`.
+/// Should the game not end by the time limit (a match module that has stopped
+/// ticking), the time limit and then some is the end all the same.
+pub fn match_is_over(
+    step: &Rotation,
+    elapsed: Duration,
+    ended: Option<(&'static str, Duration)>,
+    scoreboard: Duration,
+) -> Option<&'static str> {
+    match ended {
+        Some((why, since)) => (since >= scoreboard).then_some(why),
+        None => (step.seconds > 0
+            && elapsed >= Duration::from_secs(step.seconds as u64) + scoreboard + Duration::from_secs(END_GRACE_SECS))
+        .then_some("its time is up"),
+    }
 }
 
 /// What a server run needs from the program around it.
@@ -103,6 +127,8 @@ struct Live {
     step: Rotation,
     number: u64,
     capacity: u32,
+    /// When the game ended, and why: from then the final scoreboard is up.
+    ended: Option<(Instant, &'static str)>,
 }
 
 pub struct ServerRun {
@@ -161,17 +187,31 @@ impl ServerRun {
                 }
             }
 
+            // the game ending (a score reached, or its time): the final scoreboard is up from then
+            if let Some(live) = current.as_mut() {
+                if live.ended.is_none() {
+                    if let Some(ended) = live.matched.ended() {
+                        live.ended = Some((Instant::now(), ended.reason));
+                        let (number, map) = (live.number, live.step.map.clone());
+                        self.say(format!(
+                            "match {number} ({map}) has ended: {}, {}; the final scoreboard is up for {} s",
+                            ended.reason, ended.winner, self.server.end_secs
+                        ));
+                    }
+                }
+            }
             if let Some(live) = &current {
                 let elapsed = live.matched.started.elapsed();
-                let over = match_is_over(&live.step, elapsed)
-                    .or_else(|| (!live.matched.is_connected()).then_some("its connection to SpacetimeDB was lost"));
-                // the next match, made ahead of time
+                let scoreboard = Duration::from_secs(self.server.end_secs);
+                let over =
+                    match_is_over(&live.step, elapsed, live.ended.map(|(at, why)| (why, at.elapsed())), scoreboard)
+                        .or_else(|| (!live.matched.is_connected()).then_some("its connection to SpacetimeDB was lost"));
+                // the next match, made ahead of time: before the time limit, or as the game ends
                 let limit = live.step.seconds as u64;
                 let prepare_from = limit.saturating_sub(PREPARE_SECS.min(limit / 2));
                 if next.is_none()
                     && Instant::now() >= retry_at
-                    && limit > 0
-                    && elapsed >= Duration::from_secs(prepare_from)
+                    && (live.ended.is_some() || (limit > 0 && elapsed >= Duration::from_secs(prepare_from)))
                 {
                     match self.make_next(&mut draining) {
                         Ok(made) => next = Some(made),
@@ -287,10 +327,13 @@ impl ServerRun {
         let map: LoadedMap = self.shared.maps.load(&step.map)?;
         let database = format!("hm-{}-{}-{number}", self.server.id, self.unix_secs);
         let budget = step.budget.unwrap_or(self.server.budget);
+        let capacity = step.capacity.unwrap_or(map.default_capacity);
+        let rules = step.rules()?;
         let spec = MatchSpec {
             database: database.clone(),
             map: &map,
-            capacity: step.capacity,
+            capacity,
+            rules,
             budget,
             send_threads: self.server.send_threads,
             bind,
@@ -300,21 +343,24 @@ impl ServerRun {
         let started = Instant::now();
         let matched = RunningMatch::start(&self.shared.env, spec)?;
         self.say(format!(
-            "match {number} ready in {:.1} s: {} on {} ({}), database {database}, up to {} players at {} B/s each, UDP {bind}",
+            "match {number} ready in {:.1} s: {} on {} ({}), database {database}, up to {capacity} players{} at {budget} B/s each, \
+             {} to {}, UDP {bind}",
             started.elapsed().as_secs_f64(),
             step.game_type,
             step.map,
             if step.variant.is_empty() { "no variant" } else { &step.variant },
-            step.capacity,
-            budget,
+            if step.capacity.is_none() { " (the map's own cap)" } else { "" },
+            if rules.score_limit > 0 { format!("score limit {}", rules.score_limit) } else { "no score limit".to_string() },
+            if step.seconds > 0 { format!("time limit {} s", step.seconds) } else { "no time limit".to_string() },
         ));
-        Ok(Live { matched, capacity: step.capacity as u32, step, number })
+        Ok(Live { matched, capacity: capacity as u32, step, number, ended: None })
     }
 
     /// Write the server's row so that it names this match: the players go here.
     fn announce(&self, live: &mut Live) -> Result<(), String> {
         // its time begins now, not when it was made ready (up to PREPARE_SECS earlier)
         live.matched.started = Instant::now();
+        live.matched.begin_game().map_err(|e| format!("beginning the game: {e}"))?;
         let started_us = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_micros() as i64);
         let row = ServerRow {
             id: self.server.id.clone(),
