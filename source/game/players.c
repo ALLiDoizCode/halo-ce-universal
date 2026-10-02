@@ -278,6 +278,8 @@ symbols in this file:
 
 /* network_game_globals.c's */
 boolean network_game_distributed_client(void);
+/* port: the comparison harness's (port/linux/game/scenario_harness.c) */
+void scenario_harness_control(long player_index, struct player_action *action);
 /* port/linux/game/network_distributed.c's */
 void network_distributed_player_picked_up(long player_index, short kind, long definition_index, short count);
 /* game_sound.c's */
@@ -3700,6 +3702,9 @@ void players_update_before_game(
 			if (player->unit_index != NONE && unit_controllable(player->unit_index))
 			{
 				unit = unit_get(player->unit_index);
+				/* port: the comparison harness plays the machine's first
+				player (port/linux/game/scenario_harness.c) */
+				scenario_harness_control(iterator.datum_index, action);
 				if (!players_globals->input_disabled)
 				{
 					network_player_log_idle_action(iterator.datum_index, action->control_flags);

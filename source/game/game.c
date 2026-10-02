@@ -182,6 +182,8 @@ struct game_options;
 
 /* network_game_globals.c's */
 boolean network_game_distributed_client(void);
+/* port: the comparison harness's (port/linux/game/scenario_harness.c) */
+void scenario_harness_record(void);
 
 /* ---------- constants */
 
@@ -338,6 +340,8 @@ void game_tick(
 	hs_update();
 	recorded_animations_update();
 	objects_update();
+	/* port: the comparison harness's trace of the tick */
+	scenario_harness_record();
 	players_update_after_game();
 	hud_update();
 	player_effect_update();
