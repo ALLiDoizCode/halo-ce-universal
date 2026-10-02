@@ -21,15 +21,17 @@ impl MapData {
     /// The fastest an on-foot player can go over the ground, in world units a
     /// second, from the tags: the run speeds on both axes at once (the
     /// throttle's two axes are not limited to a circle), at the faster of the
-    /// slopes' speed scales, with a tenth over for the rounding of a client's
-    /// float arithmetic and network timing. What the server checks a move
-    /// against (see [`crate::step`]).
+    /// slopes' speed scales, with a quarter over: room for a client that
+    /// delivers two ticks of its walking in the one tick the server counts (a
+    /// frame that ran two game ticks, which the gateway's keep-the-newest
+    /// makes one move), as a player running straight ahead does at twice the
+    /// run speed. What the server checks a move against (see [`crate::step`]).
     pub fn max_move_speed(&self) -> f32 {
         let m = &self.movement;
         let forward = m.run_forward_speed.max(m.run_backward_speed);
         let sideways = m.run_sideways_speed;
         let slope = m.downhill_velocity_scale.max(m.uphill_velocity_scale).max(1.0);
-        sqrt(forward * forward + sideways * sideways) * slope * 1.1
+        sqrt(forward * forward + sideways * sideways) * slope * 1.25
     }
 
     /// The map as bytes, for a server to keep in one row: the six world
