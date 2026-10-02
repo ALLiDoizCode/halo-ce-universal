@@ -1,3 +1,4 @@
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use crate::map::MapData;
@@ -28,6 +29,9 @@ pub enum RejectReason {
     ThroughSurface,
     /// The new position is not on the ground.
     OffGround,
+    /// The player already had an input this tick; only the first counts, so
+    /// that several moves cannot add up to more than the speed bound.
+    DuplicateInput,
 }
 
 /// What happened during a step, in input order.
@@ -43,13 +47,18 @@ pub enum Event {
     },
 }
 
-/// Advance the state by one tick (1/30 s). Each input is applied in order: an
+/// Advance the state by one tick (1/30 s). Each input is applied in order (a player's second input of the tick is rejected): an
 /// accepted move updates the player's position and facing, a rejected one
 /// leaves the player untouched. `rng` is not consumed yet; it is part of the
 /// interface for the rules that need chance.
 pub fn step(store: &mut impl Store, inputs: &[PlayerInput], map: &MapData, _rng: &mut Rng) -> Vec<Event> {
     let mut events = Vec::with_capacity(inputs.len());
+    let mut seen = BTreeSet::new();
     for input in inputs {
+        if !seen.insert(input.player) {
+            events.push(Event::MoveRejected { player: input.player, reason: RejectReason::DuplicateInput });
+            continue;
+        }
         let Some(player) = store.player(input.player) else {
             events.push(Event::MoveRejected { player: input.player, reason: RejectReason::UnknownPlayer });
             continue;

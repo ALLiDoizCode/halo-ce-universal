@@ -153,3 +153,14 @@ fn the_same_inputs_give_the_same_state() {
     };
     assert_eq!(run(), run());
 }
+
+#[test]
+fn only_a_players_first_input_of_a_tick_counts() {
+    let map = flat_floor_map();
+    let mut store = player_at([0.0, 0.0, 0.0]);
+    let at = |x| PlayerInput { player: 7, position: [x, 0.0, 0.0], yaw: 0.0, pitch: 0.0 };
+    let (a, b) = (MAX_STEP * 0.9, MAX_STEP * 1.8);
+    let events = step(&mut store, &[at(a), at(b)], &map, &mut Rng::seeded(0));
+    assert_eq!(events, [Event::MoveAccepted { player: 7 }, rejected(RejectReason::DuplicateInput)]);
+    assert_eq!(store.player(7).unwrap().position, [a, 0.0, 0.0]);
+}

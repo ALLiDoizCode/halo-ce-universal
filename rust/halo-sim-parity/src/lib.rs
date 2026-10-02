@@ -18,6 +18,9 @@ use halo_sim::{snapshot, step, Event, MemoryStore, Player, PlayerInput, RejectRe
 
 pub const PLAYERS: u16 = 24;
 
+/// Accepted, then each [`RejectReason`] in declaration order.
+const EVENT_KINDS: usize = 7;
+
 const MAX_STEP: f32 = MAX_MOVE_SPEED / halo_sim::TICKS_PER_SECOND as f32;
 
 struct Fnv(u64);
@@ -41,6 +44,7 @@ fn event_code(event: &Event) -> (u16, u8) {
                 RejectReason::TooFast => 3,
                 RejectReason::ThroughSurface => 4,
                 RejectReason::OffGround => 5,
+                RejectReason::DuplicateInput => 6,
             },
         ),
     }
@@ -61,7 +65,7 @@ pub fn run(seed: u64, ticks: u32) -> Vec<u8> {
     }
 
     let mut chain = Fnv(0xCBF2_9CE4_8422_2325);
-    let mut counts = [0u32; 6];
+    let mut counts = [0u32; EVENT_KINDS];
     for _ in 0..ticks {
         let mut inputs = Vec::with_capacity(PLAYERS as usize + 1);
         for id in 0..PLAYERS {
@@ -86,6 +90,10 @@ pub fn run(seed: u64, ticks: u32) -> Vec<u8> {
                 _ => to[1] = f32::NAN,
             }
             inputs.push(PlayerInput { player: id, position: to, yaw: signed(&mut rng), pitch: signed(&mut rng) });
+        }
+        if rng.next_u32().is_multiple_of(40) {
+            // a second input for a player who has one already
+            inputs.push(PlayerInput { player: 0, position: [0.0; 3], yaw: 0.0, pitch: 0.0 });
         }
         if rng.next_u32().is_multiple_of(50) {
             inputs.push(PlayerInput { player: PLAYERS + 5, position: [0.0; 3], yaw: 0.0, pitch: 0.0 });
@@ -112,8 +120,8 @@ pub fn run(seed: u64, ticks: u32) -> Vec<u8> {
 
 /// Read back what [`run`] returned: how many events there were of each kind,
 /// accepted first, then each [`RejectReason`] in declaration order.
-pub fn event_counts(output: &[u8]) -> [u32; 6] {
-    let tail = &output[output.len() - 24..];
+pub fn event_counts(output: &[u8]) -> [u32; EVENT_KINDS] {
+    let tail = &output[output.len() - EVENT_KINDS * 4..];
     std::array::from_fn(|i| u32::from_le_bytes(tail[i * 4..i * 4 + 4].try_into().unwrap()))
 }
 
