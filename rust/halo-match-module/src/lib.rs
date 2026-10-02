@@ -603,10 +603,6 @@ pub fn reset(ctx: &ReducerContext) -> Result<(), String> {
     for id in ids {
         remove_player(ctx, id);
     }
-    let seats: Vec<u16> = ctx.db.seat().iter().map(|s| s.player).collect();
-    for id in seats {
-        ctx.db.seat().player().delete(id);
-    }
     let batches: Vec<u64> = ctx.db.input_batch().iter().map(|b| b.id).collect();
     for id in batches {
         ctx.db.input_batch().id().delete(id);
@@ -662,7 +658,7 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
             .db
             .seat()
             .iter()
-            .filter(|s| s.away_since != 0 && marker.tick >= s.away_since + grace)
+            .filter(|s| s.away_since != 0 && marker.tick >= s.away_since.saturating_add(grace))
             .map(|s| s.player)
             .collect();
         for id in gone {

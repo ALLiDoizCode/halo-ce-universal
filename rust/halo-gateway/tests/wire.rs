@@ -27,14 +27,8 @@ use halo_wire::auth;
 use halo_wire::datagram::{
     Ack, Challenge, ClientMessage, Refused, ServerMessage, REFUSED_BAD_PROOF, REFUSED_NO_SEAT, REFUSED_STALE,
 };
+use halo_wire::planner::STALENESS_BOUND_TICKS;
 use halo_wire::unit::Bounds;
-
-/// The bound on how stale any player's state is for any recipient, in ticks,
-/// that the gateway promises with 5% of datagrams lost each way (a tick is
-/// 33.3 ms). See `halo_wire::planner`: a lost Snapshot is noticed from the
-/// recipient's acknowledgements and its players sent again first, and no
-/// player waits more than 15 ticks to be sent.
-const STALENESS_BOUND_TICKS: u32 = 30;
 
 fn serial() -> MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());

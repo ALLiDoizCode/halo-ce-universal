@@ -42,7 +42,7 @@ fn main() {
     let send_threads: usize = get("send-threads", "4").parse().unwrap();
     let loss: f32 = get("loss", "0").parse().unwrap();
     let delay_ms: u64 = get("delay-ms", "0").parse().unwrap();
-    let stale_bound: u32 = get("stale-bound", "30").parse().unwrap();
+    let stale_bound: u32 = get("stale-bound", &halo_wire::planner::STALENESS_BOUND_TICKS.to_string()).parse().unwrap();
 
     let (map, anchors): (MapData, Vec<[f32; 3]>) = if map_name == "flat" {
         let side = (players as f32).sqrt().ceil() as usize;
