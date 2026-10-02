@@ -23,6 +23,13 @@ pub struct Stats {
     /// ... dropped because they did not come from the address bound to their player.
     pub inputs_unbound: AtomicU64,
     pub hellos: AtomicU64,
+    /// Challenges sent in answer to Hellos.
+    pub challenges: AtomicU64,
+    /// Auths accepted (a resend of one counts again), and refused.
+    pub auths_accepted: AtomicU64,
+    pub auths_refused: AtomicU64,
+    /// Players unbound because they were silent for the idle timeout.
+    pub sessions_expired: AtomicU64,
     /// Datagrams that did not parse.
     pub malformed: AtomicU64,
     pub datagrams_sent: AtomicU64,
@@ -72,6 +79,10 @@ pub struct StatsSnapshot {
     pub inputs_late: u64,
     pub inputs_unbound: u64,
     pub hellos: u64,
+    pub challenges: u64,
+    pub auths_accepted: u64,
+    pub auths_refused: u64,
+    pub sessions_expired: u64,
     pub malformed: u64,
     pub datagrams_sent: u64,
     pub wire_bytes_sent: u64,
@@ -123,6 +134,10 @@ impl Stats {
             inputs_late: self.inputs_late.load(Relaxed),
             inputs_unbound: self.inputs_unbound.load(Relaxed),
             hellos: self.hellos.load(Relaxed),
+            challenges: self.challenges.load(Relaxed),
+            auths_accepted: self.auths_accepted.load(Relaxed),
+            auths_refused: self.auths_refused.load(Relaxed),
+            sessions_expired: self.sessions_expired.load(Relaxed),
             malformed: self.malformed.load(Relaxed),
             datagrams_sent: self.datagrams_sent.load(Relaxed),
             wire_bytes_sent: self.wire_bytes_sent.load(Relaxed),

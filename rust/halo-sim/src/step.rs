@@ -23,7 +23,8 @@ pub enum RejectReason {
     UnknownPlayer,
     /// A reported number is NaN or infinite.
     NotFinite,
-    /// The move covers more than the speed bound allows in a tick.
+    /// The move covers more than the speed bound allows in the ticks since the
+    /// player's last accepted move (one tick's worth if they moved last tick).
     TooFast,
     /// The straight path from the old position to the new one crosses a surface.
     ThroughSurface,
@@ -63,7 +64,7 @@ pub fn step(store: &mut impl Store, inputs: &[PlayerInput], map: &MapData, _rng:
             events.push(Event::MoveRejected { player: input.player, reason: RejectReason::UnknownPlayer });
             continue;
         };
-        match validate(map, player.position, input) {
+        match validate(map, player.position, input, store.ticks_since_move(input.player)) {
             Ok(()) => {
                 store.set_player(Player { position: input.position, yaw: input.yaw, pitch: input.pitch, ..player });
                 events.push(Event::MoveAccepted { player: input.player });
