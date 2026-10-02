@@ -5,6 +5,8 @@
 //! - [`session`]: one session, in Rust terms: UDP to the gateway, SpacetimeDB
 //!   directly, each on its own thread.
 //! - [`local`]: the local player's own movement, from the map's collision data.
+//! - [`browser`]: the server list, from the root database, under the player's
+//!   own identity ([`identity`] keeps its token between sessions);
 //! - [`ffi`]: the same, as C functions that pass only floats, 32-bit integers
 //!   and pointers.
 //!
@@ -13,8 +15,12 @@
 //! (with OpenSSL built from source into the archive, see Cargo.toml) and
 //! `i686-pc-windows-msvc` (with Schannel); `tools/rust_client.py` builds it.
 
+pub mod browser;
 pub mod ffi;
+pub mod identity;
 pub mod local;
 pub mod session;
 
-pub use session::{Config, Frame, RemoteUnit, Session, Slow};
+pub use browser::{Browser, ServerEntry};
+pub use identity::IdentityFile;
+pub use session::{Config, Frame, Refusal, RefusalKind, RemoteUnit, Session, Slow};

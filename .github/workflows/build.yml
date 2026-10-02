@@ -147,9 +147,11 @@ jobs:
   rust-match:
     # The match module (rust/halo-match-module, SpacetimeDB 2.10.2, built for
     # WebAssembly), the driver that tests it (rust/halo-match-driver), and the
-    # UDP gateway with its wire tests (rust/halo-gateway), and the client
-    # library of the C game (rust/halo-client), tested through its C interface
-    # against both. The tests start a
+    # UDP gateway with its wire tests (rust/halo-gateway), the root database's
+    # module and the server orchestration that runs the server list, the match
+    # rotation and the bans (rust/halo-root-module, rust/halo-server), and the
+    # client library of the C game (rust/halo-client), tested through its C
+    # interface against all of them. The tests start a
     # real SpacetimeDB Standalone of their own on a free port, so this job
     # fetches the pinned release (a 58 MB download, checked against its SHA-256
     # and cached), and needs no game data: they run on a flat floor. The 500-player measurement on the real maps is not run here.
@@ -167,9 +169,11 @@ jobs:
             ~/.cargo/registry
             rust/halo-match-module/target
             rust/halo-match-driver/target
+            rust/halo-root-module/target
             rust/halo-gateway/target
+            rust/halo-server/target
             rust/halo-client/target
-          key: rust-match-${{ hashFiles('rust/halo-match-*/Cargo.toml', 'rust/halo-match-*/Cargo.lock', 'rust/halo-gateway/Cargo.toml', 'rust/halo-gateway/Cargo.lock', 'rust/halo-client/Cargo.toml', 'rust/halo-client/Cargo.lock', 'rust/Cargo.lock') }}
+          key: rust-match-${{ hashFiles('rust/halo-match-*/Cargo.toml', 'rust/halo-match-*/Cargo.lock', 'rust/halo-root-module/Cargo.toml', 'rust/halo-root-module/Cargo.lock', 'rust/halo-gateway/Cargo.toml', 'rust/halo-gateway/Cargo.lock', 'rust/halo-server/Cargo.toml', 'rust/halo-server/Cargo.lock', 'rust/halo-client/Cargo.toml', 'rust/halo-client/Cargo.lock', 'rust/Cargo.lock') }}
           restore-keys: rust-match-
 
       - uses: actions/cache@v4
@@ -195,22 +199,27 @@ jobs:
 
       - name: Format and lints
         run: |
-          for crate in halo-match-module halo-match-driver halo-gateway halo-client; do
+          for crate in halo-match-module halo-root-module halo-match-driver halo-gateway halo-server halo-client; do
             (cd rust/$crate && cargo fmt --check)
           done
           (cd rust/halo-match-module && cargo clippy --target wasm32-unknown-unknown --locked -- -D warnings)
+          (cd rust/halo-root-module && cargo clippy --target wasm32-unknown-unknown --locked -- -D warnings)
           (cd rust/halo-match-driver && cargo clippy --all-targets --locked -- -D warnings)
           (cd rust/halo-gateway && cargo clippy --all-targets --locked -- -D warnings)
+          (cd rust/halo-server && cargo clippy --all-targets --locked -- -D warnings)
           (cd rust/halo-client && cargo clippy --all-targets --locked -- -D warnings)
 
-      - name: Build the module for WebAssembly
-        working-directory: rust/halo-match-module
-        run: cargo build --locked --release --target wasm32-unknown-unknown
+      - name: Build the modules for WebAssembly
+        run: |
+          (cd rust/halo-match-module && cargo build --locked --release --target wasm32-unknown-unknown)
+          (cd rust/halo-root-module && cargo build --locked --release --target wasm32-unknown-unknown)
 
       - name: Test against a local SpacetimeDB
+        # one test at a time: each starts a SpacetimeDB, and the tick-by-tick
+        # comparisons are timing-sensitive on a shared runner
         working-directory: rust/halo-match-driver
         run: |
-          HALO_STDB_BIN="$HOME/spacetimedb" cargo test --locked --release -- --nocapture
+          HALO_STDB_BIN="$HOME/spacetimedb" cargo test --locked --release -- --nocapture --test-threads=1
 
       - name: Test the gateway on the wire
         # simulated UDP players against a real SpacetimeDB and the gateway;
@@ -219,10 +228,19 @@ jobs:
         run: |
           HALO_STDB_BIN="$HOME/spacetimedb" cargo test --locked --release -- --nocapture --test-threads=1
 
+      - name: Test the server orchestration
+        # a whole server (the root database, the rotation of matches in fresh
+        # databases, bans, the list) on a real SpacetimeDB, with a flat floor for
+        # a map
+        working-directory: rust/halo-server
+        run: |
+          HALO_STDB_BIN="$HOME/spacetimedb" cargo test --locked --release -- --nocapture --test-threads=1
+
       - name: Test the client library on its C interface
         # a session of the library against a real SpacetimeDB and gateway with
-        # simulated players; the headless game's run needs the game's own
-        # data, and skips itself here
+        # simulated players, and its server list, identity and refusals against
+        # a whole server; the games' runs need the game's own data, and skip
+        # themselves here
         working-directory: rust/halo-client
         run: |
           HALO_STDB_BIN="$HOME/spacetimedb" cargo test --locked --release -- --nocapture --test-threads=1

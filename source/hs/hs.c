@@ -14088,6 +14088,9 @@ static boolean hs_expression_changes_no_game(
 static boolean hs_compile_and_evaluate_command(
 	char const *expression);
 
+/* port: the large-scale mode's console commands (port/linux/game/large_mode.c) */
+boolean large_mode_console_command(char const *expression);
+
 /* port: a command someone typed (the console, the telnet console, a cheat
 button, init.txt): what it logs is its answer, shown whatever
 config.toml's game.console_log is (terminal_command_running) */
@@ -14113,6 +14116,10 @@ static boolean hs_compile_and_evaluate_command(
 	char buffer[1024];
 	char expanded[1024];
 
+	/* port: the large-scale mode's server list ("servers", "join", "leave"),
+	which change nothing of a game and are no script's */
+	if (large_mode_console_command(expression))
+		return TRUE;
 	/* port: playing in another's game, the host decides the game: no
 	cheats, no game speed, nothing else a command changes of the game (the
 	game run each tick also puts back what was changed before joining,

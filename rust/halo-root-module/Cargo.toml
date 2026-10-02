@@ -1,0 +1,17 @@
+[package]
+name = "halo-root-module"
+version = "0.1.0"
+description = "The SpacetimeDB module of the root database: the server list, the identities seen and the bans of one operator's large-scale servers"
+edition = "2021"
+publish = false
+
+# Its own workspace, with its own Cargo.lock, like the match module: a
+# WebAssembly cdylib on the SpacetimeDB crates, which rust/Cargo.toml excludes.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# pinned: the module and the server it runs on are the same release line
+spacetimedb = "=2.10.2"

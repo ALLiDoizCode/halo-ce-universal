@@ -6,75 +6,35 @@
 #![allow(unused, clippy::all)]
 use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
-pub mod add_players_reducer;
-pub mod ban_type;
-pub mod clear_ban_reducer;
-pub mod input_batch_type;
-pub mod join_reducer;
-pub mod leave_reducer;
-pub mod load_map_reducer;
-pub mod map_blob_type;
-pub mod map_info_table;
-pub mod map_info_type;
-pub mod match_config_type;
-pub mod match_state_type;
-pub mod match_tick_table;
-pub mod match_tick_type;
-pub mod member_name_type;
-pub mod player_row_type;
-pub mod player_table;
-pub mod remove_players_reducer;
-pub mod reset_reducer;
-pub mod roster_row_type;
-pub mod roster_table;
-pub mod seat_table;
-pub mod seat_type;
-pub mod set_away_grace_reducer;
-pub mod set_ban_reducer;
-pub mod set_capacity_reducer;
-pub mod set_gateway_reducer;
-pub mod set_name_reducer;
-pub mod set_spawn_points_reducer;
-pub mod spawn_point_type;
-pub mod start_reducer;
-pub mod stop_reducer;
-pub mod submit_inputs_reducer;
-pub mod tick_timer_type;
+pub mod ban_identity_reducer;
+pub mod banned_table;
+pub mod banned_type;
+pub mod clear_servers_reducer;
+pub mod known_identity_table;
+pub mod known_identity_type;
+pub mod register_reducer;
+pub mod remove_server_reducer;
+pub mod root_config_type;
+pub mod server_table;
+pub mod server_type;
+pub mod set_server_players_reducer;
+pub mod set_server_reducer;
+pub mod unban_identity_reducer;
 
-pub use add_players_reducer::add_players;
-pub use ban_type::Ban;
-pub use clear_ban_reducer::clear_ban;
-pub use input_batch_type::InputBatch;
-pub use join_reducer::join;
-pub use leave_reducer::leave;
-pub use load_map_reducer::load_map;
-pub use map_blob_type::MapBlob;
-pub use map_info_table::*;
-pub use map_info_type::MapInfo;
-pub use match_config_type::MatchConfig;
-pub use match_state_type::MatchState;
-pub use match_tick_table::*;
-pub use match_tick_type::MatchTick;
-pub use member_name_type::MemberName;
-pub use player_row_type::PlayerRow;
-pub use player_table::*;
-pub use remove_players_reducer::remove_players;
-pub use reset_reducer::reset;
-pub use roster_row_type::RosterRow;
-pub use roster_table::*;
-pub use seat_table::*;
-pub use seat_type::Seat;
-pub use set_away_grace_reducer::set_away_grace;
-pub use set_ban_reducer::set_ban;
-pub use set_capacity_reducer::set_capacity;
-pub use set_gateway_reducer::set_gateway;
-pub use set_name_reducer::set_name;
-pub use set_spawn_points_reducer::set_spawn_points;
-pub use spawn_point_type::SpawnPoint;
-pub use start_reducer::start;
-pub use stop_reducer::stop;
-pub use submit_inputs_reducer::submit_inputs;
-pub use tick_timer_type::TickTimer;
+pub use ban_identity_reducer::ban_identity;
+pub use banned_table::*;
+pub use banned_type::Banned;
+pub use clear_servers_reducer::clear_servers;
+pub use known_identity_table::*;
+pub use known_identity_type::KnownIdentity;
+pub use register_reducer::register;
+pub use remove_server_reducer::remove_server;
+pub use root_config_type::RootConfig;
+pub use server_table::*;
+pub use server_type::Server;
+pub use set_server_players_reducer::set_server_players;
+pub use set_server_reducer::set_server;
+pub use unban_identity_reducer::unban_identity;
 
 #[derive(Clone, PartialEq, Debug)]
 
@@ -84,22 +44,13 @@ pub use tick_timer_type::TickTimer;
 /// to indicate which reducer caused the event.
 
 pub enum Reducer {
-    AddPlayers { batch: Vec<u8> },
-    ClearBan { identity: __sdk::Identity },
-    Join { udp_key: Vec<u8> },
-    Leave,
-    LoadMap { data: Vec<u8> },
-    RemovePlayers { ids: Vec<u16> },
-    Reset,
-    SetAwayGrace { ticks: u64 },
-    SetBan { identity: __sdk::Identity, reason: String },
-    SetCapacity { capacity: u16 },
-    SetGateway { gateway: __sdk::Identity },
-    SetName { identity: __sdk::Identity, name: String },
-    SetSpawnPoints { batch: Vec<u8> },
-    Start,
-    Stop,
-    SubmitInputs { batch: Vec<u8> },
+    BanIdentity { identity: __sdk::Identity, reason: String },
+    ClearServers,
+    Register { name: String },
+    RemoveServer { id: String },
+    SetServer { row: Server },
+    SetServerPlayers { id: String, players: u32 },
+    UnbanIdentity { identity: __sdk::Identity },
 }
 
 impl __sdk::InModule for Reducer {
@@ -109,64 +60,41 @@ impl __sdk::InModule for Reducer {
 impl __sdk::Reducer for Reducer {
     fn reducer_name(&self) -> &'static str {
         match self {
-            Reducer::AddPlayers { .. } => "add_players",
-            Reducer::ClearBan { .. } => "clear_ban",
-            Reducer::Join { .. } => "join",
-            Reducer::Leave => "leave",
-            Reducer::LoadMap { .. } => "load_map",
-            Reducer::RemovePlayers { .. } => "remove_players",
-            Reducer::Reset => "reset",
-            Reducer::SetAwayGrace { .. } => "set_away_grace",
-            Reducer::SetBan { .. } => "set_ban",
-            Reducer::SetCapacity { .. } => "set_capacity",
-            Reducer::SetGateway { .. } => "set_gateway",
-            Reducer::SetName { .. } => "set_name",
-            Reducer::SetSpawnPoints { .. } => "set_spawn_points",
-            Reducer::Start => "start",
-            Reducer::Stop => "stop",
-            Reducer::SubmitInputs { .. } => "submit_inputs",
+            Reducer::BanIdentity { .. } => "ban_identity",
+            Reducer::ClearServers => "clear_servers",
+            Reducer::Register { .. } => "register",
+            Reducer::RemoveServer { .. } => "remove_server",
+            Reducer::SetServer { .. } => "set_server",
+            Reducer::SetServerPlayers { .. } => "set_server_players",
+            Reducer::UnbanIdentity { .. } => "unban_identity",
             _ => unreachable!(),
         }
     }
     #[allow(clippy::clone_on_copy)]
     fn args_bsatn(&self) -> Result<Vec<u8>, __sats::bsatn::EncodeError> {
         match self {
-            Reducer::AddPlayers { batch } => {
-                __sats::bsatn::to_vec(&add_players_reducer::AddPlayersArgs { batch: batch.clone() })
+            Reducer::BanIdentity { identity, reason } => {
+                __sats::bsatn::to_vec(&ban_identity_reducer::BanIdentityArgs {
+                    identity: identity.clone(),
+                    reason: reason.clone(),
+                })
             }
-            Reducer::ClearBan { identity } => {
-                __sats::bsatn::to_vec(&clear_ban_reducer::ClearBanArgs { identity: identity.clone() })
+            Reducer::ClearServers => __sats::bsatn::to_vec(&clear_servers_reducer::ClearServersArgs {}),
+            Reducer::Register { name } => __sats::bsatn::to_vec(&register_reducer::RegisterArgs { name: name.clone() }),
+            Reducer::RemoveServer { id } => {
+                __sats::bsatn::to_vec(&remove_server_reducer::RemoveServerArgs { id: id.clone() })
             }
-            Reducer::Join { udp_key } => __sats::bsatn::to_vec(&join_reducer::JoinArgs { udp_key: udp_key.clone() }),
-            Reducer::Leave => __sats::bsatn::to_vec(&leave_reducer::LeaveArgs {}),
-            Reducer::LoadMap { data } => __sats::bsatn::to_vec(&load_map_reducer::LoadMapArgs { data: data.clone() }),
-            Reducer::RemovePlayers { ids } => {
-                __sats::bsatn::to_vec(&remove_players_reducer::RemovePlayersArgs { ids: ids.clone() })
+            Reducer::SetServer { row } => {
+                __sats::bsatn::to_vec(&set_server_reducer::SetServerArgs { row: row.clone() })
             }
-            Reducer::Reset => __sats::bsatn::to_vec(&reset_reducer::ResetArgs {}),
-            Reducer::SetAwayGrace { ticks } => {
-                __sats::bsatn::to_vec(&set_away_grace_reducer::SetAwayGraceArgs { ticks: ticks.clone() })
+            Reducer::SetServerPlayers { id, players } => {
+                __sats::bsatn::to_vec(&set_server_players_reducer::SetServerPlayersArgs {
+                    id: id.clone(),
+                    players: players.clone(),
+                })
             }
-            Reducer::SetBan { identity, reason } => __sats::bsatn::to_vec(&set_ban_reducer::SetBanArgs {
-                identity: identity.clone(),
-                reason: reason.clone(),
-            }),
-            Reducer::SetCapacity { capacity } => {
-                __sats::bsatn::to_vec(&set_capacity_reducer::SetCapacityArgs { capacity: capacity.clone() })
-            }
-            Reducer::SetGateway { gateway } => {
-                __sats::bsatn::to_vec(&set_gateway_reducer::SetGatewayArgs { gateway: gateway.clone() })
-            }
-            Reducer::SetName { identity, name } => {
-                __sats::bsatn::to_vec(&set_name_reducer::SetNameArgs { identity: identity.clone(), name: name.clone() })
-            }
-            Reducer::SetSpawnPoints { batch } => {
-                __sats::bsatn::to_vec(&set_spawn_points_reducer::SetSpawnPointsArgs { batch: batch.clone() })
-            }
-            Reducer::Start => __sats::bsatn::to_vec(&start_reducer::StartArgs {}),
-            Reducer::Stop => __sats::bsatn::to_vec(&stop_reducer::StopArgs {}),
-            Reducer::SubmitInputs { batch } => {
-                __sats::bsatn::to_vec(&submit_inputs_reducer::SubmitInputsArgs { batch: batch.clone() })
+            Reducer::UnbanIdentity { identity } => {
+                __sats::bsatn::to_vec(&unban_identity_reducer::UnbanIdentityArgs { identity: identity.clone() })
             }
             _ => unreachable!(),
         }
@@ -177,11 +105,9 @@ impl __sdk::Reducer for Reducer {
 #[allow(non_snake_case)]
 #[doc(hidden)]
 pub struct DbUpdate {
-    map_info: __sdk::TableUpdate<MapInfo>,
-    match_tick: __sdk::TableUpdate<MatchTick>,
-    player: __sdk::TableUpdate<PlayerRow>,
-    roster: __sdk::TableUpdate<RosterRow>,
-    seat: __sdk::TableUpdate<Seat>,
+    banned: __sdk::TableUpdate<Banned>,
+    known_identity: __sdk::TableUpdate<KnownIdentity>,
+    server: __sdk::TableUpdate<Server>,
 }
 
 impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
@@ -190,11 +116,11 @@ impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
         let mut db_update = DbUpdate::default();
         for table_update in __sdk::transaction_update_iter_table_updates(raw) {
             match &table_update.table_name[..] {
-                "map_info" => db_update.map_info.append(map_info_table::parse_table_update(table_update)?),
-                "match_tick" => db_update.match_tick.append(match_tick_table::parse_table_update(table_update)?),
-                "player" => db_update.player.append(player_table::parse_table_update(table_update)?),
-                "roster" => db_update.roster.append(roster_table::parse_table_update(table_update)?),
-                "seat" => db_update.seat.append(seat_table::parse_table_update(table_update)?),
+                "banned" => db_update.banned.append(banned_table::parse_table_update(table_update)?),
+                "known_identity" => {
+                    db_update.known_identity.append(known_identity_table::parse_table_update(table_update)?)
+                }
+                "server" => db_update.server.append(server_table::parse_table_update(table_update)?),
 
                 unknown => {
                     return Err(__sdk::InternalError::unknown_name("table", unknown, "DatabaseUpdate").into());
@@ -213,14 +139,12 @@ impl __sdk::DbUpdate for DbUpdate {
     fn apply_to_client_cache(&self, cache: &mut __sdk::ClientCache<RemoteModule>) -> AppliedDiff<'_> {
         let mut diff = AppliedDiff::default();
 
-        diff.map_info =
-            cache.apply_diff_to_table::<MapInfo>("map_info", &self.map_info).with_updates_by_pk(|row| &row.id);
-        diff.match_tick =
-            cache.apply_diff_to_table::<MatchTick>("match_tick", &self.match_tick).with_updates_by_pk(|row| &row.id);
-        diff.player = cache.apply_diff_to_table::<PlayerRow>("player", &self.player).with_updates_by_pk(|row| &row.id);
-        diff.roster =
-            cache.apply_diff_to_table::<RosterRow>("roster", &self.roster).with_updates_by_pk(|row| &row.player);
-        diff.seat = cache.apply_diff_to_table::<Seat>("seat", &self.seat).with_updates_by_pk(|row| &row.player);
+        diff.banned =
+            cache.apply_diff_to_table::<Banned>("banned", &self.banned).with_updates_by_pk(|row| &row.identity);
+        diff.known_identity = cache
+            .apply_diff_to_table::<KnownIdentity>("known_identity", &self.known_identity)
+            .with_updates_by_pk(|row| &row.identity);
+        diff.server = cache.apply_diff_to_table::<Server>("server", &self.server).with_updates_by_pk(|row| &row.id);
 
         diff
     }
@@ -228,11 +152,9 @@ impl __sdk::DbUpdate for DbUpdate {
         let mut db_update = DbUpdate::default();
         for table_rows in raw.tables {
             match &table_rows.table[..] {
-                "map_info" => db_update.map_info.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
-                "match_tick" => db_update.match_tick.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
-                "player" => db_update.player.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
-                "roster" => db_update.roster.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
-                "seat" => db_update.seat.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "banned" => db_update.banned.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "known_identity" => db_update.known_identity.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "server" => db_update.server.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 unknown => {
                     return Err(__sdk::InternalError::unknown_name("table", unknown, "QueryRows").into());
                 }
@@ -244,11 +166,9 @@ impl __sdk::DbUpdate for DbUpdate {
         let mut db_update = DbUpdate::default();
         for table_rows in raw.tables {
             match &table_rows.table[..] {
-                "map_info" => db_update.map_info.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
-                "match_tick" => db_update.match_tick.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
-                "player" => db_update.player.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
-                "roster" => db_update.roster.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
-                "seat" => db_update.seat.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "banned" => db_update.banned.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "known_identity" => db_update.known_identity.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "server" => db_update.server.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 unknown => {
                     return Err(__sdk::InternalError::unknown_name("table", unknown, "QueryRows").into());
                 }
@@ -262,11 +182,9 @@ impl __sdk::DbUpdate for DbUpdate {
 #[allow(non_snake_case)]
 #[doc(hidden)]
 pub struct AppliedDiff<'r> {
-    map_info: __sdk::TableAppliedDiff<'r, MapInfo>,
-    match_tick: __sdk::TableAppliedDiff<'r, MatchTick>,
-    player: __sdk::TableAppliedDiff<'r, PlayerRow>,
-    roster: __sdk::TableAppliedDiff<'r, RosterRow>,
-    seat: __sdk::TableAppliedDiff<'r, Seat>,
+    banned: __sdk::TableAppliedDiff<'r, Banned>,
+    known_identity: __sdk::TableAppliedDiff<'r, KnownIdentity>,
+    server: __sdk::TableAppliedDiff<'r, Server>,
     __unused: std::marker::PhantomData<&'r ()>,
 }
 
@@ -276,11 +194,9 @@ impl __sdk::InModule for AppliedDiff<'_> {
 
 impl<'r> __sdk::AppliedDiff<'r> for AppliedDiff<'r> {
     fn invoke_row_callbacks(&self, event: &EventContext, callbacks: &mut __sdk::DbCallbacks<RemoteModule>) {
-        callbacks.invoke_table_row_callbacks::<MapInfo>("map_info", &self.map_info, event);
-        callbacks.invoke_table_row_callbacks::<MatchTick>("match_tick", &self.match_tick, event);
-        callbacks.invoke_table_row_callbacks::<PlayerRow>("player", &self.player, event);
-        callbacks.invoke_table_row_callbacks::<RosterRow>("roster", &self.roster, event);
-        callbacks.invoke_table_row_callbacks::<Seat>("seat", &self.seat, event);
+        callbacks.invoke_table_row_callbacks::<Banned>("banned", &self.banned, event);
+        callbacks.invoke_table_row_callbacks::<KnownIdentity>("known_identity", &self.known_identity, event);
+        callbacks.invoke_table_row_callbacks::<Server>("server", &self.server, event);
     }
 }
 
@@ -935,11 +851,9 @@ impl __sdk::SpacetimeModule for RemoteModule {
     type QueryBuilder = __sdk::QueryBuilder;
 
     fn register_tables(client_cache: &mut __sdk::ClientCache<Self>) {
-        map_info_table::register_table(client_cache);
-        match_tick_table::register_table(client_cache);
-        player_table::register_table(client_cache);
-        roster_table::register_table(client_cache);
-        seat_table::register_table(client_cache);
+        banned_table::register_table(client_cache);
+        known_identity_table::register_table(client_cache);
+        server_table::register_table(client_cache);
     }
-    const ALL_TABLE_NAMES: &'static [&'static str] = &["map_info", "match_tick", "player", "roster", "seat"];
+    const ALL_TABLE_NAMES: &'static [&'static str] = &["banned", "known_identity", "server"];
 }

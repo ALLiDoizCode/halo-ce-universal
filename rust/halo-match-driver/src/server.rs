@@ -14,16 +14,25 @@ pub fn stdb_bin_dir() -> Option<PathBuf> {
     std::env::var_os("HALO_STDB_BIN").map(PathBuf::from)
 }
 
-/// Build the module for WebAssembly and return the `.wasm`'s path.
+/// Build the match module for WebAssembly and return the `.wasm`'s path.
 pub fn build_module() -> PathBuf {
-    let module = Path::new(env!("CARGO_MANIFEST_DIR")).join("../halo-match-module");
+    build_wasm("halo-match-module", "halo_match_module")
+}
+
+/// Build the root database's module for WebAssembly and return the `.wasm`'s path.
+pub fn build_root_module() -> PathBuf {
+    build_wasm("halo-root-module", "halo_root_module")
+}
+
+fn build_wasm(crate_dir: &str, file: &str) -> PathBuf {
+    let module = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(crate_dir);
     let status = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
         .args(["build", "--release", "--locked", "--target", "wasm32-unknown-unknown"])
         .current_dir(&module)
         .status()
         .expect("run cargo");
-    assert!(status.success(), "building the module failed");
-    module.join("target/wasm32-unknown-unknown/release/halo_match_module.wasm")
+    assert!(status.success(), "building {crate_dir} failed");
+    module.join(format!("target/wasm32-unknown-unknown/release/{file}.wasm"))
 }
 
 /// An identity on a server, with the token that proves it: what a connection
@@ -155,7 +164,7 @@ impl Server {
     /// The server's Prometheus metrics, parsed for the tick reducer.
     pub fn tick_metrics(&self) -> TickMetrics {
         let text = http_get(self.port, "/v1/metrics").expect("metrics");
-        TickMetrics::parse(&text)
+        TickMetrics::parse(&text, None)
     }
 }
 
@@ -214,11 +223,17 @@ pub struct TickMetrics {
 }
 
 impl TickMetrics {
-    fn parse(text: &str) -> TickMetrics {
+    /// The figures in a metrics page: summed over every database, or those of
+    /// the database with this identity (hex) alone.
+    pub fn parse(text: &str, database: Option<&str>) -> TickMetrics {
         let mut m = TickMetrics::default();
+        let wanted = database.map(|db| format!("db=\"{db}\""));
         for line in text.lines().filter(|l| !l.starts_with('#')) {
             let Some((name_labels, value)) = line.rsplit_once(' ') else { continue };
             let Ok(value) = value.parse::<f64>() else { continue };
+            if wanted.as_ref().is_some_and(|w| !name_labels.contains(w.as_str())) {
+                continue;
+            }
             let has = |s: &str| name_labels.contains(s);
             if has("reducer=\"tick\"") {
                 if name_labels.starts_with("spacetime_reducer_plus_query_duration_sec_count") {

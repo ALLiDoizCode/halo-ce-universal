@@ -205,6 +205,15 @@ static const struct config_setting config_settings[] =
 		"slow state come from directly: its URI." },
 	{ "large.database", _config_string, "\"\"", "HALO_LARGE_DATABASE", _environment_value, _platform_desktop,
 		"The database of the match to join (each match is its own)." },
+	{ "large.root", _config_string, "\"\"", "HALO_LARGE_ROOT", _environment_value, _platform_desktop,
+		"The large-scale server list: the name of the root database on\n"
+		"large.spacetimedb. With it set and no large.map, the developer console's\n"
+		"servers command lists the servers, join <number> takes a seat on one and\n"
+		"plays its map, and leave stops. Empty has no list." },
+	{ "large.name", _config_string, "\"\"", "HALO_LARGE_NAME", _environment_value, _platform_desktop,
+		"The name shown over the player on the large-scale servers (large.root):\n"
+		"letters, digits, spaces and _ . -, the first 11 of them. Empty: \"Player\"\n"
+		"and the player's number. It goes with the identity, to every server." },
 	{ "large.log_players", _config_boolean, "false", "HALO_LARGE_LOG", _environment_set_is_true, _platform_desktop,
 		"Log every player the gateway has sent, with their state, once a second\n"
 		"(for tests; the log has the session's own line every second anyway)." },
