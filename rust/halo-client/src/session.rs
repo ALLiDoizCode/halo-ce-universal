@@ -342,7 +342,8 @@ impl Drop for Session {
 fn frame_of(shared: &Shared) -> Frame {
     let newest = shared.newest_tick;
     let in_range = |unit: &&RemoteUnit| {
-        shared.roster.contains_key(&unit.state.player) && (newest.wrapping_sub(unit.tick) as i32) <= OUT_OF_RANGE_TICKS as i32
+        shared.roster.contains_key(&unit.state.player)
+            && (newest.wrapping_sub(unit.tick) as i32) <= OUT_OF_RANGE_TICKS as i32
     };
     Frame { tick: newest, units: shared.units.values().filter(in_range).copied().collect() }
 }
@@ -637,7 +638,15 @@ mod tests {
     use super::*;
 
     fn held(player: u16, tick: u32) -> RemoteUnit {
-        let state = UnitState { player, position: [1.0, 2.0, 3.0], velocity: [0.0; 3], yaw: 0.0, pitch: 0.0, tick: 0, flags: 0 };
+        let state = UnitState {
+            player,
+            position: [1.0, 2.0, 3.0],
+            velocity: [0.0; 3],
+            yaw: 0.0,
+            pitch: 0.0,
+            tick: 0,
+            flags: 0,
+        };
         RemoteUnit { state, tick }
     }
 
@@ -671,8 +680,7 @@ mod tests {
 
     #[test]
     fn a_player_the_roster_does_not_hold_is_not_in_the_frame() {
-        let mut shared = Shared::default();
-        shared.newest_tick = 5;
+        let mut shared = Shared { newest_tick: 5, ..Shared::default() };
         shared.units.insert(1, held(1, 5));
         assert!(frame_of(&shared).units.is_empty(), "sent, but nobody knows who they are");
         shared.roster.insert(1, member());

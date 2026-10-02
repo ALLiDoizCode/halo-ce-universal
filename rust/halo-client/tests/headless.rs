@@ -176,7 +176,11 @@ fn the_logged_players_are_the_ones_the_server_sent() {
             .env("HALO_UPDATE_ANSWER", "no")
             .env("HALO_EXIT_AFTER", GAME_SECONDS.to_string())
             // (to see what is drawn: HALO_SCREENSHOT_DIR and _EVERY, passed on if set)
-            .envs(["HALO_SCREENSHOT_DIR", "HALO_SCREENSHOT_EVERY"].iter().filter_map(|n| Some((*n, std::env::var(n).ok()?))))
+            .envs(
+                ["HALO_SCREENSHOT_DIR", "HALO_SCREENSHOT_EVERY"]
+                    .iter()
+                    .filter_map(|n| Some((*n, std::env::var(n).ok()?))),
+            )
             .stdout(Stdio::from(log.try_clone().unwrap()))
             .stderr(Stdio::from(log))
             .spawn()
@@ -294,7 +298,11 @@ fn the_logged_players_are_the_ones_the_server_sent() {
         drawn_players.insert(d.player);
         drawn_compared += 1;
     }
-    println!("{} drawn lines, {drawn_compared} compared with the server, {} distinct players", drawn.len(), drawn_players.len());
+    println!(
+        "{} drawn lines, {drawn_compared} compared with the server, {} distinct players",
+        drawn.len(),
+        drawn_players.len()
+    );
     assert!(drawn_compared > 300, "only {drawn_compared} drawn positions could be compared:\n{}", tail());
     assert!(drawn_players.len() >= others as usize - 2, "only {} players drawn", drawn_players.len());
     assert!(drawn.iter().any(|d| d.team == 0) && drawn.iter().any(|d| d.team == 1), "both teams are drawn");
