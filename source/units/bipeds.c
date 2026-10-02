@@ -355,6 +355,13 @@ enum
 #define BIPED_CLIMBING_SNAP_ANGLE ((real)(10.0*M_PI/180.0))
 #define MINIMUM_SLIPPING_FOOTSTEP_VELOCITY_SQUARED (1.f/900.f)
 
+/* ---------- port prototypes */
+
+/* the large-scale mode's adapter (port/linux/game/large_mode.c): whether a
+unit with suspended physics is one its library moves, and if it is whether it
+is in the air and how fast it landed this tick (world units a tick) */
+boolean large_mode_biped_state(long biped_index, boolean *airborne, real *landing_velocity);
+
 /* ---------- structures */
 
 struct biped_contact_point
@@ -3467,6 +3474,7 @@ static void biped_update_moving(
 	struct biped_datum *biped;
 	real movement_scale;
 	word in_flags;
+	boolean driven = FALSE;
 
 	biped = biped_get(biped_index);
 
@@ -3937,10 +3945,23 @@ static void biped_update_moving(
 
 	if (TEST_FLAG(biped->unit.flags, _unit_suspended_bit))
 	{
+		boolean driven_airborne;
+		real driven_landing_velocity;
+
 		physics.new_position = physics.position;
 		SET_FLAG(physics.out_flags, _biped_physics_out_airborne_bit, FALSE);
 		physics.new_velocity = *global_zero_vector3d;
 		physics.velocity = *global_zero_vector3d;
+		/* port: a unit the large-scale mode's library moves knows whether it
+		is in the air and how hard it last landed, which the engine's physics,
+		suspended, cannot say: the animations of the jump, the fall and the
+		landing play from them. The server, not the client, hurts a player. */
+		if (large_mode_biped_state(biped_index, &driven_airborne, &driven_landing_velocity))
+		{
+			SET_FLAG(physics.out_flags, _biped_physics_out_airborne_bit, driven_airborne);
+			physics.landing_velocity = driven_landing_velocity;
+			driven = TRUE;
+		}
 	}
 
 	{
@@ -4069,7 +4090,8 @@ static void biped_update_moving(
 			biped_index,
 			physics.bumped_object_index,
 			&physics.velocity);
-		biped_falling_damage(biped_index, physics.landing_velocity);
+		if (!driven)
+			biped_falling_damage(biped_index, physics.landing_velocity);
 
 		SET_FLAG(
 			biped->object.flags,

@@ -135,8 +135,9 @@ fn rejected_moves_are_counted_and_visible_per_player() {
     let client = server.connect("rejects");
     let map = flat_floor_map();
     client.load_map(map.to_bytes()).unwrap();
-    let spawn: Vec<PlayerInput> =
-        (0..3).map(|id| PlayerInput { player: id, position: [id as f32, 0.0, 0.01], yaw: 0.0, pitch: 0.0 }).collect();
+    let spawn: Vec<PlayerInput> = (0..3)
+        .map(|id| PlayerInput { player: id, position: [id as f32, 0.0, 0.01], yaw: 0.0, pitch: 0.0, flags: 0 })
+        .collect();
     client.add_players(&spawn).unwrap();
     client.start();
 
@@ -148,13 +149,13 @@ fn rejected_moves_are_counted_and_visible_per_player() {
         let p = |id: u16| seen.players[&id].clone();
         let inputs = [
             // 0 stays put, which is valid
-            PlayerInput { player: 0, position: [0.0, 0.0, 0.01], yaw: 0.5, pitch: 0.0 },
+            PlayerInput { player: 0, position: [0.0, 0.0, 0.01], yaw: 0.5, pitch: 0.0, flags: 0 },
             // 1 jumps 5 units in a tick
-            PlayerInput { player: 1, position: [p(1).x + 5.0, 0.0, 0.01], yaw: 0.0, pitch: 0.0 },
+            PlayerInput { player: 1, position: [p(1).x + 5.0, 0.0, 0.01], yaw: 0.0, pitch: 0.0, flags: 0 },
             // 2 goes down through the floor
-            PlayerInput { player: 2, position: [2.0, 0.0, -0.09], yaw: 0.0, pitch: 0.0 },
+            PlayerInput { player: 2, position: [2.0, 0.0, -0.09], yaw: 0.0, pitch: 0.0, flags: 0 },
             // 7 is not in the match
-            PlayerInput { player: 7, position: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0 },
+            PlayerInput { player: 7, position: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, flags: 0 },
         ];
         client.submit(&inputs);
     }
@@ -184,10 +185,12 @@ fn a_map_that_does_not_decode_is_refused_and_the_loaded_one_stays() {
     assert!(client.load_map(vec![1, 2, 3]).is_err());
 
     // still the floor: a move down through it is rejected
-    client.add_players(&[PlayerInput { player: 0, position: [0.0, 0.0, 0.01], yaw: 0.0, pitch: 0.0 }]).unwrap();
+    client
+        .add_players(&[PlayerInput { player: 0, position: [0.0, 0.0, 0.01], yaw: 0.0, pitch: 0.0, flags: 0 }])
+        .unwrap();
     client.start();
     client.discard_ticks();
-    client.submit(&[PlayerInput { player: 0, position: [0.0, 0.0, -0.09], yaw: 0.0, pitch: 0.0 }]);
+    client.submit(&[PlayerInput { player: 0, position: [0.0, 0.0, -0.09], yaw: 0.0, pitch: 0.0, flags: 0 }]);
     let seen = loop {
         let seen = client.next_tick(WAIT).unwrap();
         if seen.marker.rejected_total > 0 {
@@ -204,7 +207,9 @@ fn a_server_restarted_with_fresh_module_memory_reloads_the_map_from_its_row() {
     {
         let client = server.connect("fresh");
         client.load_map(map.to_bytes()).unwrap();
-        client.add_players(&[PlayerInput { player: 0, position: [0.0, 0.0, 0.01], yaw: 0.0, pitch: 0.0 }]).unwrap();
+        client
+            .add_players(&[PlayerInput { player: 0, position: [0.0, 0.0, 0.01], yaw: 0.0, pitch: 0.0, flags: 0 }])
+            .unwrap();
         client.start();
         client.next_tick(WAIT).unwrap();
         client.stop();
@@ -217,7 +222,7 @@ fn a_server_restarted_with_fresh_module_memory_reloads_the_map_from_its_row() {
     assert_eq!(client.players().len(), 1, "the match survived the restart");
     client.start();
     client.discard_ticks();
-    let ok = PlayerInput { player: 0, position: [0.05, 0.0, 0.01], yaw: 1.0, pitch: 0.0 };
+    let ok = PlayerInput { player: 0, position: [0.05, 0.0, 0.01], yaw: 1.0, pitch: 0.0, flags: 0 };
     client.submit(&[ok]);
     let seen = loop {
         let seen = client.next_tick(WAIT).unwrap();
@@ -227,7 +232,7 @@ fn a_server_restarted_with_fresh_module_memory_reloads_the_map_from_its_row() {
     };
     assert_eq!(seen.players[&0].x, 0.05, "a valid move was accepted: the map was found");
 
-    let down = PlayerInput { player: 0, position: [0.05, 0.0, -0.09], yaw: 1.0, pitch: 0.0 };
+    let down = PlayerInput { player: 0, position: [0.05, 0.0, -0.09], yaw: 1.0, pitch: 0.0, flags: 0 };
     client.submit(&[down]);
     let seen = loop {
         let seen = client.next_tick(WAIT).unwrap();
@@ -248,10 +253,44 @@ fn five_hundred_players_on_blood_gulch_stay_in_step_with_a_local_copy() {
     client.load_map(map.to_bytes()).unwrap();
     let (mut walkers, spawn) = Walkers::new(map, &anchors, 500, 7);
     client.add_players(&spawn).unwrap();
+    let before = server.tick_metrics();
     client.start();
 
     let seen = drive(&client, &mut walkers, 60);
     assert_eq!(seen.last().unwrap().marker.players, 500);
+    let used = server.tick_metrics().since(&before);
+    println!(
+        "{} ticks, {:.2} ms each with the queries, {:.2} ms in the module, {} within 5 ms",
+        used.ticks,
+        used.seconds_with_queries / used.ticks * 1e3,
+        used.wasm_seconds / used.ticks * 1e3,
+        used.within_5ms
+    );
+}
+
+#[test]
+fn five_hundred_acrobats_on_blood_gulch_jump_fall_and_crouch_without_one_move_rejected() {
+    let Some(halo_map) = real_map("bloodgulch") else { return };
+    let Some(server) = start_server("acrobats") else { return };
+    // (starts on the platforms of the bases, which have edges to walk off)
+    let anchors: Vec<[f32; 3]> = halo_map.player_starts.iter().map(|s| s.position).collect();
+    let map = MapData::from(halo_map);
+    let client = server.connect("acrobats");
+    client.load_map(map.to_bytes()).unwrap();
+    let (mut walkers, spawn) = Walkers::new(map, &anchors, 500, 11);
+    walkers.set_acrobatics(true);
+    client.add_players(&spawn).unwrap();
+    client.start();
+
+    let seen = drive(&client, &mut walkers, 900);
+    let last = seen.last().unwrap();
+    let airborne = last.players.values().filter(|p| p.flags & halo_sim::FLAG_AIRBORNE != 0).count();
+    let crouched = last.players.values().filter(|p| p.flags & halo_sim::FLAG_CROUCHED != 0).count();
+    let in_the_air: usize = seen.iter().map(|t| t.players.values().filter(|p| p.flags & 1 != 0).count()).sum();
+    println!("{airborne} in the air and {crouched} crouched at the end; {in_the_air} player-ticks in the air in all");
+    assert_eq!(last.marker.players, 500);
+    assert!(in_the_air > 10_000, "the acrobats hardly left the ground");
+    assert_eq!(last.marker.rejected_total, 0, "the server judged the moves of jumps and falls impossible");
 }
 
 // ---- who may call what, and seats ----
@@ -260,7 +299,7 @@ const KEY_A: [u8; 32] = [0xa1; 32];
 const KEY_B: [u8; 32] = [0xb2; 32];
 
 fn at(id: u16, x: f32) -> PlayerInput {
-    PlayerInput { player: id, position: [x, 0.0, 0.01], yaw: 0.0, pitch: 0.0 }
+    PlayerInput { player: id, position: [x, 0.0, 0.01], yaw: 0.0, pitch: 0.0, flags: 0 }
 }
 
 /// A match on the flat floor with two spawn points, ticking, and the owner's connection to it.

@@ -17,6 +17,13 @@ use halo_sim::{step, Event, MapData, MemoryStore, Player, PlayerInput, Rng, Stor
 /// they were put through, which they turn away from.
 const MAX_STRIDE: f32 = 0.25;
 
+/// How far into a wall a walker's start may be.
+const PLACED_CLEAR: f32 = 0.001;
+
+/// How far ahead of the server an acrobat's body may be (the inputs on their way,
+/// a few ticks of a fall at most) before the server's word is taken instead.
+const ACROBAT_LAG: f32 = 1.5;
+
 pub struct Walkers {
     pub map: MapData,
     /// What the match should look like after the inputs applied so far.
@@ -28,6 +35,12 @@ pub struct Walkers {
     rejects_seen: Vec<u64>,
     rng: Rng,
     ids: Vec<u16>,
+    /// Walkers that also jump now and then, crouch for stretches and walk off
+    /// ledges instead of turning away from them ([`Walkers::set_acrobatics`]).
+    acrobatics: bool,
+    ticks: u64,
+    /// Per walker, how hard they push ahead (1 unless [`Walkers::set_throttle`] says).
+    throttles: Vec<f32>,
 }
 
 impl Walkers {
@@ -45,39 +58,116 @@ impl Walkers {
         for id in 0..players {
             let anchor = anchors[id as usize % anchors.len()];
             let ring = (id as usize / anchors.len()) as f32;
-            let angle = ring * 2.4;
-            let (dx, dy) = (ring.sqrt() * 0.7 * angle.cos(), ring.sqrt() * 0.7 * angle.sin());
-            // (a hair above the ground to start with: a player is placed, then settles)
-            let start = match ground_below(&map, [anchor[0] + dx, anchor[1] + dy, anchor[2] + 1.0], 3.0) {
-                Some(z) => [anchor[0] + dx, anchor[1] + dy, z],
-                None => anchor,
+            // (a hair above the ground to start with: a player is placed, then settles;
+            // and placed clear of the walls: a start a little inside one would push the
+            // walker out of it by more than a tick's walking, which is not what is walked)
+            let place = |ring: f32, angle: f32| {
+                let (dx, dy) = (ring.sqrt() * 0.7 * angle.cos(), ring.sqrt() * 0.7 * angle.sin());
+                let start = match ground_below(&map, [anchor[0] + dx, anchor[1] + dy, anchor[2] + 1.0], 3.0) {
+                    Some(z) => [anchor[0] + dx, anchor[1] + dy, z],
+                    None => anchor,
+                };
+                settled(&map, start)
             };
-            let position = settled(&map, start);
-            let player = Player { id, position, yaw: 0.0, pitch: 0.0 };
+            let clear = |position: [f32; 3]| halo_sim::walk::footing(&map, position).penetration <= PLACED_CLEAR;
+            let mut position = place(ring, ring * 2.4);
+            for attempt in 1..=12 {
+                if clear(position) {
+                    break;
+                }
+                position = place(ring + attempt as f32, ring * 2.4 + attempt as f32 * 1.7);
+            }
+            let player = Player::new(id, position, 0.0, 0.0);
             mirror.set_player(player);
             bodies.push(Body::at(position));
-            spawn.push(PlayerInput { player: id, position, yaw: 0.0, pitch: 0.0 });
+            spawn.push(PlayerInput { player: id, position, yaw: 0.0, pitch: 0.0, flags: 0 });
             headings.push(rng.next_f32() * core::f32::consts::TAU);
             ids.push(id);
         }
         let rejects_seen = vec![0; ids.len()];
-        (Walkers { map, mirror, headings, bodies, rejects_seen, rng, ids }, spawn)
+        (
+            Walkers {
+                map,
+                mirror,
+                headings,
+                bodies,
+                rejects_seen,
+                rng,
+                ids,
+                acrobatics: false,
+                ticks: 0,
+                throttles: vec![1.0; players as usize],
+            },
+            spawn,
+        )
+    }
+
+    /// Make the walkers acrobats (or not): each jumps every second or two (a
+    /// little out of step with the others), crouches for a stretch of each
+    /// few seconds, and walks off an edge it comes to, falling and landing,
+    /// where a plain walker turns away from it. The server judges every one of
+    /// their moves as it does a plain walker's.
+    pub fn set_acrobatics(&mut self, acrobatics: bool) {
+        self.acrobatics = acrobatics;
+    }
+
+    /// How hard a walker pushes ahead, 0 (standing where they are, jumping
+    /// and crouching if they are acrobats) to 1, and which way they face.
+    pub fn set_course(&mut self, player: u16, throttle: f32, heading: f32) {
+        if let Some(i) = self.ids.iter().position(|&id| id == player) {
+            self.throttles[i] = throttle;
+            self.headings[i] = heading;
+        }
     }
 
     /// This tick's moves: each walker runs ahead along its heading, and turns
     /// to a new one (standing where they are) when that would take them over
-    /// an edge.
+    /// an edge (or, for an acrobat, when they would be put through a wall).
     pub fn next_inputs(&mut self) -> Vec<PlayerInput> {
+        self.next_inputs_after(1)
+    }
+
+    /// This tick's moves after `ticks` ticks have passed since the last (a
+    /// walker whose controller was busy for a while, as a game is after a
+    /// hitch): each walker walks the ticks it missed and reports where it is
+    /// now, which the server judges against the time since their last move.
+    pub fn next_inputs_after(&mut self, ticks: u32) -> Vec<PlayerInput> {
+        for _ in 1..ticks.max(1) {
+            self.step_bodies();
+        }
+        self.step_bodies()
+    }
+
+    /// One tick of every walker: the inputs they would report.
+    fn step_bodies(&mut self) -> Vec<PlayerInput> {
         let mut inputs = Vec::with_capacity(self.ids.len());
+        self.ticks += 1;
         for (i, &id) in self.ids.iter().enumerate() {
             let Some(p) = self.mirror.player(id) else { continue };
             let mut body = self.bodies[i];
-            walk(&self.map, &mut body, &Controls { forward: 1.0, strafe: 0.0, yaw: self.headings[i], pitch: 0.0 });
-            let stride = ((body.position[0] - p.position[0]).powi(2)
-                + (body.position[1] - p.position[1]).powi(2)
-                + (body.position[2] - p.position[2]).powi(2))
-            .sqrt();
-            let position = if body.airborne || stride > MAX_STRIDE {
+            let phase = self.ticks + 17 * i as u64;
+            let (jump, crouch) = if self.acrobatics { (phase % 50 < 2, (phase / 70) % 3 == 0) } else { (false, false) };
+            walk(
+                &self.map,
+                &mut body,
+                // (an acrobat at most at 85% throttle: the two inputs of a tick the gateway may
+                // hand the server as one are two ticks of running downhill, which the bound
+                // has room for at that, not at a full run)
+                &Controls {
+                    forward: self.throttles[i] * if self.acrobatics { 0.85 } else { 1.0 },
+                    strafe: 0.0,
+                    yaw: self.headings[i],
+                    pitch: 0.0,
+                    jump,
+                    crouch,
+                },
+            );
+            // (how far this tick took the walker, from where the last left them)
+            let before = self.bodies[i].position;
+            let flat = ((body.position[0] - before[0]).powi(2) + (body.position[1] - before[1]).powi(2)).sqrt();
+            let stride = (flat.powi(2) + (body.position[2] - before[2]).powi(2)).sqrt();
+            let off_the_ground = if self.acrobatics { flat > MAX_STRIDE } else { body.airborne || stride > MAX_STRIDE };
+            let position = if off_the_ground {
                 // an edge: stand still and turn to a new random heading
                 self.headings[i] = self.rng.next_f32() * core::f32::consts::TAU;
                 self.bodies[i] = Body::at(p.position);
@@ -86,7 +176,8 @@ impl Walkers {
                 self.bodies[i] = body;
                 body.position
             };
-            inputs.push(PlayerInput { player: id, position, yaw: self.headings[i], pitch: 0.0 });
+            let flags = if self.acrobatics && body.crouched() { halo_sim::FLAG_CROUCHED } else { 0 };
+            inputs.push(PlayerInput { player: id, position, yaw: self.headings[i], pitch: 0.0, flags });
         }
         inputs
     }
@@ -104,9 +195,13 @@ impl Walkers {
                 continue;
             }
             let position = [row.x, row.y, row.z];
-            self.mirror.set_player(Player { id: row.id, position, yaw: row.yaw, pitch: row.pitch });
-            // (a walker the server has somewhere else than they thought is put there, at rest)
-            if self.bodies[index].position != position {
+            self.mirror.set_player(Player::new(row.id, position, row.yaw, row.pitch));
+            // (a walker the server has somewhere else than they thought is put there, at rest: for
+            // an acrobat, whose jump and fall are in the speed the body carries, only when it is
+            // somewhere else than the inputs still on their way account for)
+            let off = |a: [f32; 3], b: [f32; 3]| (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>().sqrt();
+            let lost = if self.acrobatics { off(self.bodies[index].position, position) > ACROBAT_LAG } else { true };
+            if lost && self.bodies[index].position != position {
                 self.bodies[index] = Body::at(position);
             }
             if row.rejected_moves > self.rejects_seen[index] {

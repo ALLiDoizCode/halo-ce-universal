@@ -106,16 +106,11 @@ pub fn parse(text: &str) -> Result<Scenario, String> {
 
 /// The movement state bits of the trace's last column.
 const STATE_AIRBORNE: u32 = 1;
+const STATE_CROUCHING: u32 = 2;
 
 /// Play the scenario on `map` and write its trace (`tools/scenarios/README.md`
 /// has the format): row `k` is the state after tick `k`.
-///
-/// Jumping and crouching are not in the simulation yet; a scenario that asks
-/// for them is refused rather than traced wrongly.
 pub fn trace(scenario: &Scenario, map: &MapData) -> Result<String, String> {
-    if scenario.inputs.iter().any(|i| i.jump || i.crouch) {
-        return Err(format!("{}: jumping and crouching are not simulated yet", scenario.name));
-    }
     let mut out = format!(
         "# halo-trace 1\n# scenario {}\n# map {}\n# source rust-sim\ntick\tx\ty\tz\tvx\tvy\tvz\tyaw\tpitch\tstate\n",
         scenario.name, scenario.map
@@ -125,10 +120,17 @@ pub fn trace(scenario: &Scenario, map: &MapData) -> Result<String, String> {
         walk(
             map,
             &mut body,
-            &Controls { forward: input.forward, strafe: input.strafe, yaw: input.yaw, pitch: input.pitch },
+            &Controls {
+                forward: input.forward,
+                strafe: input.strafe,
+                yaw: input.yaw,
+                pitch: input.pitch,
+                jump: input.jump,
+                crouch: input.crouch,
+            },
         );
         let v = body.velocity_per_second();
-        let state = if body.airborne { STATE_AIRBORNE } else { 0 };
+        let state = if body.airborne { STATE_AIRBORNE } else { 0 } | if body.crouching { STATE_CROUCHING } else { 0 };
         out.push_str(&format!(
             "{tick}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{state}\n",
             body.position[0],
@@ -185,8 +187,20 @@ mod tests {
     }
 
     #[test]
-    fn a_scenario_that_jumps_is_refused_not_traced_wrongly() {
-        let s = parse("scenario j\nmap fixture\nstart s 0 0 0 0\nticks 4\ninput 1 2 jump=1\n").unwrap();
-        assert!(trace(&s, &halo_sim::fixtures::flat_floor_map()).is_err());
+    fn a_scenario_that_jumps_leaves_the_ground_and_comes_back() {
+        let s = parse("scenario j\nmap fixture\nstart s 0 0 0 0\nticks 60\ninput 10 11 jump=1\n").unwrap();
+        let text = trace(&s, &halo_sim::fixtures::flat_floor_map()).unwrap();
+        let states: Vec<&str> = text.lines().skip(5).map(|l| l.split('\t').nth(9).unwrap()).collect();
+        assert_eq!(states[9], "0");
+        assert_eq!(states[10], "1", "airborne from the jump's tick");
+        assert_eq!(states[59], "0", "back on the ground");
+    }
+
+    #[test]
+    fn a_scenario_that_crouches_is_crouching_from_its_first_tick() {
+        let s = parse("scenario c\nmap fixture\nstart s 0 0 0 0\nticks 20\ninput 5 20 crouch=1\n").unwrap();
+        let text = trace(&s, &halo_sim::fixtures::flat_floor_map()).unwrap();
+        let states: Vec<&str> = text.lines().skip(5).map(|l| l.split('\t').nth(9).unwrap()).collect();
+        assert_eq!((states[4], states[5], states[19]), ("0", "2", "2"));
     }
 }

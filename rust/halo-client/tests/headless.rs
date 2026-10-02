@@ -37,6 +37,7 @@ use std::time::{Duration, Instant};
 use halo_gateway::harness::{Crowd, Impairment, Rig, RigSetup, Truth};
 use halo_match_driver::server::{build_module, stdb_bin_dir};
 use halo_sim::MapData;
+use halo_sim::PlayerInput;
 use halo_wire::unit::Bounds;
 
 /// Players seated and walking beside the game's, which takes the next seat
@@ -409,12 +410,14 @@ fn parse_local_line(line: &str) -> Option<LocalLine> {
     Some(LocalLine { engine, library, airborne })
 }
 
-/// The game's own player walking on a scripted pattern (`HALO_TEST_INPUT=walk:`:
-/// walking, strafing and turning, never jumping), moved by the library from
-/// its controls, for `HALO_HEADLESS_WALK_SECONDS` (a minute by default; 600
-/// is the ten-minute run) against a real server. The unit is where the
-/// library says (the log lines of both agree), it has gone somewhere, and the
-/// server rejected none of its moves.
+/// The game's own player walking on a scripted pattern (`HALO_TEST_INPUT=hop:`:
+/// walking, strafing and turning, jumping every few seconds and crouching for
+/// stretches, on the red base's platform, whose edge it walks off and falls
+/// from now and then), moved by the library from its controls, for
+/// `HALO_HEADLESS_WALK_SECONDS` (a minute by default; 600 is the ten-minute
+/// run) against a real server. The unit is where the library says (the log
+/// lines of both agree), it has gone somewhere, it has been in the air, and
+/// the server rejected none of its moves, from the first second to the last.
 #[test]
 fn the_local_player_is_moved_by_the_library_and_the_server_accepts_every_move() {
     let (Some(stdb), Some(maps), Some(game), Some(data)) =
@@ -431,10 +434,9 @@ fn the_local_player_is_moved_by_the_library_and_the_server_accepts_every_move() 
     let me = others;
     let halo_map = halo_map::HaloMap::from_path(maps.join("bloodgulch.map")).expect("Blood Gulch");
     let map = MapData::from(halo_map);
-    // everyone starts in the open field below the red base, which is flat for
-    // dozens of world units around: a player who walks off a ledge is in the
-    // air, and what the server makes of that is the falling work's
-    let anchors = [[77.9, -166.2, 0.32]];
+    // everyone starts on the red base's platform, whose west edge is a few
+    // world units away: the game's player jumps and, walking about, falls off it
+    let anchors = [[96.5, -157.9, 1.7]];
     let wasm = build_module();
     let mut rig = Rig::start(
         &stdb,
@@ -459,7 +461,7 @@ fn the_local_player_is_moved_by_the_library_and_the_server_accepts_every_move() 
             .env("HALO_LARGE_GATEWAY", rig.gateway.local_addr().to_string())
             .env("HALO_LARGE_SPACETIMEDB", rig.server.uri())
             .env("HALO_LARGE_DATABASE", "headless-walk")
-            .env("HALO_TEST_INPUT", "walk:3")
+            .env("HALO_TEST_INPUT", "hop:3")
             .env("HALO_NET_ONLINE", "0")
             .env("HALO_FULLSCREEN", "0")
             .env("HALO_NO_VSYNC", "1")
@@ -478,10 +480,8 @@ fn the_local_player_is_moved_by_the_library_and_the_server_accepts_every_move() 
     let mut rejected_seen = 0;
     // (the reason and server tick of each rejection, and the first tick seen)
     let mut rejections: Vec<(u8, u64)> = Vec::new();
-    let mut first_tick = None;
     while exit.is_none() && Instant::now() < until {
         let Some(seen) = rig.client.next_tick(Duration::from_secs(10)) else { panic!("no tick for 10 s") };
-        first_tick.get_or_insert(seen.marker.tick);
         rig.walkers.sync_with_server(seen.players.values());
         crowd.send_inputs(&rig.walkers.next_inputs());
         if let Some(row) = seen.players.get(&me) {
@@ -545,20 +545,250 @@ fn the_local_player_is_moved_by_the_library_and_the_server_accepts_every_move() 
         "the game's player had {} moves rejected over {seconds} s (last reason {})",
         row.rejected_moves, row.last_reject
     );
-    // What counts: a move the server judged impossible (too fast, through a
-    // surface, off the ground) once the game is running steadily. Not the
-    // game's first seconds, where it runs the ticks of its loading in a rush
-    // and its moves arrive in bunches faster than the bound allows; and not a
-    // second input in one server tick, which is the timing of the two clocks
-    // and not a move.
-    let warm_up = first_tick.unwrap_or(0) + 600;
-    let impossible: Vec<_> =
-        rejections.iter().filter(|(reason, tick)| (3..=5).contains(reason) && *tick > warm_up).collect();
-    println!(
-        "{} rejections in all; {} of them impossible moves after the first 20 s",
-        rejections.len(),
-        impossible.len()
+    // Every move counts, from the first second: the game paces its movement by the
+    // clock (it runs the ticks of its loading in a rush, and after a hitch), the
+    // server accepts the moves of jumps and falls, and takes the newest of the
+    // inputs the gateway has in a tick.
+    println!("{} rejections in all: {rejections:?}", rejections.len());
+    assert!(airborne > 0, "the player never left the ground");
+    assert!(rejections.is_empty(), "the server rejected the game's player's moves (reason, tick): {rejections:?}");
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+/// What one `drawn` line says of the engine's unit for a remote player: the
+/// flags the library holds of the player (1 in the air, 2 crouched), and what
+/// the engine's animation made of them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Animated {
+    flags: i32,
+    /// `unit.animation.state`: 20 airborne, 21 and 22 the soft and the hard landing
+    state: i32,
+    /// `unit.animation.base_seat_index`: 2 standing, 3 crouching
+    seat: i32,
+    /// `biped.landing`: -1 none, 0 soft, 1 hard
+    landing: i32,
+}
+
+const STATE_AIRBORNE: i32 = 20;
+const STATE_LAND_SOFT: i32 = 21;
+const STATE_LAND_HARD: i32 = 22;
+const SEAT_CROUCH: i32 = 3;
+
+/// `... team 1 player 3 flags 2 state 4 seat 3 landing -1`
+fn parse_animated_line(line: &str) -> Option<Animated> {
+    let rest = line.split("large mode: drawn ").nth(1)?;
+    let number =
+        |key: &str| -> Option<i32> { rest.split(&format!(" {key} ")).nth(1)?.split_whitespace().next()?.parse().ok() };
+    Some(Animated {
+        flags: number("flags")?,
+        state: number("state")?,
+        seat: number("seat")?,
+        landing: number("landing")?,
+    })
+}
+
+/// Remote players who jump, crouch and walk off ledges, in the game's view
+/// (`HALO_SCREENSHOT_DIR` and `HALO_SCREENSHOT_EVERY` take pictures of it): the
+/// server accepts every one of their moves; the library gives the game their
+/// flags; and the engine's animation plays what the flags say, with its
+/// physics suspended for them (the airborne animation in the air, the
+/// crouched seat while crouched, and the landing's after a fall).
+#[test]
+fn remote_players_that_jump_fall_and_crouch_are_animated_by_the_engine() {
+    let (Some(stdb), Some(maps), Some(game), Some(data)) =
+        (stdb_bin_dir(), env_path("HALO_MAP_DIR"), env_path("HALO_GAME_BIN"), env_path("HALO_DATA_ROOT"))
+    else {
+        eprintln!(
+            "HALO_STDB_BIN, HALO_MAP_DIR, HALO_GAME_BIN and HALO_DATA_ROOT are not all set: skipping, \
+             this test needs the game's own data and a game built with the library"
+        );
+        return;
+    };
+    let seconds: u32 = std::env::var("HALO_HEADLESS_ACROBAT_SECONDS").ok().and_then(|n| n.parse().ok()).unwrap_or(40);
+    // (HALO_HEADLESS_ACROBAT_SHOW: a few acrobats in front of the game's player on the red base's
+    // platform, for the screenshots: four jump and crouch where they stand, two walk to its edge)
+    let show_what = std::env::var("HALO_HEADLESS_ACROBAT_SHOW").unwrap_or_default();
+    let show = !show_what.is_empty();
+    let falling = show_what == "fall";
+    let halo_map = halo_map::HaloMap::from_path(maps.join("bloodgulch.map")).expect("Blood Gulch");
+    let map = MapData::from(halo_map);
+    // the red base's platform, which has an edge about two world units above the field
+    let (others, anchors): (u16, Vec<[f32; 3]>) = if falling {
+        // (the game's player stands on the field below the platform's west edge, looking east at the
+        // acrobats, who walk off it)
+        (
+            6,
+            vec![
+                [97.6, -156.2, 1.7],
+                [97.7, -157.0, 1.7],
+                [97.6, -157.8, 1.7],
+                [97.7, -158.6, 1.7],
+                [97.6, -159.2, 1.7],
+                [97.8, -155.6, 1.7],
+            ],
+        )
+    } else if show {
+        (
+            6,
+            // (the game's own player first, who looks about, then the acrobats ahead of them)
+            vec![
+                [93.5, -157.8, 1.7],
+                [96.0, -156.6, 1.7],
+                [96.5, -158.6, 1.7],
+                [98.0, -157.2, 1.7],
+                [97.0, -155.8, 1.7],
+                [98.2, -159.0, 1.7],
+            ],
+        )
+    } else {
+        (16, vec![[98.4934, -157.639, 1.7]])
+    };
+    let wasm = build_module();
+    let mut rig = Rig::start(
+        &stdb,
+        &wasm,
+        RigSetup { name: "headless-acrobats", map, anchors: &anchors, players: others, budget: 90_000 },
+        |_| {},
     );
-    assert!(impossible.is_empty(), "the server rejected the game's player's moves: {impossible:?}");
+    rig.walkers.set_acrobatics(true);
+    if falling {
+        // (the game's player stands west of them, facing east)
+        rig.client
+            .set_spawn_points(&[PlayerInput {
+                player: 0,
+                position: [91.3, -157.8, 1.0],
+                yaw: 0.0,
+                pitch: 0.0,
+                flags: 0,
+            }])
+            .unwrap();
+        // (they stay where they are until the game has joined, and then walk)
+        for id in 0..6 {
+            rig.walkers.set_course(id, 0.0, core::f32::consts::PI);
+        }
+    } else if show {
+        // (the first stands where the game's player does: it walks off behind them; three stay
+        // where they are; the edge is to the +y side of the platform, which two walk to)
+        rig.walkers.set_course(0, 1.0, core::f32::consts::PI);
+        for id in 1..4 {
+            rig.walkers.set_course(id, 0.0, 0.0);
+        }
+        rig.walkers.set_course(4, 0.5, core::f32::consts::FRAC_PI_2);
+        rig.walkers.set_course(5, 0.5, core::f32::consts::FRAC_PI_2);
+    }
+    rig.client.set_capacity(others + 1).unwrap();
+    let crowd = Crowd::connect(rig.gateway.local_addr(), 0..others, Impairment::none(), others as usize + 1, false);
+    crowd.join_all(Duration::from_secs(20)).unwrap();
+
+    let work = std::env::temp_dir().join(format!("halo-headless-acrobats-{}", std::process::id()));
+    std::fs::create_dir_all(&work).unwrap();
+    let log_path = work.join("game.log");
+    let log = std::fs::File::create(&log_path).unwrap();
+    let mut game_process = Game(
+        Command::new(&game)
+            .current_dir(game.parent().unwrap())
+            .env("HALO_DATA_ROOT", &data)
+            .env("HALO_SAVE_ROOT", work.join("saves"))
+            .env("HALO_LARGE_MAP", "bloodgulch")
+            .env("HALO_LARGE_GATEWAY", rig.gateway.local_addr().to_string())
+            .env("HALO_LARGE_SPACETIMEDB", rig.server.uri())
+            .env("HALO_LARGE_DATABASE", "headless-acrobats")
+            .env("HALO_TEST_INPUT", if show && !falling { "scan:3" } else { "" })
+            .env("HALO_LARGE_LOG", "1")
+            .env("HALO_NET_ONLINE", "0")
+            .env("HALO_FULLSCREEN", "0")
+            .env("HALO_NO_VSYNC", "1")
+            .env("HALO_NO_AUDIO", "1")
+            .env("HALO_HIDDEN_WINDOW", "1")
+            .env("HALO_UPDATE_ANSWER", "no")
+            .env("HALO_EXIT_AFTER", seconds.to_string())
+            .envs(
+                ["HALO_SCREENSHOT_DIR", "HALO_SCREENSHOT_EVERY"]
+                    .iter()
+                    .filter_map(|n| Some((*n, std::env::var(n).ok()?))),
+            )
+            .stdout(Stdio::from(log.try_clone().unwrap()))
+            .stderr(Stdio::from(log))
+            .spawn()
+            .expect("start the game"),
+    );
+
+    let until = Instant::now() + Duration::from_secs(seconds as u64 + 40);
+    let mut exit = None;
+    let mut airborne_seen = 0u32;
+    let mut last_tick = 0u64;
+    let mut walking_off = false;
+    let mut polled_log = Instant::now();
+    while exit.is_none() && Instant::now() < until {
+        let Some(mut seen) = rig.client.next_tick(Duration::from_secs(10)) else { panic!("no tick for 10 s") };
+        // (a machine busy with the game queues ticks up: the walkers move for the newest, once)
+        while let Some(newer) = rig.client.next_tick(Duration::ZERO) {
+            seen = newer;
+        }
+        // (and for each tick it was busy, the walkers have walked it, as a game does after a hitch: the
+        // server judges the move against the time since the last)
+        let elapsed = if last_tick == 0 { 1 } else { seen.marker.tick.saturating_sub(last_tick).clamp(1, 20) as u32 };
+        last_tick = seen.marker.tick;
+        if falling && !walking_off && polled_log.elapsed() > Duration::from_millis(500) {
+            polled_log = Instant::now();
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            if log.contains("the local unit is where the server has the player") {
+                walking_off = true;
+                for id in 0..6 {
+                    rig.walkers.set_course(id, 0.5, core::f32::consts::PI);
+                }
+            }
+        }
+        rig.walkers.sync_with_server(seen.players.values());
+        crowd.send_inputs(&rig.walkers.next_inputs_after(elapsed));
+        airborne_seen += seen.players.values().filter(|p| p.flags & halo_sim::FLAG_AIRBORNE != 0).count() as u32;
+        exit = game_process.0.try_wait().unwrap();
+    }
+    let output = std::fs::read_to_string(&log_path).unwrap_or_default();
+    if let Some(keep) = env_path("HALO_HEADLESS_LOG") {
+        let _ = std::fs::write(keep, &output);
+    }
+    let tail = || output.lines().rev().take(15).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+    assert!(exit.is_some_and(|s| s.success()), "the game did not exit by itself; the end of its log:\n{}", tail());
+
+    // the server accepted all of what the acrobats did, jumps and falls included
+    let rows = rig.client.players();
+    let rejected: u64 = (0..others).map(|id| rows[&id].rejected_moves).sum();
+    println!("{airborne_seen} player-ticks in the air on the server, {rejected} moves rejected");
+    assert!(show || airborne_seen > 200, "the acrobats hardly left the ground ({airborne_seen} player-ticks)");
+    let reasons: Vec<(u16, u8, u64)> = (0..others)
+        .map(|id| &rows[&id])
+        .filter(|r| r.rejected_moves > 0)
+        .map(|r| (r.id, r.last_reject, r.last_reject_tick))
+        .collect();
+    assert_eq!(rejected, 0, "the server rejected the acrobats' moves (player, reason, tick): {reasons:?}");
+
+    if show {
+        let _ = std::fs::remove_dir_all(&work);
+        return;
+    }
+    // the engine's units, as the animation made them
+    let animated: Vec<Animated> = output.lines().filter_map(parse_animated_line).collect();
+    let count = |f: &dyn Fn(&Animated) -> bool| animated.iter().filter(|a| f(a)).count();
+    let in_the_air = count(&|a| a.flags & 1 != 0);
+    let airborne_animation = count(&|a| a.flags & 1 != 0 && a.state == STATE_AIRBORNE);
+    let crouched = count(&|a| a.flags & 2 != 0);
+    let crouch_seat = count(&|a| a.flags & 2 != 0 && a.seat == SEAT_CROUCH);
+    let standing_seat = count(&|a| a.flags & 2 == 0 && a.seat != SEAT_CROUCH);
+    let landing = count(&|a| a.state == STATE_LAND_SOFT || a.state == STATE_LAND_HARD || a.landing >= 0);
+    println!(
+        "{} unit readings: {in_the_air} in the air ({airborne_animation} with the airborne animation), {crouched} \
+         crouched ({crouch_seat} in the crouch seat), {standing_seat} standing in the standing seat, {landing} landing",
+        animated.len()
+    );
+    assert!(in_the_air > 5, "no remote player was seen in the air");
+    assert!(
+        airborne_animation * 4 > in_the_air,
+        "the engine played the airborne animation for {airborne_animation} of {in_the_air}"
+    );
+    assert!(crouched > 5, "no remote player was seen crouched");
+    assert!(crouch_seat * 4 > crouched * 3, "the crouch seat for {crouch_seat} of {crouched}");
+    assert!(standing_seat > 5, "no remote player was seen standing");
+    assert!(landing > 0, "no remote player was seen landing");
     let _ = std::fs::remove_dir_all(&work);
 }

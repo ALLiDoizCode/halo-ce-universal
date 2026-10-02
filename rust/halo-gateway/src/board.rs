@@ -231,7 +231,7 @@ mod tests {
     use super::*;
 
     fn input(player: u16, x: f32) -> PlayerInput {
-        PlayerInput { player, position: [x, 0.0, 0.0], yaw: 0.0, pitch: 0.0 }
+        PlayerInput { player, position: [x, 0.0, 0.0], yaw: 0.0, pitch: 0.0, flags: 0 }
     }
 
     fn addr(port: u16) -> SocketAddr {

@@ -10,8 +10,8 @@
 //! use halo_sim::{step, Event, MemoryStore, Player, PlayerInput, Rng, Store};
 //! let map = halo_sim::fixtures::flat_floor_map();
 //! let mut store = MemoryStore::new();
-//! store.set_player(Player { id: 1, position: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0 });
-//! let input = PlayerInput { player: 1, position: [0.05, 0.0, 0.0], yaw: 0.1, pitch: 0.0 };
+//! store.set_player(Player::new(1, [0.0, 0.0, 0.0], 0.0, 0.0));
+//! let input = PlayerInput { player: 1, position: [0.05, 0.0, 0.0], yaw: 0.1, pitch: 0.0, flags: 0 };
 //! let events = step(&mut store, &[input], &map, &mut Rng::seeded(1));
 //! assert_eq!(events, [Event::MoveAccepted { player: 1 }]);
 //! ```
@@ -43,5 +43,5 @@ pub mod wire;
 pub use map::MapData;
 pub use movement::{GROUND_TOLERANCE, MAX_CATCH_UP_TICKS, PENETRATION_TOLERANCE, TICKS_PER_SECOND};
 pub use rng::Rng;
-pub use state::{snapshot, MemoryStore, Player, PlayerId, Store};
+pub use state::{snapshot, MemoryStore, Player, PlayerId, Store, FLAG_AIRBORNE, FLAG_CROUCHED};
 pub use step::{step, Event, PlayerInput, RejectReason};

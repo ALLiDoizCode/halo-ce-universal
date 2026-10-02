@@ -134,7 +134,7 @@ impl Raw {
     }
 
     fn input(&self, player: u16, seq: u32, position: [f32; 3]) {
-        let input = PlayerInput { player, position, yaw: 0.0, pitch: 0.0 };
+        let input = PlayerInput { player, position, yaw: 0.0, pitch: 0.0, flags: 0 };
         self.send(ClientMessage::Input { seq, input, ack: Ack::NONE });
     }
 }
@@ -245,7 +245,8 @@ fn an_input_counts_only_from_the_address_its_player_is_bound_to() {
     let start = rig.client.players()[&0].clone();
 
     // player 1's socket claims to move player 0, and a socket that never said hello does too
-    let moved = |x: f32| PlayerInput { player: 0, position: [start.x + x, start.y, start.z], yaw: 1.5, pitch: 0.0 };
+    let moved =
+        |x: f32| PlayerInput { player: 0, position: [start.x + x, start.y, start.z], yaw: 1.5, pitch: 0.0, flags: 0 };
     crowd.player(1).unwrap().send_input(&moved(0.05));
     let stranger = UdpSocket::bind("127.0.0.1:0").unwrap();
     stranger
@@ -282,7 +283,8 @@ fn the_newest_input_wins_and_a_late_one_is_dropped() {
     crowd.join_all(WAIT).unwrap();
     let me = crowd.player(0).unwrap();
     let start = rig.client.players()[&0].clone();
-    let at = |x: f32| PlayerInput { player: 0, position: [start.x + x, start.y, start.z], yaw: 0.0, pitch: 0.0 };
+    let at =
+        |x: f32| PlayerInput { player: 0, position: [start.x + x, start.y, start.z], yaw: 0.0, pitch: 0.0, flags: 0 };
 
     // right after a tick completes, so that both arrive before the next batch
     rig.client.discard_ticks();
@@ -546,7 +548,7 @@ fn a_player_who_joins_mid_match_is_brought_up_to_date_and_one_who_leaves_stops_b
         }
     }
     // an address that is still sending as them counts for nothing
-    me.send_input(&PlayerInput { player: PLAYERS, position: [0.0, 0.0, 0.01], yaw: 0.0, pitch: 0.0 });
+    me.send_input(&PlayerInput { player: PLAYERS, position: [0.0, 0.0, 0.01], yaw: 0.0, pitch: 0.0, flags: 0 });
     std::thread::sleep(Duration::from_millis(200));
     assert!(rig.gateway.stats().inputs_unbound >= 1);
 }
@@ -590,7 +592,8 @@ fn a_player_who_reconnects_from_a_new_address_resumes_as_the_same_player() {
     );
 
     // the new address moves the same player on from where they stood
-    let input = PlayerInput { player: 3, position: [before.x + 0.05, before.y, before.z], yaw: 0.7, pitch: 0.0 };
+    let input =
+        PlayerInput { player: 3, position: [before.x + 0.05, before.y, before.z], yaw: 0.7, pitch: 0.0, flags: 0 };
     crowd.player(3).unwrap().send_input(&PlayerInput { yaw: 0.2, ..input }); // the old address: ignored
     new_me.send_input(&input);
     let seen = loop {
@@ -658,7 +661,7 @@ fn a_silent_address_is_unbound_after_the_idle_timeout_and_may_come_back() {
     crowd.join_all(WAIT).unwrap();
     let (talker, silent) = (crowd.player(0).unwrap(), crowd.player(1).unwrap());
     let start = rig.client.players()[&0].clone();
-    let input = PlayerInput { player: 0, position: [start.x, start.y, start.z], yaw: 0.0, pitch: 0.0 };
+    let input = PlayerInput { player: 0, position: [start.x, start.y, start.z], yaw: 0.0, pitch: 0.0, flags: 0 };
     let until = Instant::now() + Duration::from_millis(3500);
     while Instant::now() < until {
         talker.send_input(&input);

@@ -15,7 +15,7 @@ use halo_sim::{step, Event, MapData, MemoryStore, Player, PlayerInput, Rng, Stor
 const TICKS: f32 = TICKS_PER_SECOND as f32;
 
 fn controls(forward: f32, strafe: f32, yaw: f32) -> Controls {
-    Controls { forward, strafe, yaw, pitch: 0.0 }
+    Controls { forward, strafe, yaw, pitch: 0.0, jump: false, crouch: false }
 }
 
 /// A player put on the ground at `x, y` who has had time to settle.
@@ -213,12 +213,185 @@ fn a_player_with_no_ground_under_them_falls_and_lands() {
     assert!(close(fastest, want, 0.01), "landed at {fastest} a tick, falling from 2 units is about {want}");
 }
 
+fn jumping(forward: f32) -> Controls {
+    Controls { jump: true, ..controls(forward, 0.0, 0.0) }
+}
+
+/// The ticks until the player is on the ground again after a jump on flat ground from rest, and how high they got.
+fn jump_from_rest(map: &MapData) -> (u32, f32) {
+    let mut body = standing(map, 0.0, 0.0, 0.0);
+    walk(map, &mut body, &jumping(0.0));
+    assert!(body.airborne, "the jump left the ground at once");
+    let (mut ticks, mut apex) = (0, 0.0f32);
+    while body.airborne && ticks < 200 {
+        walk(map, &mut body, &Controls::standing(0.0));
+        apex = apex.max(body.position[2]);
+        ticks += 1;
+    }
+    (ticks, apex)
+}
+
+#[test]
+fn a_jump_goes_up_at_the_tags_jump_velocity_and_comes_down_by_gravity() {
+    let map = flat_floor_map();
+    let v = map.movement.jump_velocity;
+    let mut body = standing(&map, 0.0, 0.0, 0.0);
+    walk(&map, &mut body, &jumping(0.0));
+    // the jump sets the speed up; the player is where they were until the next tick
+    assert!(body.airborne);
+    assert_eq!((body.velocity[2], body.position[2]), (v, 0.0));
+    walk(&map, &mut body, &Controls::standing(0.0));
+    assert!(close(body.velocity[2], v - GRAVITY, 1e-7));
+    assert!(close(body.position[2], v - GRAVITY, 1e-6));
+
+    let (ticks, apex) = jump_from_rest(&map);
+    // v^2 / 2g, give or take the tick's steps; and up and down take about 2 v / g
+    assert!(close(apex, v * v / (2.0 * GRAVITY), 0.05), "apex {apex}");
+    assert!(close(ticks as f32, 2.0 * v / GRAVITY, 3.0), "{ticks} ticks in the air");
+}
+
+#[test]
+fn a_jump_keeps_the_speed_the_player_had_and_steers_a_little_in_the_air() {
+    let map = flat_floor_map();
+    let mut body = standing(&map, 0.0, 0.0, 0.0);
+    run(&map, &mut body, controls(1.0, 0.0, 0.0), 60);
+    let on_the_ground = body.velocity[0];
+    walk(&map, &mut body, &jumping(1.0));
+    assert_eq!(body.velocity[0], on_the_ground);
+    // in the air the player's speed changes only by the tags' airborne acceleration a tick
+    let before = body.velocity[0];
+    walk(&map, &mut body, &controls(0.0, 0.0, 0.0));
+    assert!(close(before - body.velocity[0], map.movement.airborne_acceleration / TICKS, 1e-6));
+}
+
+#[test]
+fn holding_jump_jumps_again_a_few_ticks_after_landing_and_not_before() {
+    let map = flat_floor_map();
+    let mut body = standing(&map, 0.0, 0.0, 0.0);
+    walk(&map, &mut body, &jumping(0.0));
+    let mut landed = None;
+    let mut jumped_again = None;
+    for tick in 1..300 {
+        walk(&map, &mut body, &jumping(0.0));
+        if landed.is_none() && !body.airborne {
+            landed = Some(tick);
+        }
+        if landed.is_some() && body.airborne {
+            jumped_again = Some(tick);
+            break;
+        }
+    }
+    let (landed, again) = (landed.unwrap(), jumped_again.unwrap());
+    // more than 5 ticks on the ground since the jump, counting the landing's
+    assert!((5..=7).contains(&(again - landed)), "landed at {landed}, jumped again at {again}");
+}
+
+#[test]
+fn the_crouch_sinks_by_the_tags_transition_velocity_and_slows_the_player_to_the_sneak_speeds() {
+    let map = flat_floor_map();
+    let m = map.movement;
+    let mut body = standing(&map, 0.0, 0.0, 0.0);
+    let crouch = Controls { crouch: true, ..controls(1.0, 0.0, 0.0) };
+    walk(&map, &mut body, &crouch);
+    // the stance is crouched from the first tick; the body follows from the next
+    assert!(body.crouching);
+    assert_eq!(body.crouch, 0.0);
+    walk(&map, &mut body, &crouch);
+    assert!(close(body.crouch, m.crouch_transition_velocity, 1e-7));
+    run(&map, &mut body, crouch, 120);
+    assert_eq!(body.crouch, 1.0);
+    assert!(close(speed(&body), m.sneak_forward_speed, 1e-3), "crouched speed {}", speed(&body));
+
+    // and standing up again takes the speed back
+    let walking = controls(1.0, 0.0, 0.0);
+    run(&map, &mut body, walking, 120);
+    assert!(!body.crouching && body.crouch == 0.0);
+    assert!(close(speed(&body), m.run_forward_speed, 1e-3));
+}
+
+#[test]
+fn a_crouched_player_goes_backwards_and_sideways_at_the_sneak_speeds() {
+    let map = flat_floor_map();
+    let m = map.movement;
+    for (forward, strafe, want) in [(-1.0, 0.0, m.sneak_backward_speed), (0.0, 1.0, m.sneak_sideways_speed)] {
+        let mut body = standing(&map, 0.0, 0.0, 0.0);
+        run(&map, &mut body, Controls { crouch: true, ..controls(forward, strafe, 0.0) }, 120);
+        assert!(close(speed(&body), want, 1e-3), "throttle ({forward}, {strafe}): {} not {want}", speed(&body));
+    }
+}
+
+/// How the player lands from a fall of `height` above the flat floor, at the
+/// moment they land: the body, and the ticks they are held by the landing
+/// afterwards while the throttle is down.
+fn land_from(height: f32) -> (Body, u32) {
+    let map = flat_floor_map();
+    let mut body = Body::at([0.0, 0.0, height]);
+    for _ in 0..400 {
+        walk(&map, &mut body, &controls(1.0, 0.0, 0.0));
+        if body.landing_velocity > 0.0 {
+            break;
+        }
+    }
+    let landed = body;
+    let mut held = 0;
+    while held < 100 {
+        walk(&map, &mut body, &controls(1.0, 0.0, 0.0));
+        if body.landing != halo_sim::walk::HARD_LANDING {
+            break;
+        }
+        held += 1;
+    }
+    (landed, held)
+}
+
+#[test]
+fn a_small_fall_lands_softly_and_a_long_one_lands_hard_and_holds_the_player_still() {
+    let m = flat_floor_map().movement;
+    // a hop: below even the soft landing's speed
+    let (body, held) = land_from(0.4);
+    assert_eq!((body.landing, held), (halo_sim::walk::NO_LANDING, 0));
+    // a fall from two units: fast enough for the soft landing, not the hard one
+    let (body, held) = land_from(2.0);
+    assert!(body.landing_velocity * TICKS > m.minimum_soft_landing_velocity);
+    assert_eq!((body.landing, held), (halo_sim::walk::SOFT_LANDING, 0));
+    // from six: the hard landing, which the player cannot walk out of while it lasts
+    let (body, held) = land_from(6.0);
+    assert!(body.landing_velocity * TICKS > m.minimum_hard_landing_velocity);
+    assert_eq!(body.landing, halo_sim::walk::HARD_LANDING);
+    assert!(held > 10, "held for only {held} ticks");
+    assert!(held as f32 <= m.maximum_hard_landing_time * TICKS + 1.0, "held for {held} ticks");
+}
+
+#[test]
+fn a_player_held_by_a_hard_landing_slows_to_a_stop_and_cannot_jump() {
+    let map = flat_floor_map();
+    let (mut body, _) = land_from(6.0);
+    let mut jumped = false;
+    for _ in 0..5 {
+        walk(&map, &mut body, &jumping(1.0));
+        jumped |= body.airborne;
+    }
+    assert!(!jumped, "jumped while held");
+    assert!(speed(&body) < map.movement.run_forward_speed, "still running at {}", speed(&body));
+}
+
+#[test]
+fn the_speed_of_a_landing_is_what_the_falling_damage_reads() {
+    let m = flat_floor_map().movement;
+    // from where the tags' damage starts: hurts above, not below
+    let height_for = |v: f32| v * v / (2.0 * GRAVITY);
+    let (body, _) = land_from(height_for(m.minimum_damage_velocity) + 0.3);
+    assert!(body.landing_velocity > m.minimum_damage_velocity, "{}", body.landing_velocity);
+    let (body, _) = land_from(height_for(m.minimum_damage_velocity) - 0.3);
+    assert!(body.landing_velocity < m.minimum_damage_velocity, "{}", body.landing_velocity);
+}
+
 #[test]
 fn every_position_a_walking_player_reaches_is_accepted_by_the_server() {
     // the wall, the slope and the turns: a long scripted walk, reported tick by tick
     for (map, x, z) in [(walled_floor_map(), WALL_X - 5.0, 0.0), (ramp_map(0.36), RAMP_START_X - 5.0, 0.0)] {
         let mut store = MemoryStore::new();
-        store.set_player(Player { id: 1, position: [x, 0.0, z], yaw: 0.0, pitch: 0.0 });
+        store.set_player(Player::new(1, [x, 0.0, z], 0.0, 0.0));
         let mut body = standing(&map, x, 0.0, z);
         let mut rng = Rng::seeded(7);
         let mut yaw = 0.0f32;
@@ -231,7 +404,7 @@ fn every_position_a_walking_player_reaches_is_accepted_by_the_server() {
                 strafe = (rng.next_f32() - 0.5) * 2.0;
             }
             walk(&map, &mut body, &controls(forward.clamp(-1.0, 1.0), strafe, yaw));
-            let input = PlayerInput { player: 1, position: body.position, yaw, pitch: 0.0 };
+            let input = PlayerInput { player: 1, position: body.position, yaw, pitch: 0.0, flags: 0 };
             let events = step(&mut store, &[input], &map, &mut rng);
             assert_eq!(events, [Event::MoveAccepted { player: 1 }], "tick {tick} at {:?}", body.position);
         }

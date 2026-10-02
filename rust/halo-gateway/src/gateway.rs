@@ -251,7 +251,8 @@ impl Gateway {
                         yaw: row.yaw,
                         pitch: row.pitch,
                         tick: row.updated_tick as u8,
-                        flags: 0,
+                        // airborne and crouched: how the others show the player
+                        flags: row.flags,
                     };
                     work.index.insert(row.id, work.entries.len());
                     work.entries.push(Entry { position, packed: PackedState::pack(&state, &bounds) });

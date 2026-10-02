@@ -24,7 +24,7 @@ impl MapSource for FlatFloors {
             return Err("nomap.map: no such map".into());
         }
         let spawns = (0..4u16)
-            .map(|i| PlayerInput { player: i, position: [i as f32 * 2.0, 0.0, 0.01], yaw: 0.0, pitch: 0.0 })
+            .map(|i| PlayerInput { player: i, position: [i as f32 * 2.0, 0.0, 0.01], yaw: 0.0, pitch: 0.0, flags: 0 })
             .collect();
         Ok(LoadedMap { data: flat_floor_map(), spawns })
     }

@@ -3,6 +3,12 @@ use alloc::vec::Vec;
 
 pub type PlayerId = u16;
 
+/// [`Player::flags`]: the player is not on the ground (the server's judgement
+/// of the moves they reported: a jump or a fall).
+pub const FLAG_AIRBORNE: u8 = 1;
+/// [`Player::flags`]: the player is crouched (what their client says).
+pub const FLAG_CROUCHED: u8 = 2;
+
 /// A player as the simulation holds them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Player {
@@ -10,17 +16,39 @@ pub struct Player {
     pub position: [f32; 3],
     pub yaw: f32,
     pub pitch: f32,
+    /// [`FLAG_AIRBORNE`] and [`FLAG_CROUCHED`]: how the others are to show the player.
+    pub flags: u8,
+    /// Ticks the player has been off the ground, as far as the accepted moves
+    /// say (0 on the ground): what the airborne rule of the validation
+    /// measures a move against (see [`crate::step`]).
+    pub air_ticks: u32,
+    /// Where the height of the player was when they left the ground.
+    pub air_z: f32,
+    /// Ticks since the player was last by a surface, and how high they were
+    /// then (see the airborne rule); 0 if they are by one.
+    pub free_ticks: u32,
+    pub free_z: f32,
 }
 
 impl Player {
     /// Bytes per player in [`snapshot`].
-    pub const SNAPSHOT_SIZE: usize = 2 + 5 * 4;
+    pub const SNAPSHOT_SIZE: usize = 2 + 5 * 4 + 1 + 4 * 4;
+
+    /// A player standing on the ground at `position`.
+    pub fn new(id: PlayerId, position: [f32; 3], yaw: f32, pitch: f32) -> Player {
+        Player { id, position, yaw, pitch, flags: 0, air_ticks: 0, air_z: 0.0, free_ticks: 0, free_z: 0.0 }
+    }
 
     fn write(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.id.to_le_bytes());
         for v in self.position.iter().chain([&self.yaw, &self.pitch]) {
             out.extend_from_slice(&v.to_le_bytes());
         }
+        out.push(self.flags);
+        out.extend_from_slice(&self.air_ticks.to_le_bytes());
+        out.extend_from_slice(&self.air_z.to_le_bytes());
+        out.extend_from_slice(&self.free_ticks.to_le_bytes());
+        out.extend_from_slice(&self.free_z.to_le_bytes());
     }
 }
 

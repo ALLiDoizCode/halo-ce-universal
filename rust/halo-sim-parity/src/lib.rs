@@ -73,6 +73,11 @@ fn body_bytes(body: &Body) -> Vec<u8> {
     out.extend_from_slice(&body.landing_velocity.to_le_bytes());
     out.extend_from_slice(&body.support_surface.to_le_bytes());
     out.push(body.airborne as u8);
+    out.push(body.crouching as u8);
+    out.extend_from_slice(&body.crouch.to_le_bytes());
+    out.extend_from_slice(&body.pill_crouch.to_le_bytes());
+    out.push(body.jump_timer);
+    out.extend_from_slice(&[body.landing as u8, body.landing_counter as u8, body.landing_time as u8]);
     out
 }
 
@@ -85,7 +90,7 @@ pub fn run(seed: u64, ticks: u32) -> Vec<u8> {
         let (x, y) = (signed(&mut rng) * FLOOR_HALF_SIZE, signed(&mut rng) * FLOOR_HALF_SIZE);
         // (every fourth player is put well above the floor, in the air, where each of their moves is refused)
         let z = if id % 4 == 0 { 2.0 } else { 0.0 };
-        store.set_player(Player { id, position: [x, y, z], yaw: 0.0, pitch: 0.0 });
+        store.set_player(Player::new(id, [x, y, z], 0.0, 0.0));
     }
 
     // the walkers: two on each of the maps with a wall and a ramp, from a random
@@ -98,8 +103,7 @@ pub fn run(seed: u64, ticks: u32) -> Vec<u8> {
         [RAMP_START_X - 6.0, 0.0, 0.0],
         [RAMP_START_X + 12.0, 3.0, 4.3],
     ];
-    let mut walkers: Vec<(Body, Controls)> =
-        starts.iter().map(|p| (Body::at(*p), Controls { forward: 0.0, strafe: 0.0, yaw: 0.0, pitch: 0.0 })).collect();
+    let mut walkers: Vec<(Body, Controls)> = starts.iter().map(|p| (Body::at(*p), Controls::standing(0.0))).collect();
 
     let mut chain = Fnv(0xCBF2_9CE4_8422_2325);
     let mut counts = [0u32; EVENT_KINDS];
@@ -126,14 +130,22 @@ pub fn run(seed: u64, ticks: u32) -> Vec<u8> {
                 }
                 _ => to[1] = f32::NAN,
             }
-            inputs.push(PlayerInput { player: id, position: to, yaw: signed(&mut rng), pitch: signed(&mut rng) });
+            // (a third of them say they are crouched)
+            let flags = if rng.next_u32().is_multiple_of(3) { halo_sim::FLAG_CROUCHED } else { 0 };
+            inputs.push(PlayerInput {
+                player: id,
+                position: to,
+                yaw: signed(&mut rng),
+                pitch: signed(&mut rng),
+                flags,
+            });
         }
         if rng.next_u32().is_multiple_of(40) {
             // a second input for a player who has one already
-            inputs.push(PlayerInput { player: 0, position: [0.0; 3], yaw: 0.0, pitch: 0.0 });
+            inputs.push(PlayerInput { player: 0, position: [0.0; 3], yaw: 0.0, pitch: 0.0, flags: 0 });
         }
         if rng.next_u32().is_multiple_of(50) {
-            inputs.push(PlayerInput { player: PLAYERS + 5, position: [0.0; 3], yaw: 0.0, pitch: 0.0 });
+            inputs.push(PlayerInput { player: PLAYERS + 5, position: [0.0; 3], yaw: 0.0, pitch: 0.0, flags: 0 });
         }
 
         let events = step(&mut store, &inputs, &map, &mut rng);
@@ -153,6 +165,9 @@ pub fn run(seed: u64, ticks: u32) -> Vec<u8> {
                 controls.forward = (walker_rng.next_f32() * 1.4 - 0.2).min(1.0);
                 controls.strafe = signed(&mut walker_rng) * 2.0;
             }
+            // (and a jump now and then, and the crouch held for stretches)
+            controls.jump = tick % 40 == (i as u32 * 9 + 5) % 40 && walker_rng.next_u32().is_multiple_of(2);
+            controls.crouch = (tick / 60 + i as u32) % 3 == 0;
             walk(&maps[i], body, controls);
             chain.bytes(&body_bytes(body));
         }

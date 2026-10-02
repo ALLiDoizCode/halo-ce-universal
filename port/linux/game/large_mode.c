@@ -88,6 +88,7 @@ the library) the mode is not there: large_mode_active() is FALSE.
 #include "game/players.h"
 #include "objects/objects.h"
 #include "scenario/scenario.h"
+#include "units/bipeds.h"
 #include "units/unit_control_data.h"
 #include "units/units.h"
 
@@ -126,7 +127,8 @@ unsigned long halo_large_bounds(float *out);
 void halo_large_send_input(float x, float y, float z, float yaw, float pitch);
 unsigned long halo_large_load_map(const char *path);
 void halo_large_place(float x, float y, float z);
-unsigned long halo_large_move(float forward, float strafe, float yaw, float pitch, float *out);
+unsigned long halo_large_move(float forward, float strafe, float yaw, float pitch, unsigned long jump,
+	unsigned long crouch, float *out);
 unsigned long halo_large_error(char *buffer, unsigned long size);
 void halo_large_identity_dir(const char *folder);
 void halo_large_set_name(const char *name);
@@ -224,6 +226,7 @@ static struct
 	boolean local_moving;
 	boolean local_airborne;
 	float local_state[7];
+	/* (state[6] is how fast the tick drove the unit into the ground it landed on, a tick's worth) */
 	long local_logged_time;
 } large;
 
@@ -396,9 +399,18 @@ struct large_remote
 	long team;
 	char name[LARGE_NAME_LENGTH + 1];
 	/* the state the unit is drawn from: the library's, as of the datagram of
-	this tick */
+	this tick; the ninth number is the player's flags (1 in the air, 2 crouched) */
 	unsigned long tick;
-	float state[8];
+	float state[9];
+	/* what the engine's animation needs of it, that its suspended physics does
+	not give (large_mode_biped_state): in the air, and the speed at which it landed
+	this tick, a tick's worth, when it did */
+	boolean airborne;
+	real landing_velocity;
+	float last_fall_speed;
+	/* since it was last logged: whether the engine's unit had a landing (soft or hard) to
+	recover from, which is short and so seen between the log's seconds */
+	boolean saw_landing;
 };
 
 static struct
@@ -411,6 +423,8 @@ static struct
 	long created;
 	long removed;
 	long create_failures;
+	/* landings the library's states gave the engine (large_mode_biped_state) */
+	long landings;
 	long shared_time;
 	long logged_time;
 	/* what the adapter costs: the processor's cycles of this tick's update and
@@ -423,6 +437,9 @@ static struct
 	unsigned long long window_start_cycles;
 	unsigned long window_start_ms;
 	boolean ignored_ids_said;
+	/* the remote unit of each engine object, for large_mode_biped_state (the
+	remote's slot, one more than it: 0 is none) */
+	short remote_of_object[HALO_PORT_MAXIMUM_OBJECTS_PER_MAP];
 } large_remote_data;
 
 /* whether the engine's player is a remote one (players.c leaves its controls
@@ -492,6 +509,7 @@ static void large_mode_remove_remote(
 	struct large_remote *remote = &large_remote_data.remotes[id];
 
 	large_mode_take_player(remote);
+	large_remote_data.remote_of_object[DATUM_INDEX_TO_ABSOLUTE_INDEX(remote->unit_index)] = 0;
 	if (object_try_and_get_and_verify_type(remote->unit_index, _object_mask_unit))
 		object_delete(remote->unit_index);
 	remote->present = FALSE;
@@ -549,6 +567,10 @@ static boolean large_mode_create_remote(
 	unit_set_actively_controlled(unit_index, TRUE);
 	remote->present = TRUE;
 	remote->unit_index = unit_index;
+	remote->airborne = FALSE;
+	remote->landing_velocity = 0.0f;
+	remote->last_fall_speed = 0.0f;
+	large_remote_data.remote_of_object[DATUM_INDEX_TO_ABSOLUTE_INDEX(unit_index)] = (short)(id + 1);
 	remote->player_index = NONE;
 	remote->team = (long)team;
 	remote->tick = tick;
@@ -637,16 +659,33 @@ static void large_mode_drive_remote(
 	real cos_pitch = (real)cos(state[7]);
 	real ahead = state[3] * cos_yaw + state[4] * sin_yaw;
 	real left = -state[3] * sin_yaw + state[4] * cos_yaw;
+	long flags = (long)(state[8] + 0.5f);
+	boolean airborne = (flags & 1) != 0;
+	boolean crouched = (flags & 2) != 0;
 
 	csmemset(&control, 0, sizeof(control));
 	control.animation_state = _unit_animation_state_in_combat;
 	control.weapon_index = NONE;
 	control.grenade_index = NONE;
 	control.zoom_level = NONE;
+	/* crouched, the player is at the sneaking speeds, and the engine's animation sinks the
+	unit into the crouch (which it does for the control flag) */
+	if (crouched)
+		SET_FLAG(control.control_flags, _unit_control_crouch_modifier_bit, TRUE);
 	/* (the tags' speeds are never zero, but a throttle must never be not a number) */
-	control.throttle.i = PIN(ahead / MAX(ahead > 0.0f ? information->run_forward_speed : information->run_backward_speed,
+	control.throttle.i = PIN(ahead / MAX(ahead > 0.0f ? (crouched ? information->sneak_forward_speed :
+		information->run_forward_speed) : (crouched ? information->sneak_backward_speed :
+		information->run_backward_speed), 0.001f), -1.0f, 1.0f);
+	control.throttle.j = PIN(left / MAX(crouched ? information->sneak_sideways_speed : information->run_sideways_speed,
 		0.001f), -1.0f, 1.0f);
-	control.throttle.j = PIN(left / MAX(information->run_sideways_speed, 0.001f), -1.0f, 1.0f);
+	/* a player who was in the air and is not has landed, at about the speed they were falling: the engine
+	starts the landing, soft or hard, from it (the fall is the faster of the two states' speeds, the
+	later state's being the one that has the fall's last tick in it) */
+	remote->landing_velocity = 0.0f;
+	if (remote->airborne && !airborne)
+		remote->landing_velocity = MAX(-MIN(remote->last_fall_speed, state[5]), 0.0f) / TICKS_PER_SECOND;
+	remote->airborne = airborne;
+	remote->last_fall_speed = state[5];
 	control.facing_vector.i = cos_yaw;
 	control.facing_vector.j = sin_yaw;
 	control.facing_vector.k = 0.0f;
@@ -680,7 +719,7 @@ static void large_mode_update_remotes_work(
 	for (index = 0; index < count; index++)
 	{
 		unsigned long player, tick;
-		float state[8];
+		float state[9];
 
 		if (!halo_large_unit(index, &player, &tick, state))
 			continue;
@@ -761,6 +800,8 @@ void large_mode_game_tick_after_objects(
 		object->object.translational_velocity.i = remote->state[3] / TICKS_PER_SECOND;
 		object->object.translational_velocity.j = remote->state[4] / TICKS_PER_SECOND;
 		object->object.translational_velocity.k = remote->state[5] / TICKS_PER_SECOND;
+		if (((struct biped_datum *)object)->biped.landing != NONE)
+			remote->saw_landing = TRUE;
 	}
 
 	large_remote_data.tick_cycles += __builtin_ia32_rdtsc() - start;
@@ -785,9 +826,9 @@ static void large_mode_log_remotes(
 	unsigned long now_ms = system_milliseconds();
 	long id;
 
-	platform_log("large mode: %ld remote units, %ld with players | created %ld removed %ld failures %ld",
+	platform_log("large mode: %ld remote units, %ld with players | created %ld removed %ld failures %ld landings %ld",
 		large_remote_data.count, large_remote_data.players, large_remote_data.created, large_remote_data.removed,
-		large_remote_data.create_failures);
+		large_remote_data.create_failures, large_remote_data.landings);
 	/* what the adapter cost a tick over the last second: the window's cycles at
 	the rate the window's own length gives them */
 	if (large_remote_data.window_start_ms && now_ms > large_remote_data.window_start_ms && large_remote_data.window_ticks)
@@ -816,9 +857,16 @@ static void large_mode_log_remotes(
 		object = (struct object_datum *)object_try_and_get_and_verify_type(remote->unit_index, _object_mask_unit);
 		if (!object)
 			continue;
-		platform_log("large mode: drawn %ld tick %lu (%.4f %.4f %.4f) team %ld player %ld", id, remote->tick,
+		/* (and what the engine's animation made of the player's flags: its state, which the
+		airborne and the landing ones are among, and its base seat, which the crouch is) */
+		platform_log("large mode: drawn %ld tick %lu (%.4f %.4f %.4f) team %ld player %ld flags %ld state %ld "
+			"seat %ld landing %ld", id, remote->tick,
 			object->object.position.x, object->object.position.y, object->object.position.z, remote->team,
-			remote->player_index == NONE ? -1L : (long)DATUM_INDEX_TO_ABSOLUTE_INDEX(remote->player_index));
+			remote->player_index == NONE ? -1L : (long)DATUM_INDEX_TO_ABSOLUTE_INDEX(remote->player_index),
+			(long)(remote->state[8] + 0.5f), (long)((struct unit_datum *)object)->unit.animation.state,
+			(long)((struct unit_datum *)object)->unit.animation.base_seat_index,
+			remote->saw_landing ? 1L : (long)((struct biped_datum *)object)->biped.landing);
+		remote->saw_landing = FALSE;
 	}
 }
 
@@ -852,12 +900,13 @@ static void large_mode_log(
 	for (index = 0; index < count; index++)
 	{
 		unsigned long player, unit_tick;
-		float state[8];
+		float state[9];
 
 		if (halo_large_unit(index, &player, &unit_tick, state))
 		{
-			platform_log("large mode: player %lu tick %lu (%.4f %.4f %.4f) v (%.3f %.3f %.3f) yaw %.4f pitch %.4f",
-				player, unit_tick, state[0], state[1], state[2], state[3], state[4], state[5], state[6], state[7]);
+			platform_log("large mode: player %lu tick %lu (%.4f %.4f %.4f) v (%.3f %.3f %.3f) yaw %.4f pitch %.4f "
+				"flags %.0f", player, unit_tick, state[0], state[1], state[2], state[3], state[4], state[5], state[6],
+				state[7], state[8]);
 		}
 	}
 }
@@ -889,7 +938,9 @@ static void large_mode_move_local(
 		large.local_seen_unit = unit_index;
 		halo_large_place(unit->object.position.x, unit->object.position.y, unit->object.position.z);
 	}
-	moved = halo_large_move(unit->unit.throttle.i, unit->unit.throttle.j, yaw, pitch, large.local_state);
+	moved = halo_large_move(unit->unit.throttle.i, unit->unit.throttle.j, yaw, pitch,
+		TEST_FLAG(unit->unit.control_flags, _unit_control_jump_bit) ? 1 : 0,
+		TEST_FLAG(unit->unit.control_flags, _unit_control_crouch_modifier_bit) ? 1 : 0, large.local_state);
 
 	if (!moved)
 	{
@@ -912,6 +963,44 @@ static void large_mode_move_local(
 	object_translate(unit_index, &position, NULL);
 	large.local_airborne = (moved & 2) != 0;
 	large.local_moving = TRUE;
+}
+
+/* whether the engine's physics, suspended for a unit, is to take the unit for one the library
+moves, and what the library says of it: in the air (the jump and fall animations) and how fast it
+landed this tick (the landing's). Called by the engine's biped update, for each unit suspended. The
+engine does not hurt a unit for the fall: the server does. */
+boolean large_mode_biped_state(
+	long biped_index,
+	boolean *airborne,
+	real *landing_velocity)
+{
+	long slot;
+
+	if (!large.started)
+		return FALSE;
+	if (large.local_moving && biped_index == large.local_suspended_unit)
+	{
+		*airborne = large.local_airborne;
+		*landing_velocity = large.local_state[6];
+		return TRUE;
+	}
+	if (large_remote_data.count <= 0)
+		return FALSE;
+	slot = DATUM_INDEX_TO_ABSOLUTE_INDEX(biped_index);
+	if (slot >= 0 && slot < HALO_PORT_MAXIMUM_OBJECTS_PER_MAP && large_remote_data.remote_of_object[slot] > 0)
+	{
+		struct large_remote *remote = &large_remote_data.remotes[large_remote_data.remote_of_object[slot] - 1];
+
+		if (remote->present && remote->unit_index == biped_index)
+		{
+			*airborne = remote->airborne;
+			*landing_velocity = remote->landing_velocity;
+			if (remote->landing_velocity > 0.0f)
+				large_remote_data.landings++;
+			return TRUE;
+		}
+	}
+	return FALSE;
 }
 
 /* ... and after the objects are updated, its velocity: the engine has none for
@@ -1435,6 +1524,14 @@ void large_mode_game_tick_after_objects(
 
 boolean large_mode_remote_player(
 	long player_index)
+{
+	return FALSE;
+}
+
+boolean large_mode_biped_state(
+	long biped_index,
+	boolean *airborne,
+	real *landing_velocity)
 {
 	return FALSE;
 }

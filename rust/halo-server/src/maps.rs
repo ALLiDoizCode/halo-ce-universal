@@ -42,7 +42,7 @@ impl MapSource for MapFiles {
                     .collision
                     .ray_down([start[0], start[1], start[2] + 1.0], 3.0)
                     .map_or(start[2], |hit| hit.z + 0.01);
-                PlayerInput { player: index as u16, position: [start[0], start[1], z], yaw: *yaw, pitch: 0.0 }
+                PlayerInput { player: index as u16, position: [start[0], start[1], z], yaw: *yaw, pitch: 0.0, flags: 0 }
             })
             .collect();
         Ok(LoadedMap { data, spawns })

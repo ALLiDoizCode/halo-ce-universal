@@ -17,6 +17,11 @@ pub struct PlayerRow {
     pub rejected_moves: u64,
     pub last_reject: u8,
     pub last_reject_tick: u64,
+    pub flags: u8,
+    pub air_ticks: u32,
+    pub air_z: f32,
+    pub free_ticks: u32,
+    pub free_z: f32,
 }
 
 impl __sdk::InModule for PlayerRow {
@@ -37,6 +42,11 @@ pub struct PlayerRowCols {
     pub rejected_moves: __sdk::__query_builder::Col<PlayerRow, u64>,
     pub last_reject: __sdk::__query_builder::Col<PlayerRow, u8>,
     pub last_reject_tick: __sdk::__query_builder::Col<PlayerRow, u64>,
+    pub flags: __sdk::__query_builder::Col<PlayerRow, u8>,
+    pub air_ticks: __sdk::__query_builder::Col<PlayerRow, u32>,
+    pub air_z: __sdk::__query_builder::Col<PlayerRow, f32>,
+    pub free_ticks: __sdk::__query_builder::Col<PlayerRow, u32>,
+    pub free_z: __sdk::__query_builder::Col<PlayerRow, f32>,
 }
 
 impl __sdk::__query_builder::HasCols for PlayerRow {
@@ -53,6 +63,11 @@ impl __sdk::__query_builder::HasCols for PlayerRow {
             rejected_moves: __sdk::__query_builder::Col::new(table_name, "rejected_moves"),
             last_reject: __sdk::__query_builder::Col::new(table_name, "last_reject"),
             last_reject_tick: __sdk::__query_builder::Col::new(table_name, "last_reject_tick"),
+            flags: __sdk::__query_builder::Col::new(table_name, "flags"),
+            air_ticks: __sdk::__query_builder::Col::new(table_name, "air_ticks"),
+            air_z: __sdk::__query_builder::Col::new(table_name, "air_z"),
+            free_ticks: __sdk::__query_builder::Col::new(table_name, "free_ticks"),
+            free_z: __sdk::__query_builder::Col::new(table_name, "free_z"),
         }
     }
 }

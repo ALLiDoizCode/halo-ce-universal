@@ -16,9 +16,9 @@
 //!     put on their seat, of `auth::auth_message(player, stamp, cookie)`.
 //!     Accepted, it binds the sending address to the player and is answered
 //!     with a Welcome; refused, with a Refused.
-//! Input  0x02 | seq u32 | player u16 | x y z f32 | yaw f32 | pitch f32
-//!             | ack_newest u16 | ack_bits u32                          (33 bytes)
-//!     The player's position and facing now: the 22-byte record of
+//! Input  0x02 | seq u32 | player u16 | x y z f32 | yaw f32 | pitch f32 | flags u8
+//!             | ack_newest u16 | ack_bits u32                          (34 bytes)
+//!     The player's position and facing now: the 23-byte record of
 //!     `halo_sim::wire`, then the acknowledgement of Snapshots (see [`Ack`]).
 //!     The gateway keeps the newest `seq` and drops any input whose `seq` is
 //!     not newer than one it has (wrapping compare). Only counts from the
@@ -396,7 +396,7 @@ mod tests {
     use super::*;
 
     fn input() -> PlayerInput {
-        PlayerInput { player: 9, position: [1.0, 2.0, 3.0], yaw: 0.5, pitch: -0.5 }
+        PlayerInput { player: 9, position: [1.0, 2.0, 3.0], yaw: 0.5, pitch: -0.5, flags: 0 }
     }
 
     #[test]
@@ -408,18 +408,18 @@ mod tests {
         {
             assert_eq!(ClientMessage::decode(&m.encode()), Some(m));
         }
-        assert_eq!(ClientMessage::Input { seq: 1, input: input(), ack }.encode().len(), 33);
+        assert_eq!(ClientMessage::Input { seq: 1, input: input(), ack }.encode().len(), 34);
         assert_eq!(auth.encode().len(), 91);
     }
 
     #[test]
     fn the_client_layouts_are_fixed() {
         assert_eq!(ClientMessage::Hello { player: 0x0102 }.encode(), [0x01, 0x02, 0x01]);
-        let moved = PlayerInput { player: 0x0304, position: [0.0; 3], yaw: 0.0, pitch: 0.0 };
+        let moved = PlayerInput { player: 0x0304, position: [0.0; 3], yaw: 0.0, pitch: 0.0, flags: 0 };
         let ack = Ack { newest: 0x0506, bits: 0x0708090a };
         let b = ClientMessage::Input { seq: 0x0a0b0c0d, input: moved, ack }.encode();
         assert_eq!(&b[..7], [0x02, 0x0d, 0x0c, 0x0b, 0x0a, 0x04, 0x03]);
-        assert_eq!(&b[27..], [0x06, 0x05, 0x0a, 0x09, 0x08, 0x07], "the acknowledgement is last");
+        assert_eq!(&b[28..], [0x06, 0x05, 0x0a, 0x09, 0x08, 0x07], "the acknowledgement is last");
         let auth = ClientMessage::Auth {
             player: 0x0102,
             stamp: 0x0807060504030201,

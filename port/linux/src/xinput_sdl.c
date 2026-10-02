@@ -240,9 +240,11 @@ network tests (port/linux/game/network_test.c), different for each seed:
 it walks and strafes in circles, turns, fires every few seconds, jumps now
 and then and throws a grenade every seven seconds; "look:<seed>" stands
 still, only turning and looking up and down (where remote players aim and
-whether they stand); "walk:<seed>" only walks, strafes and turns, with no
-button pressed (the large-scale mode's movement runs, which have to stay on
-the ground) */
+whether they stand); "scan:<seed>" only turns, level, to look about (to see
+remote players in screenshots); "walk:<seed>" only walks, strafes and turns, with no
+button pressed (the large-scale mode's movement runs); "hop:<seed>" walks the
+same way and also jumps every few seconds and crouches for a stretch of
+each nine (the same runs, for jumping, falling and crouching) */
 static int test_input_holding_action;
 static Uint64 test_input_holding_action_since;
 
@@ -261,7 +263,9 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
 	static int checked;
 	static int seed = -1;
 	static int looking;
+	static int scanning;
 	static int walking;
+	static int hopping;
 	double t;
 
 	if (!checked)
@@ -278,10 +282,22 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
 			seed = atoi(setting + 5);
 			looking = 1;
 		}
+		else if (!strncmp(setting, "scan:", 5))
+		{
+			seed = atoi(setting + 5);
+			looking = 1;
+			scanning = 1;
+		}
 		else if (!strncmp(setting, "walk:", 5))
 		{
 			seed = atoi(setting + 5);
 			walking = 1;
+		}
+		else if (!strncmp(setting, "hop:", 4))
+		{
+			seed = atoi(setting + 4);
+			walking = 1;
+			hopping = 1;
 		}
 	}
 	if (seed < 0)
@@ -297,12 +313,20 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
 	if (looking)
 	{
 		pad->sThumbRX = (SHORT)(sin(t * 0.5) * 14000.0);
-		pad->sThumbRY = (SHORT)(sin(t * 0.3) * 32000.0);
+		if (!scanning)
+			pad->sThumbRY = (SHORT)(sin(t * 0.3) * 32000.0);
 		return;
 	}
 	pad->sThumbLY = (SHORT)(sin(t * 0.9) * 32000.0);
 	pad->sThumbLX = (SHORT)(cos(t * 0.6 + seed) * 20000.0);
 	pad->sThumbRX = (SHORT)(sin(t * 0.4) * 14000.0);
+	if (hopping)
+	{
+		if (fmod(t, 2.3) < 0.1)
+			pad->bAnalogButtons[XINPUT_GAMEPAD_A] = 255;
+		if (fmod(t, 9.0) < 3.0)
+			pad->wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+	}
 	if (walking)
 		return;
 	if (fmod(t, 3.0) < 0.3)

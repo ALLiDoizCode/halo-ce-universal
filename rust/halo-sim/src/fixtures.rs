@@ -45,6 +45,16 @@ pub fn movement() -> Movement {
         uphill_k0: 0.3,
         uphill_k1: 0.7,
         uphill_velocity_scale: 0.6,
+        jump_velocity: 0.07,
+        crouch_transition_velocity: 0.166_666_67,
+        maximum_soft_landing_time: 0.6,
+        maximum_hard_landing_time: 1.0,
+        minimum_soft_landing_velocity: 1.5,
+        minimum_hard_landing_velocity: 5.0,
+        maximum_hard_landing_velocity: 8.0,
+        minimum_damage_velocity: 0.146,
+        maximum_damage_velocity: 0.207,
+        maximum_falling_velocity: 0.343,
     }
 }
 

@@ -1,0 +1,17 @@
+# Walking off the edge of a base platform on Blood Gulch, a drop of about two
+# world units: the player leaves the ground without jumping, falls and lands
+# (a soft landing), still walking.
+scenario fall_ledge
+map bloodgulch
+# <name> <x> <y> <z> <yaw, radians>: a little above the ground, so that the
+# player settles on it in the first ticks
+start red_base_edge 98.4934 -157.639 1.8 2.3562
+ticks 150
+input 30 150 forward=1.0
+
+# what the Rust simulation may differ from the C engine by: falling and
+# landing are the same arithmetic as walking (see walk_slope)
+tolerance position 0.001
+tolerance velocity 0.005
+tolerance facing 0.001
+tolerance state 0
