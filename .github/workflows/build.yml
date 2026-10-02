@@ -215,9 +215,11 @@ jobs:
           (cd rust/halo-root-module && cargo build --locked --release --target wasm32-unknown-unknown)
 
       - name: Test against a local SpacetimeDB
+        # one test at a time: each starts a SpacetimeDB, and the tick-by-tick
+        # comparisons are timing-sensitive on a shared runner
         working-directory: rust/halo-match-driver
         run: |
-          HALO_STDB_BIN="$HOME/spacetimedb" cargo test --locked --release -- --nocapture
+          HALO_STDB_BIN="$HOME/spacetimedb" cargo test --locked --release -- --nocapture --test-threads=1
 
       - name: Test the gateway on the wire
         # simulated UDP players against a real SpacetimeDB and the gateway;
