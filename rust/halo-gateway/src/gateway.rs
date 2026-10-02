@@ -96,6 +96,7 @@ pub struct Gateway {
     shared: Arc<Shared>,
     local_addr: SocketAddr,
     conn: Option<Arc<DbConnection>>,
+    recv: Option<JoinHandle<()>>,
     threads: Vec<JoinHandle<()>>,
 }
 
@@ -183,7 +184,7 @@ impl Gateway {
                 for row in &rows {
                     let position = [row.x, row.y, row.z];
                     let velocity = match previous.get(&row.id) {
-                        Some((before, was)) if *was != row.updated_tick => {
+                        Some((before, was)) if row.updated_tick > *was => {
                             let dt = (row.updated_tick - was) as f32 / TICKS_PER_SECOND as f32;
                             [
                                 (position[0] - before[0]) / dt,
@@ -231,9 +232,10 @@ impl Gateway {
         let conn = Arc::new(conn);
 
         // the receiving thread
+        let recv;
         {
             let (shared, conn, transport) = (shared.clone(), conn.clone(), transport.clone());
-            threads.push(
+            recv = Some(
                 std::thread::Builder::new()
                     .name("gateway-recv".into())
                     .spawn(move || recv_loop(&shared, &conn, &*transport))
@@ -241,7 +243,7 @@ impl Gateway {
             );
         }
         let local_addr = transport.local_addr();
-        Ok(Gateway { shared, local_addr, conn: Some(conn), threads })
+        Ok(Gateway { shared, local_addr, conn: Some(conn), recv, threads })
     }
 
     /// Where players send their datagrams.
@@ -263,6 +265,12 @@ impl Gateway {
         self.shared.stop.store(true, Relaxed);
         if let Some(conn) = self.conn.take() {
             let _ = conn.disconnect();
+            // the receiving thread holds the last other handle on the connection,
+            // which owns the senders the sending threads wait on: join it first
+            if let Some(recv) = self.recv.take() {
+                let _ = recv.join();
+            }
+            drop(conn);
         }
         for t in self.threads.drain(..) {
             let _ = t.join();

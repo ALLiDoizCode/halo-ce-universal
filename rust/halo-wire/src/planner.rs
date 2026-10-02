@@ -86,11 +86,9 @@ pub struct Planner {
     credit: f32,
     /// Accumulated priority, indexed by player id.
     priority: Vec<f32>,
-    scratch: Vec<(f32, u32)>,
+    /// (near, priority, index into the world), for ranking.
+    scratch: Vec<(bool, f32, u32)>,
 }
-
-/// Added to a near player's key so they outrank any accumulated priority.
-const NEAR_RANK: f32 = 1.0e9;
 
 impl Planner {
     pub fn new(config: PlannerConfig) -> Planner {
@@ -135,12 +133,13 @@ impl Planner {
             }
             let p = &mut self.priority[id as usize];
             *p += weight;
-            let key = if d2 <= near2 { *p + NEAR_RANK } else { *p };
-            self.scratch.push((key, index as u32));
+            self.scratch.push((d2 <= near2, *p, index as u32));
         }
 
         let take = affordable(self.credit, self.scratch.len());
-        let by_priority = |a: &(f32, u32), b: &(f32, u32)| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1));
+        // near players first, then by accumulated priority, then by world order
+        type Ranked = (bool, f32, u32);
+        let by_priority = |a: &Ranked, b: &Ranked| b.0.cmp(&a.0).then(b.1.total_cmp(&a.1)).then(a.2.cmp(&b.2));
         if take > 0 && take < self.scratch.len() {
             self.scratch.select_nth_unstable_by(take - 1, by_priority);
         }
@@ -150,7 +149,7 @@ impl Planner {
         let mut buf = Vec::with_capacity(MAX_DATAGRAM);
         for chunk in self.scratch[..take].chunks(MAX_STATES_PER_SNAPSHOT) {
             begin_snapshot(&mut buf, tick);
-            for &(_, index) in chunk {
+            for &(_, _, index) in chunk {
                 let entry = &world[index as usize];
                 append_state(&mut buf, &entry.packed);
                 self.priority[entry.player() as usize] = 0.0;
@@ -299,6 +298,23 @@ mod tests {
         for (id, n) in sent.iter().enumerate().skip(41) {
             assert!(*n >= 5, "player {id} was sent {n} times in {ticks} ticks");
         }
+    }
+
+    #[test]
+    fn when_the_near_players_do_not_all_fit_they_take_turns() {
+        // 60 players within 10 units, a budget for about 20 of them a tick
+        let radii: Vec<f32> = (0..60).map(|i| 1.0 + i as f32 * 0.1).collect();
+        let world = ring(&radii);
+        let mut planner = Planner::new(PlannerConfig::with_budget(11_000));
+        let mut sent = vec![0u32; world.len()];
+        for tick in 0..300 {
+            for id in states_of(&planner.plan(&observer_at_origin(), &world, tick)) {
+                sent[id as usize] += 1;
+            }
+        }
+        let near = &sent[1..];
+        let (lo, hi) = (near.iter().min().unwrap(), near.iter().max().unwrap());
+        assert!(*lo > 0 && *hi <= *lo * 3, "uneven (those facing get double weight): least sent {lo}, most {hi}");
     }
 
     #[test]
