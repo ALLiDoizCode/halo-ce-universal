@@ -73,7 +73,11 @@ def adapter_prototypes():
 def test_the_library_passes_only_floats_32_bit_integers_and_pointers():
     functions = library_functions()
     assert {"halo_large_start", "halo_large_stop", "halo_large_status", "halo_large_frame", "halo_large_unit",
-            "halo_large_local", "halo_large_bounds", "halo_large_send_input", "halo_large_error"} <= set(functions)
+            "halo_large_local", "halo_large_bounds", "halo_large_send_input", "halo_large_error",
+            "halo_large_identity_dir", "halo_large_browse_start", "halo_large_browse_stop",
+            "halo_large_browse_status", "halo_large_browse_list", "halo_large_browse_entry",
+            "halo_large_browse_text", "halo_large_browse_find", "halo_large_browse_message",
+            "halo_large_identity", "halo_large_refusal"} <= set(functions)
     for name, (parameters, result) in functions.items():
         # (rust_c_type refused anything else already) nothing comes back but a 32-bit integer
         assert result in ("void", "unsignedlong"), f"{name} returns {result}"
@@ -148,7 +152,8 @@ def test_the_library_is_rebuilt_only_when_what_it_is_built_from_changed():
     files = rust_client.source_files()
     names = {f.as_posix() for f in files}
     assert {"rust/halo-client/Cargo.toml", "rust/halo-client/Cargo.lock", "rust/halo-client/src/ffi.rs",
-            "rust/halo-wire/src/datagram.rs", "rust/halo-match-driver/src/module_bindings/mod.rs"} <= names
+            "rust/halo-wire/src/datagram.rs", "rust/halo-match-driver/src/module_bindings/mod.rs",
+            "rust/halo-match-driver/src/root_bindings/mod.rs", "rust/halo-client/src/browser.rs"} <= names
     assert not any("/target/" in name for name in names)
 
 

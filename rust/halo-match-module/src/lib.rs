@@ -23,7 +23,11 @@
 //! - The **gateway** (the owner until `set_gateway` names another identity)
 //!   calls `submit_inputs`: nobody else may put input into the match.
 //! - **Anyone** may `join` (take a seat: a player, tied to their identity, and
-//!   the public key their UDP traffic is checked against) and `leave`.
+//!   the public key their UDP traffic is checked against) and `leave`. `join`
+//!   refuses a banned identity (the owner's `set_ban`; a ban made in the root
+//!   database reaches the match through the orchestration, which calls it) and
+//!   a full match, each with a message that starts `banned: ` or `full: ` and
+//!   says why.
 //! - `tick` is called by the database itself, nobody else.
 //!
 //! # Seats
@@ -65,6 +69,11 @@ pub const DEFAULT_AWAY_GRACE_TICKS: u64 = 30 * TICKS_PER_SECOND as u64;
 
 /// Players a match holds unless the owner says otherwise.
 pub const DEFAULT_CAPACITY: u16 = 500;
+
+/// What a refusal to join starts with, so that a client can tell why: the
+/// text after it is for the player.
+pub const BANNED_PREFIX: &str = "banned: ";
+pub const FULL_PREFIX: &str = "full: ";
 
 /// Bytes of the UDP public key (Ed25519).
 const UDP_KEY_SIZE: usize = 32;
@@ -171,6 +180,15 @@ pub struct Seat {
     /// 0 while the player is connected; otherwise one more than the tick their
     /// connection dropped on. After the match's `away_grace_ticks` the player is removed.
     away_since: u64,
+}
+
+/// An identity that may not join, with the reason its player is told. Private;
+/// the orchestration keeps it in step with the root database's bans.
+#[table(accessor = ban)]
+pub struct Ban {
+    #[primary_key]
+    identity: Identity,
+    reason: String,
 }
 
 /// Who runs the match. Private.
@@ -440,6 +458,9 @@ pub fn join(ctx: &ReducerContext, udp_key: Vec<u8>) -> Result<(), String> {
     if udp_key.len() != UDP_KEY_SIZE {
         return Err(format!("the UDP key is {UDP_KEY_SIZE} bytes, not {}", udp_key.len()));
     }
+    if let Some(ban) = ctx.db.ban().identity().find(ctx.sender()) {
+        return Err(format!("{BANNED_PREFIX}{}", ban.reason));
+    }
     if let Some(mut seat) = ctx.db.seat().owner().find(ctx.sender()) {
         seat.udp_key = udp_key;
         seat.connection = ctx.connection_id();
@@ -449,7 +470,7 @@ pub fn join(ctx: &ReducerContext, udp_key: Vec<u8>) -> Result<(), String> {
     }
     let capacity = ctx.db.match_config().id().find(ONLY).map_or(DEFAULT_CAPACITY, |c| c.capacity);
     let Some(id) = (0..capacity).find(|id| ctx.db.player().id().find(*id).is_none()) else {
-        return Err("the match is full".into());
+        return Err(format!("{FULL_PREFIX}the match has its {capacity} players"));
     };
     let spawns = ctx.db.spawn_point().count() as u32;
     if spawns == 0 {
@@ -498,6 +519,32 @@ pub fn disconnected(ctx: &ReducerContext) {
     let tick = ctx.db.match_tick().id().find(ONLY).map_or(0, |t| t.tick);
     seat.away_since = tick + 1;
     ctx.db.seat().player().update(seat);
+}
+
+/// Ban an identity from this match, with the reason its player is told. If it
+/// has a seat the player is removed (the client sees its seat go, and its next
+/// `join` is refused). Banning again replaces the reason.
+#[reducer]
+pub fn set_ban(ctx: &ReducerContext, identity: Identity, reason: String) -> Result<(), String> {
+    require_owner(ctx)?;
+    let row = Ban { identity, reason };
+    if ctx.db.ban().identity().find(identity).is_some() {
+        ctx.db.ban().identity().update(row);
+    } else {
+        ctx.db.ban().insert(row);
+    }
+    if let Some(seat) = ctx.db.seat().owner().find(identity) {
+        remove_player(ctx, seat.player);
+    }
+    Ok(())
+}
+
+/// Lift a ban.
+#[reducer]
+pub fn clear_ban(ctx: &ReducerContext, identity: Identity) -> Result<(), String> {
+    require_owner(ctx)?;
+    ctx.db.ban().identity().delete(identity);
+    Ok(())
 }
 
 /// Where joining players appear, in the batch layout of `add_players` (only

@@ -40,6 +40,8 @@ use halo_wire::datagram::{
 use halo_wire::unit::{Bounds, UnitState};
 use spacetimedb_sdk::{Compression, DbContext, Table, TableWithPrimaryKey};
 
+use crate::identity::{is_rejected_token, IdentityFile};
+
 /// How often the join step is repeated until it gets its answer.
 const JOIN_INTERVAL: Duration = Duration::from_millis(200);
 /// How long the network thread waits for a datagram before it looks at the
@@ -67,9 +69,45 @@ pub struct Config {
     /// The match's database.
     pub database: String,
     /// The SpacetimeDB identity to be, as the token the server gave it
-    /// before; `None` makes a new one. (A session keeps the token of the
-    /// identity it got, to come back as it after a dropped connection.)
+    /// before; `None` is the one kept in `identity` or, with none kept, a new
+    /// one. (A session keeps the token of the identity it got, to come back as
+    /// it after a dropped connection.)
     pub token: Option<String>,
+    /// Where the identity's token is kept between sessions: read when the
+    /// session starts, written when the server has said who it is.
+    pub identity: IdentityFile,
+}
+
+/// Why the match would not seat the player.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalKind {
+    /// The identity is banned (from this match, or from the server).
+    Banned,
+    /// The match holds all the players it may.
+    Full,
+    /// Anything else: no spawn point, a bad key.
+    Other,
+}
+
+/// A refusal of `join`, with what to tell the player.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    pub kind: RefusalKind,
+    pub message: String,
+}
+
+impl Refusal {
+    /// What a match's `join` said (`banned: <reason>`, `full: <why>`, or
+    /// something else), as a refusal with a message fit to show.
+    pub fn from_join_error(text: &str) -> Refusal {
+        if let Some(reason) = text.strip_prefix("banned: ") {
+            Refusal { kind: RefusalKind::Banned, message: format!("you are banned from this server: {reason}") }
+        } else if let Some(why) = text.strip_prefix("full: ") {
+            Refusal { kind: RefusalKind::Full, message: format!("this server is full ({why})") }
+        } else {
+            Refusal { kind: RefusalKind::Other, message: format!("the server would not let you join: {text}") }
+        }
+    }
 }
 
 /// The newest state the gateway sent of one other player.
@@ -135,6 +173,8 @@ struct Shared {
     last_input_at: Option<Instant>,
     counters: Counters,
     slow: Slow,
+    /// Why the match turned the player away, while it does.
+    refusal: Option<Refusal>,
     /// The last thing that went wrong on a thread, for the log.
     error: Option<String>,
 }
@@ -151,6 +191,8 @@ struct Inner {
     /// The token of the identity the SpacetimeDB connection has, to connect
     /// as it again.
     token: Mutex<Option<String>>,
+    /// That identity, hex, once the server has said.
+    identity: Mutex<Option<String>>,
     /// The SpacetimeDB connection, for the thread that stops the session to
     /// leave and close.
     connection: Mutex<Option<DbConnection>>,
@@ -204,8 +246,10 @@ impl Session {
         socket.set_read_timeout(Some(POLL)).map_err(|e| format!("a UDP socket: {e}"))?;
         let mut seed = [0u8; SEED_SIZE];
         getrandom::fill(&mut seed).map_err(|e| format!("random numbers for a key: {e}"))?;
+        let token = config.token.clone().or_else(|| config.identity.load());
         let inner = Arc::new(Inner {
-            token: Mutex::new(config.token.clone()),
+            token: Mutex::new(token),
+            identity: Mutex::new(None),
             config,
             gateway,
             socket,
@@ -267,6 +311,16 @@ impl Session {
     /// The last thing that went wrong on a network thread, if anything.
     pub fn last_error(&self) -> Option<String> {
         self.inner.shared().error.clone()
+    }
+
+    /// Why the match has not given the player a seat (banned, full), until it does.
+    pub fn refusal(&self) -> Option<Refusal> {
+        self.inner.shared().refusal.clone()
+    }
+
+    /// The SpacetimeDB identity this session is, hex, once the server has said.
+    pub fn identity(&self) -> Option<String> {
+        self.inner.identity.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     /// The newest state of every other player the gateway has sent.
@@ -446,8 +500,10 @@ fn slow_thread(inner: &Arc<Inner>) {
                 let mut last_try = Instant::now();
                 *inner.connection.lock().unwrap_or_else(|p| p.into_inner()) = Some(connection);
                 while !inner.stop.load(Relaxed) && !runner.is_finished() {
-                    // no seat yet (no spawn point, a full match): ask again
-                    if inner.shared().player.is_none() && last_try.elapsed() >= RETRY_DELAY {
+                    // no seat yet (no spawn point, a full match): ask again, unless
+                    // the match has banned this identity, which no asking changes
+                    let banned = inner.shared().refusal.as_ref().is_some_and(|r| r.kind == RefusalKind::Banned);
+                    if inner.shared().player.is_none() && !banned && last_try.elapsed() >= RETRY_DELAY {
                         last_try = Instant::now();
                         if let Some(connection) = inner.connection.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
                             join(inner, &connection.reducers);
@@ -479,11 +535,20 @@ fn join(inner: &Arc<Inner>, reducers: &RemoteReducers) {
     let key = auth::public_key(&inner.seed).to_vec();
     let _ = reducers.join_then(key, move |_, result| {
         let reason = match result {
-            Ok(Ok(())) => return,
+            Ok(Ok(())) => {
+                failed.shared().refusal = None;
+                return;
+            }
             Ok(Err(message)) => message,
-            Err(e) => e.to_string(),
+            Err(e) => {
+                failed.shared().error = Some(format!("joining the match: {e}"));
+                return;
+            }
         };
-        failed.shared().error = Some(format!("joining the match: {reason}"));
+        let refusal = Refusal::from_join_error(&reason);
+        let mut shared = failed.shared();
+        shared.error = Some(refusal.message.clone());
+        shared.refusal = Some(refusal);
     });
 }
 
@@ -501,6 +566,10 @@ fn connect(inner: &Arc<Inner>) -> Result<DbConnection, String> {
         .with_compression(Compression::None)
         .on_connect(move |connection, identity, token| {
             *connected.token.lock().unwrap_or_else(|p| p.into_inner()) = Some(token.into());
+            *connected.identity.lock().unwrap_or_else(|p| p.into_inner()) = Some(identity.to_hex().to_string());
+            if let Err(e) = connected.config.identity.save(token) {
+                connected.shared().error = Some(format!("the identity could not be kept: {e}"));
+            }
             let applied = connected.clone();
             let failed = connected.clone();
             // the map's bounds and this identity's own seat: the rest of the
@@ -517,7 +586,14 @@ fn connect(inner: &Arc<Inner>) -> Result<DbConnection, String> {
             join(&connected, &connection.reducers);
         })
         .build()
-        .map_err(|e| format!("SpacetimeDB {}: {e}", inner.config.spacetimedb))?;
+        .map_err(|e| {
+            let text = e.to_string();
+            if is_rejected_token(&text) && inner.token.lock().unwrap_or_else(|p| p.into_inner()).take().is_some() {
+                // the kept identity is no good here: the next try is a new one
+                inner.config.identity.forget();
+            }
+            format!("SpacetimeDB {}: {text}", inner.config.spacetimedb)
+        })?;
 
     let map = inner.clone();
     let on_map = move |info: &MapInfo| {
@@ -559,6 +635,19 @@ fn connect(inner: &Arc<Inner>) -> Result<DbConnection, String> {
     let on_seat_insert = on_seat.clone();
     table.on_insert(move |ctx, seat| on_seat_insert(ctx, seat));
     table.on_update(move |ctx, _, seat| on_seat(ctx, seat));
+    // the seat taken away (a ban, a grace period that ran out): this session
+    // has no player until it joins again, and the join says why not
+    let unseated = inner.clone();
+    table.on_delete(move |_, seat| {
+        let mut shared = unseated.shared();
+        if shared.player == Some(seat.player) {
+            shared.player = None;
+            shared.welcome = None;
+            shared.challenge = None;
+            shared.slow.local = None;
+            shared.units.clear();
+        }
+    });
 
     let own = inner.clone();
     let on_player = move |row: &PlayerRow| {

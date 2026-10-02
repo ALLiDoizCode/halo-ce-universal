@@ -25,6 +25,8 @@ halo-match-driver = { path = "../halo-match-driver" }
 # the wire tests' simulated players, gateway and server launcher
 halo-gateway = { path = "../halo-gateway" }
 halo-map = { path = "../halo-map" }
+# a whole server (root database, rotation, bans) for the server list's tests
+halo-server = { path = "../halo-server" }
 
 # The SDK's websocket TLS is native-tls: Schannel on Windows, which needs
 # nothing, and OpenSSL on Linux. The 32-bit game build has no 32-bit libssl to

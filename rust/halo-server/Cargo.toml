@@ -1,0 +1,28 @@
+[package]
+name = "halo-server"
+version = "0.1.0"
+description = "The large-scale mode's server orchestration: one program, one configuration file, that keeps the server list, runs the match rotation (a fresh database and gateway per match) and carries bans to the running matches"
+edition = "2021"
+publish = false
+
+# Its own workspace and Cargo.lock, like the gateway and the driver (rust/Cargo.toml
+# excludes it): it needs the SpacetimeDB client SDK, which the rest of rust/ does not.
+[workspace]
+
+[dependencies]
+spacetimedb-sdk = "=2.10.2"
+halo-sim = { path = "../halo-sim" }
+halo-map = { path = "../halo-map" }
+# the generated bindings of the match and root modules, and TickMetrics
+halo-match-driver = { path = "../halo-match-driver" }
+halo-gateway = { path = "../halo-gateway" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+# a clean stop on SIGINT and SIGTERM
+ctrlc = { version = "3", features = ["termination"] }
+
+[dev-dependencies]
+halo-wire = { path = "../halo-wire" }
+
+[profile.release]
+debug = 1
