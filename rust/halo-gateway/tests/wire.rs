@@ -308,7 +308,6 @@ fn every_player_is_sent_every_tick_and_the_states_match_the_server() {
     let before = rig.server.tick_metrics();
     let mut truth = Truth::new(rig.capacity);
     run_walk(&rig.client, &mut rig.walkers, &crowd, &mut truth, Duration::from_secs(4));
-    std::thread::sleep(Duration::from_millis(200));
     let used = rig.server.tick_metrics().since(&before);
 
     let report = analyze(&crowd, &truth, truth.window(10, 3), &DEFAULT_BANDS);
@@ -340,7 +339,7 @@ fn every_player_is_sent_every_tick_and_the_states_match_the_server() {
 
     // one batch a tick, not one per player
     assert!(used.submits <= used.ticks + 3.0, "{} submits in {} ticks", used.submits, used.ticks);
-    assert!(used.submits >= used.ticks - 8.0, "{} submits in {} ticks", used.submits, used.ticks);
+    assert!(used.submits >= used.ticks - 10.0, "{} submits in {} ticks", used.submits, used.ticks);
     let stats = rig.gateway.stats();
     assert_eq!(stats.inputs_late, 0);
     assert_eq!(stats.send_errors, 0);

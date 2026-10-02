@@ -664,12 +664,12 @@ impl fmt::Display for Report {
         }
         writeln!(
             f,
-            "state staleness       oldest {} ticks ({:.0} ms)   older than 8 ticks {:.4}%   older than 15 {:.5}%   older than 30 {:.6}%",
+            "state staleness       oldest {} ticks ({:.0} ms)   older than 8 ticks {:.4}%   older than 15 {:.5}%   older than 40 {:.6}%",
             self.max_age_ticks,
             self.max_age_ticks as f64 * 1000.0 / TICKS_PER_SECOND as f64,
             self.share_older_than(8) * 100.0,
             self.share_older_than(15) * 100.0,
-            self.share_older_than(30) * 100.0
+            self.share_older_than(40) * 100.0
         )
     }
 }

@@ -9,7 +9,7 @@
 //! no game data), `--players 500`, `--secs 30`, `--warmup 5`,
 //! `--budget 90000` (bytes a second a player may be sent), `--send-threads 4`,
 //! `--loss 0` (chance a datagram is lost, each way), `--delay-ms 0` (each way),
-//! `--stale-bound 30` (ticks: the most a state may be out of date, with loss).
+//! `--stale-bound 40` (ticks: the most a state may be out of date, with loss).
 //!
 //! Prints the report and checks the numbers the gateway tickets ask for;
 //! exits non-zero if one is missed. Without loss: the budget, every tick

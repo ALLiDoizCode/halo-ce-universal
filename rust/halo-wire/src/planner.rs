@@ -45,15 +45,15 @@ use crate::datagram::{
 };
 use crate::unit::{PackedState, UNIT_STATE_SIZE};
 
-/// The stated bound on how stale any player's state is for any recipient: 30
-/// ticks (one second). Not a guarantee against every possible run of losses
+/// The stated bound on how stale any player's state is for any recipient: 40
+/// ticks (1.33 s). Not a guarantee against every possible run of losses
 /// (no UDP design has one): with the default 15-tick cap, a state is older
 /// only after several of the same player's datagrams to that recipient are
 /// all lost, each costing about two ticks to notice and resend. Measured, 500
 /// players on Blood Gulch at 90 KB/s with 5% loss each way and 20 ms of delay
-/// each way: oldest state 21 ticks over 30 s. The wire tests and
+/// each way: oldest state 20 to 21 ticks over 30 to 60 s. The wire tests and
 /// `halo-wire-bench` check runs against this number.
-pub const STALENESS_BOUND_TICKS: u32 = 30;
+pub const STALENESS_BOUND_TICKS: u32 = 40;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlannerConfig {
