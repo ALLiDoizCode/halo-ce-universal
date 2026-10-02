@@ -168,6 +168,13 @@ def test_traces_of_different_lengths_fail_even_when_what_they_share_agrees():
     assert "2 in the first trace, 1 in the second" in harness.format_comparison(comparison)
 
 
+def test_a_value_that_is_not_a_number_fails():
+    a = make_trace([row(0), row(1)])
+    b = make_trace([row(0), row(1, x=float("nan"))])
+    result = harness.compare_traces(a, b, {"position": 1e9}).quantities["position"]
+    assert result.first_over == 1 and not result.passed
+
+
 def test_a_tolerance_for_no_quantity_is_an_error():
     with pytest.raises(HarnessError, match="no such quantity"):
         harness.compare_traces(make_trace([row(0)]), make_trace([row(0)]), {"speed": 1.0})

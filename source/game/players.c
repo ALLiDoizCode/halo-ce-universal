@@ -278,7 +278,7 @@ symbols in this file:
 
 /* network_game_globals.c's */
 boolean network_game_distributed_client(void);
-/* port/linux/game/scenario_harness.c's */
+/* port: the comparison harness's (port/linux/game/scenario_harness.c) */
 void scenario_harness_control(long player_index, struct player_action *action);
 /* port/linux/game/network_distributed.c's */
 void network_distributed_player_picked_up(long player_index, short kind, long definition_index, short count);

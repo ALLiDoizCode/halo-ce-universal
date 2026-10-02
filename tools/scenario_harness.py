@@ -28,7 +28,6 @@ from pathlib import Path
 
 REPOSITORY = Path(__file__).resolve().parent.parent
 SCENARIOS = Path(__file__).resolve().parent / "scenarios"
-TICKS_PER_SECOND = 30
 
 # the quantities a comparison has a tolerance for, and their units
 QUANTITIES = {
@@ -240,9 +239,10 @@ def compare_traces(a: Trace, b: Trace, tolerances: dict[str, float] | None = Non
     for tick, (row_a, row_b) in enumerate(zip(a.rows, b.rows)):
         for name, difference in row_differences(row_a, row_b).items():
             result = results[name]
-            if result.largest_tick is None or difference > result.largest:
+            if result.largest_tick is None or not difference <= result.largest:
                 result.largest, result.largest_tick = difference, tick
-            if difference > result.tolerance and result.first_over is None:
+            # (not <=: a difference that is not a number is over)
+            if not difference <= result.tolerance and result.first_over is None:
                 result.first_over = tick
     return Comparison((len(a.rows), len(b.rows)), results)
 

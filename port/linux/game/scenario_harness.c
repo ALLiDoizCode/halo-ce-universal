@@ -45,9 +45,12 @@ The scenario and trace formats are in tools/scenarios/README.md.
 const char *config_string(char const *name);
 void platform_log(char const *format, ...);
 
-/* the game's ticks a second, and the most ticks a scenario may have */
-#define SCENARIO_TICKS_PER_SECOND 30
+/* the most ticks a scenario may have */
 #define SCENARIO_MAXIMUM_TICKS 36000
+
+/* the trace's movement state bits (tools/scenarios/README.md) */
+#define SCENARIO_STATE_AIRBORNE 1
+#define SCENARIO_STATE_CROUCHING 2
 
 struct scenario_record
 {
@@ -201,9 +204,9 @@ static void scenario_load(
 	while ((line = scenario_read_line(file, buffer, sizeof(buffer))) != NULL)
 	{
 		long from, to;
-		int offset;
+		int offset = 0;
 
-		if (sscanf(line, "input %ld %ld %n", &from, &to, &offset) >= 2)
+		if (sscanf(line, "input %ld %ld %n", &from, &to, &offset) >= 2 && offset > 0)
 		{
 			char word[64];
 			char const *rest = line + offset;
@@ -326,7 +329,7 @@ void scenario_harness_record(
 		return;
 	tick = game_time_get() - harness.first_game_tick;
 	if (tick != harness.recorded)
-		return;
+		scenario_fail("a tick was skipped, the trace would have a gap", harness.name);
 	data_iterator_new(&iterator, player_data);
 	while ((player = (struct player_datum *)data_iterator_next(&iterator)) != NULL)
 	{
@@ -338,9 +341,9 @@ void scenario_harness_record(
 
 	aim = unit->unit.aiming_vector;
 	if (!TEST_FLAG(unit->object.flags, _object_on_ground_bit))
-		state |= 1;
+		state |= SCENARIO_STATE_AIRBORNE;
 	if (unit->unit.animation.base_seat_index == _unit_base_seat_crouch)
-		state |= 2;
+		state |= SCENARIO_STATE_CROUCHING;
 	{
 		struct scenario_record *record = &harness.records[tick];
 
@@ -348,9 +351,9 @@ void scenario_harness_record(
 		record->position[1] = unit->object.position.y;
 		record->position[2] = unit->object.position.z;
 		/* (world units a second, as the trace format has it) */
-		record->velocity[0] = unit->object.translational_velocity.i * SCENARIO_TICKS_PER_SECOND;
-		record->velocity[1] = unit->object.translational_velocity.j * SCENARIO_TICKS_PER_SECOND;
-		record->velocity[2] = unit->object.translational_velocity.k * SCENARIO_TICKS_PER_SECOND;
+		record->velocity[0] = unit->object.translational_velocity.i * TICKS_PER_SECOND;
+		record->velocity[1] = unit->object.translational_velocity.j * TICKS_PER_SECOND;
+		record->velocity[2] = unit->object.translational_velocity.k * TICKS_PER_SECOND;
 		record->yaw = (float)atan2(aim.j, aim.i);
 		record->pitch = (float)asin(PIN(aim.k, -1.0f, 1.0f));
 		record->state = state;
