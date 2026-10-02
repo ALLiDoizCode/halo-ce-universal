@@ -33,3 +33,5 @@ dist/
 
 # Rust build output
 /rust/target/
+/rust/halo-match-module/target/
+/rust/halo-match-driver/target/

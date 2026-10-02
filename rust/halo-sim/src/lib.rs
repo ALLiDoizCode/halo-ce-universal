@@ -35,6 +35,7 @@ mod movement;
 mod rng;
 mod state;
 mod step;
+pub mod wire;
 
 pub use map::MapData;
 pub use movement::{
