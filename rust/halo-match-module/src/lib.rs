@@ -11,6 +11,8 @@
 //!   It is decoded into module memory on first use and whenever `map_version`
 //!   says the cache is out of date, so a module whose memory is fresh (after a
 //!   restart or a republish) reloads it from the row.
+//! - `map_info` (public) gives the gateway the map's world bounds, which its
+//!   position packing is relative to.
 //!
 //! The tests in `rust/halo-match-driver` publish and drive it against a real
 //! local SpacetimeDB.
@@ -91,6 +93,23 @@ fn reject_code(reason: RejectReason) -> u8 {
         RejectReason::OffGround => REJECT_OFF_GROUND,
         RejectReason::DuplicateInput => REJECT_DUPLICATE_INPUT,
     }
+}
+
+/// What a client needs to know about the loaded map without the map itself:
+/// the world bounds that position quantisation is relative to. Public; one
+/// row, rewritten by every `load_map`.
+#[table(accessor = map_info, public)]
+pub struct MapInfo {
+    #[primary_key]
+    id: u8,
+    /// Counts loads, as `match_state.map_version` does.
+    version: u64,
+    x0: f32,
+    x1: f32,
+    y0: f32,
+    y1: f32,
+    z0: f32,
+    z1: f32,
 }
 
 /// Which map the cache must hold. Private.
@@ -233,9 +252,16 @@ pub fn init(ctx: &ReducerContext) {
 /// nothing.
 #[reducer]
 pub fn load_map(ctx: &ReducerContext, data: Vec<u8>) -> Result<(), String> {
-    MapData::from_bytes(&data).map_err(|e: MapError| e.to_string())?;
+    let map = MapData::from_bytes(&data).map_err(|e: MapError| e.to_string())?;
     let mut state = match_state(ctx);
     state.map_version += 1;
+    let [x0, x1, y0, y1, z0, z1] = map.world_bounds;
+    let info = MapInfo { id: ONLY, version: state.map_version, x0, x1, y0, y1, z0, z1 };
+    if ctx.db.map_info().id().find(ONLY).is_some() {
+        ctx.db.map_info().id().update(info);
+    } else {
+        ctx.db.map_info().insert(info);
+    }
     let blob = MapBlob { id: ONLY, data };
     if ctx.db.map_blob().id().find(ONLY).is_some() {
         ctx.db.map_blob().id().update(blob);

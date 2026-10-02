@@ -1,0 +1,9 @@
+[package]
+name = "halo-wire"
+version = "0.1.0"
+description = "The UDP wire of the large-scale mode: datagram formats, the 16-byte unit state, and the per-recipient priority and bandwidth planner shared by the gateway and the client"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+halo-sim = { path = "../halo-sim" }

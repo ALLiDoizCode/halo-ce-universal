@@ -126,18 +126,18 @@ jobs:
         run: |
           # the libraries only: halo-sim-parity's cdylib is for wasm, and
           # linking a 32-bit shared library needs 32-bit libc
-          cargo build --locked --release --target i686-unknown-linux-gnu -p halo-map -p halo-sim
+          cargo build --locked --release --target i686-unknown-linux-gnu -p halo-map -p halo-sim -p halo-wire
           cargo build --locked --release --target wasm32-unknown-unknown
 
   rust-match:
     # The match module (rust/halo-match-module, SpacetimeDB 2.10.2, built for
-    # WebAssembly) and the driver that tests it (rust/halo-match-driver). The
-    # tests start a real SpacetimeDB Standalone of their own on a free port,
-    # so this job fetches the pinned release (a 58 MB download, checked
-    # against its SHA-256 and cached), and needs no game data: they run on a
-    # flat floor. The 500-player measurement on the real maps is not run here.
+    # WebAssembly), the driver that tests it (rust/halo-match-driver), and the
+    # UDP gateway with its wire tests (rust/halo-gateway). The tests start a
+    # real SpacetimeDB Standalone of their own on a free port, so this job
+    # fetches the pinned release (a 58 MB download, checked against its SHA-256
+    # and cached), and needs no game data: they run on a flat floor. The 500-player measurement on the real maps is not run here.
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       STDB_VERSION: "2.10.2"
       STDB_SHA256: 5dbe3f27a8c9e27a1d9aa86e9101f0eb6f5cf5aebea0240b589750e424a695bd
@@ -150,7 +150,8 @@ jobs:
             ~/.cargo/registry
             rust/halo-match-module/target
             rust/halo-match-driver/target
-          key: rust-match-${{ hashFiles('rust/halo-match-*/Cargo.toml', 'rust/halo-match-*/Cargo.lock', 'rust/Cargo.lock') }}
+            rust/halo-gateway/target
+          key: rust-match-${{ hashFiles('rust/halo-match-*/Cargo.toml', 'rust/halo-match-*/Cargo.lock', 'rust/halo-gateway/Cargo.toml', 'rust/halo-gateway/Cargo.lock', 'rust/Cargo.lock') }}
           restore-keys: rust-match-
 
       - uses: actions/cache@v4
@@ -176,11 +177,12 @@ jobs:
 
       - name: Format and lints
         run: |
-          for crate in halo-match-module halo-match-driver; do
+          for crate in halo-match-module halo-match-driver halo-gateway; do
             (cd rust/$crate && cargo fmt --check)
           done
           (cd rust/halo-match-module && cargo clippy --target wasm32-unknown-unknown --locked -- -D warnings)
           (cd rust/halo-match-driver && cargo clippy --all-targets --locked -- -D warnings)
+          (cd rust/halo-gateway && cargo clippy --all-targets --locked -- -D warnings)
 
       - name: Build the module for WebAssembly
         working-directory: rust/halo-match-module
@@ -190,6 +192,13 @@ jobs:
         working-directory: rust/halo-match-driver
         run: |
           HALO_STDB_BIN="$HOME/spacetimedb" cargo test --locked --release -- --nocapture
+
+      - name: Test the gateway on the wire
+        # simulated UDP players against a real SpacetimeDB and the gateway;
+        # one test at a time, as the tests insist on themselves
+        working-directory: rust/halo-gateway
+        run: |
+          HALO_STDB_BIN="$HOME/spacetimedb" cargo test --locked --release -- --nocapture --test-threads=1
 
   android:
     # The runner image has the Android SDK and NDK, a JDK and CMake.

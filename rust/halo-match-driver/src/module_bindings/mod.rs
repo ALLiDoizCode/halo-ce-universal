@@ -10,6 +10,8 @@ pub mod add_players_reducer;
 pub mod input_batch_type;
 pub mod load_map_reducer;
 pub mod map_blob_type;
+pub mod map_info_table;
+pub mod map_info_type;
 pub mod match_state_type;
 pub mod match_tick_table;
 pub mod match_tick_type;
@@ -26,6 +28,8 @@ pub use add_players_reducer::add_players;
 pub use input_batch_type::InputBatch;
 pub use load_map_reducer::load_map;
 pub use map_blob_type::MapBlob;
+pub use map_info_table::*;
+pub use map_info_type::MapInfo;
 pub use match_state_type::MatchState;
 pub use match_tick_table::*;
 pub use match_tick_type::MatchTick;
@@ -97,6 +101,7 @@ impl __sdk::Reducer for Reducer {
 #[allow(non_snake_case)]
 #[doc(hidden)]
 pub struct DbUpdate {
+    map_info: __sdk::TableUpdate<MapInfo>,
     match_tick: __sdk::TableUpdate<MatchTick>,
     player: __sdk::TableUpdate<PlayerRow>,
 }
@@ -107,6 +112,7 @@ impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
         let mut db_update = DbUpdate::default();
         for table_update in __sdk::transaction_update_iter_table_updates(raw) {
             match &table_update.table_name[..] {
+                "map_info" => db_update.map_info.append(map_info_table::parse_table_update(table_update)?),
                 "match_tick" => db_update.match_tick.append(match_tick_table::parse_table_update(table_update)?),
                 "player" => db_update.player.append(player_table::parse_table_update(table_update)?),
 
@@ -127,6 +133,8 @@ impl __sdk::DbUpdate for DbUpdate {
     fn apply_to_client_cache(&self, cache: &mut __sdk::ClientCache<RemoteModule>) -> AppliedDiff<'_> {
         let mut diff = AppliedDiff::default();
 
+        diff.map_info =
+            cache.apply_diff_to_table::<MapInfo>("map_info", &self.map_info).with_updates_by_pk(|row| &row.id);
         diff.match_tick =
             cache.apply_diff_to_table::<MatchTick>("match_tick", &self.match_tick).with_updates_by_pk(|row| &row.id);
         diff.player = cache.apply_diff_to_table::<PlayerRow>("player", &self.player).with_updates_by_pk(|row| &row.id);
@@ -137,6 +145,7 @@ impl __sdk::DbUpdate for DbUpdate {
         let mut db_update = DbUpdate::default();
         for table_rows in raw.tables {
             match &table_rows.table[..] {
+                "map_info" => db_update.map_info.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "match_tick" => db_update.match_tick.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "player" => db_update.player.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 unknown => {
@@ -150,6 +159,7 @@ impl __sdk::DbUpdate for DbUpdate {
         let mut db_update = DbUpdate::default();
         for table_rows in raw.tables {
             match &table_rows.table[..] {
+                "map_info" => db_update.map_info.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "match_tick" => db_update.match_tick.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "player" => db_update.player.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 unknown => {
@@ -165,6 +175,7 @@ impl __sdk::DbUpdate for DbUpdate {
 #[allow(non_snake_case)]
 #[doc(hidden)]
 pub struct AppliedDiff<'r> {
+    map_info: __sdk::TableAppliedDiff<'r, MapInfo>,
     match_tick: __sdk::TableAppliedDiff<'r, MatchTick>,
     player: __sdk::TableAppliedDiff<'r, PlayerRow>,
     __unused: std::marker::PhantomData<&'r ()>,
@@ -176,6 +187,7 @@ impl __sdk::InModule for AppliedDiff<'_> {
 
 impl<'r> __sdk::AppliedDiff<'r> for AppliedDiff<'r> {
     fn invoke_row_callbacks(&self, event: &EventContext, callbacks: &mut __sdk::DbCallbacks<RemoteModule>) {
+        callbacks.invoke_table_row_callbacks::<MapInfo>("map_info", &self.map_info, event);
         callbacks.invoke_table_row_callbacks::<MatchTick>("match_tick", &self.match_tick, event);
         callbacks.invoke_table_row_callbacks::<PlayerRow>("player", &self.player, event);
     }
@@ -832,8 +844,9 @@ impl __sdk::SpacetimeModule for RemoteModule {
     type QueryBuilder = __sdk::QueryBuilder;
 
     fn register_tables(client_cache: &mut __sdk::ClientCache<Self>) {
+        map_info_table::register_table(client_cache);
         match_tick_table::register_table(client_cache);
         player_table::register_table(client_cache);
     }
-    const ALL_TABLE_NAMES: &'static [&'static str] = &["match_tick", "player"];
+    const ALL_TABLE_NAMES: &'static [&'static str] = &["map_info", "match_tick", "player"];
 }
