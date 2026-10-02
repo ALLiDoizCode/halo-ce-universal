@@ -31,7 +31,6 @@ pub fn default_capacity(map: &str) -> u16 {
         "putput" => 48,
         "hangemhigh" => 32,
         "beavercreek" | "carousel" | "damnation" | "ratrace" => 24,
-        "chillout" | "longest" | "prisoner" | "wizard" => 16,
         _ => 16,
     }
 }

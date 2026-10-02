@@ -2044,9 +2044,6 @@ static void game_engine_rasterize_large_scoreboard(
 		scoreboard_draw_row(row_string, FALSE, &color, 2 + rows, top, left, FALSE);
 	}
 	rasterizer_text_set_scale(1.0f, 0.0f, 0.0f);
-	(void)player_index;
-
-	return;
 }
 
 static void game_engine_rasterize_scoreboard(
@@ -8479,9 +8476,9 @@ boolean game_engine_should_spawn_player(
 
 		/* port: in the large-scale mode the server says when the local player is in the world */
 		if (large_mode_player_spawn(player_index, &should_spawn))
-		{
-		}
-		else if (player->quit_out_of_game == TRUE)
+			return should_spawn;
+
+		if (player->quit_out_of_game == TRUE)
 		{
 			should_spawn = FALSE;
 		}

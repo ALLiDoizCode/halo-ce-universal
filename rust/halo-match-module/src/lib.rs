@@ -114,7 +114,7 @@ pub struct MatchTick {
     tick: u64,
     /// Server time at the start of the tick, microseconds since the Unix epoch.
     stamped_us: i64,
-    /// Players in the match after the tick.
+    /// Players in the match after the tick: every player with a standing, dead or waiting for a wave too.
     players: u32,
     /// Inputs this tick took from the batches (accepted, rejected, or dropped because no map is loaded).
     inputs: u32,
@@ -902,7 +902,7 @@ pub fn join(ctx: &ReducerContext, udp_key: Vec<u8>) -> Result<(), String> {
         let mut game = TableGame { ctx };
         rules::enter(&mut game, id, roster_team(ctx, id), tick);
         let mut store = TableStore { ctx, tick };
-        let mut rng = Rng::seeded(tick ^ (id as u64) << 32 ^ 0x5EED);
+        let mut rng = Rng::seeded(tick ^ ((id as u64) << 32) ^ 0x5EED);
         let events = rules::spawn_due(&mut store, &mut game, &map, &mut rng, tick);
         log_events(&events);
     }

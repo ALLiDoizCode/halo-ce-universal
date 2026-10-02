@@ -482,7 +482,9 @@ impl Session {
     pub fn server_tick(&self) -> u32 {
         let shared = self.inner.shared();
         match (shared.game, shared.game_at) {
-            (Some(game), Some(at)) => (game.tick + (at.elapsed().as_secs_f64() * 30.0) as u64) as u32,
+            (Some(game), Some(at)) => {
+                (game.tick + (at.elapsed().as_secs_f64() * halo_sim::TICKS_PER_SECOND as f64) as u64) as u32
+            }
             _ => shared.newest_tick,
         }
     }

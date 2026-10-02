@@ -656,3 +656,14 @@ fn players_who_join_one_at_a_time_before_the_first_tick_wait_for_the_wave() {
     }
     assert_eq!(m.c(1).life, Life::Waiting { wave: 150 });
 }
+
+#[test]
+fn beginning_the_game_again_moves_the_waves_a_player_waits_for_onto_the_new_clock() {
+    let mut m = Match::new(floor_with(1), Rules::slayer());
+    m.join(0, 0);
+    m.join(1, 0);
+    m.run(3);
+    assert_eq!(m.c(1).life, Life::Waiting { wave: 150 });
+    begin(&mut m.game, m.tick);
+    assert_eq!(m.c(1).life, Life::Waiting { wave: m.tick + 150 });
+}

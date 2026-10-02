@@ -988,7 +988,6 @@ static void large_mode_local_after_objects(void)
 /* the team the server says the local player is on, which the engine's player
 and unit have (the engine gave it the red team, and the roster alternates) */
 static void large_mode_set_local_team(
-	long unit_index,
 	struct unit_datum *unit,
 	unsigned long team)
 {
@@ -1228,7 +1227,7 @@ void large_mode_game_tick(
 	}
 	else if (unit && have_life)
 	{
-		large_mode_set_local_team(unit_index, unit, life[5]);
+		large_mode_set_local_team(unit, life[5]);
 		/* the server decides where the player spawns: a unit the engine has made (it spawns
 		the player's unit where it chooses, and it is not that) is put where the server
 		spawned the player, facing as it says, and the library starts from there; each time

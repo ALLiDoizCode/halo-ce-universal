@@ -440,6 +440,10 @@ pub fn begin(game: &mut impl GameStore, tick: u64) {
         c.score = 0;
         c.deaths = 0;
         c.penalty = 0;
+        // (the waves are counted from the new clock: a player waiting for one waits for the next of those)
+        if let Life::Waiting { .. } = c.life {
+            c.life = Life::Waiting { wave: g.next_wave(tick) };
+        }
         game.set_contestant(c);
     }
 }
