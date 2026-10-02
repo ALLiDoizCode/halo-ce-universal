@@ -14,8 +14,10 @@ pub const TICKS_PER_SECOND: u32 = 30;
 pub const MAX_CATCH_UP_TICKS: u32 = TICKS_PER_SECOND;
 
 /// How far below a reported position ground may be for the player to count
-/// as standing on it.
-pub const GROUND_TOLERANCE: f32 = 0.05;
+/// as standing on it: a little more than a hop off a steep slope or a low
+/// step takes (half a second of falling is 0.4). Anything higher is a jump or
+/// a fall, which the jumping and falling work validates.
+pub const GROUND_TOLERANCE: f32 = 0.5;
 
 /// How far a reported position may be inside what the player's pill has to
 /// stay out of. The engine's own movement leaves a pill exactly on the

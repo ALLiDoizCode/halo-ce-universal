@@ -120,7 +120,7 @@ pub fn run(seed: u64, ticks: u32) -> Vec<u8> {
                 }
                 90..=94 => {
                     walk(&mut rng, &mut to);
-                    to[2] = 0.1 + rng.next_f32();
+                    to[2] = 0.6 + rng.next_f32();
                 }
                 _ => to[1] = f32::NAN,
             }

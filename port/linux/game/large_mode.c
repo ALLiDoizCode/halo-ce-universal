@@ -35,7 +35,7 @@ The local player: the engine hands the player's unit the controls of the
 tick (the throttle and where the player faces and aims) just before this
 adapter runs. The library computes the movement from them and from the map's
 collision data (the player's own copy of the map file, read on a thread of its
-own at the start: large_mode_load_map), and the adapter puts the unit where it
+own at the start: halo_large_load_map), and the adapter puts the unit where it
 says; the engine's physics is suspended for the unit, as it is for the
 remote players' (it keeps choosing and playing animations). The library's
 velocity goes into the unit after the objects are updated, which the suspended

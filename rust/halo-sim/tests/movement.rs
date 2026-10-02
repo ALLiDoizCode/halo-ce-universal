@@ -71,11 +71,11 @@ fn a_move_through_the_floor_is_rejected_and_the_player_stays() {
 }
 
 #[test]
-fn a_move_that_ends_in_the_air_is_rejected_and_the_player_stays() {
+fn a_move_that_ends_well_above_the_ground_is_rejected_and_the_player_stays() {
     let map = flat_floor_map();
-    let mut store = player_at([0.0, 0.0, 0.0]);
+    let mut store = player_at([0.0, 0.0, 1.0]);
     let before = store.player(7).unwrap();
-    assert_eq!(report(&mut store, &map, [0.0, 0.0, 0.1]), rejected(RejectReason::OffGround));
+    assert_eq!(report(&mut store, &map, [0.0, 0.0, 1.1]), rejected(RejectReason::OffGround));
     assert_eq!(store.player(7).unwrap(), before);
 }
 
