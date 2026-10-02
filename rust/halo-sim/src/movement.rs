@@ -249,7 +249,9 @@ pub(crate) fn validate(map: &MapData, player: &Player, input: &PlayerInput, tick
         (0, _) | (_, 0) => (ticks, from[2]),
         (_, free) => (free.saturating_add(ticks), before.free_z),
     };
-    if to[2] - from_z > highest_rise(map, since) || fall_too_fast {
+    // (and never above the top of a jump from where they left the ground, however many times a
+    // wall has started the count over)
+    if to[2] - from_z > highest_rise(map, since) || rise > air_apex(map) || fall_too_fast {
         return Err(RejectReason::OffGround);
     }
     Ok(Air { ticks: in_air, z: left_at, free_ticks: since, free_z: from_z })

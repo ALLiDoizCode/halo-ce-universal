@@ -37,7 +37,6 @@ use std::time::{Duration, Instant};
 use halo_gateway::harness::{Crowd, Impairment, Rig, RigSetup, Truth};
 use halo_match_driver::server::{build_module, stdb_bin_dir};
 use halo_sim::MapData;
-use halo_sim::PlayerInput;
 use halo_wire::unit::Bounds;
 
 /// Players seated and walking beside the game's, which takes the next seat
@@ -607,27 +606,11 @@ fn remote_players_that_jump_fall_and_crouch_are_animated_by_the_engine() {
     let seconds: u32 = std::env::var("HALO_HEADLESS_ACROBAT_SECONDS").ok().and_then(|n| n.parse().ok()).unwrap_or(40);
     // (HALO_HEADLESS_ACROBAT_SHOW: a few acrobats in front of the game's player on the red base's
     // platform, for the screenshots: four jump and crouch where they stand, two walk to its edge)
-    let show_what = std::env::var("HALO_HEADLESS_ACROBAT_SHOW").unwrap_or_default();
-    let show = !show_what.is_empty();
-    let falling = show_what == "fall";
+    let show = std::env::var_os("HALO_HEADLESS_ACROBAT_SHOW").is_some();
     let halo_map = halo_map::HaloMap::from_path(maps.join("bloodgulch.map")).expect("Blood Gulch");
     let map = MapData::from(halo_map);
     // the red base's platform, which has an edge about two world units above the field
-    let (others, anchors): (u16, Vec<[f32; 3]>) = if falling {
-        // (the game's player stands on the field below the platform's west edge, looking east at the
-        // acrobats, who walk off it)
-        (
-            6,
-            vec![
-                [97.6, -156.2, 1.7],
-                [97.7, -157.0, 1.7],
-                [97.6, -157.8, 1.7],
-                [97.7, -158.6, 1.7],
-                [97.6, -159.2, 1.7],
-                [97.8, -155.6, 1.7],
-            ],
-        )
-    } else if show {
+    let (others, anchors): (u16, Vec<[f32; 3]>) = if show {
         (
             6,
             // (the game's own player first, who looks about, then the acrobats ahead of them)
@@ -651,22 +634,7 @@ fn remote_players_that_jump_fall_and_crouch_are_animated_by_the_engine() {
         |_| {},
     );
     rig.walkers.set_acrobatics(true);
-    if falling {
-        // (the game's player stands west of them, facing east)
-        rig.client
-            .set_spawn_points(&[PlayerInput {
-                player: 0,
-                position: [91.3, -157.8, 1.0],
-                yaw: 0.0,
-                pitch: 0.0,
-                flags: 0,
-            }])
-            .unwrap();
-        // (they stay where they are until the game has joined, and then walk)
-        for id in 0..6 {
-            rig.walkers.set_course(id, 0.0, core::f32::consts::PI);
-        }
-    } else if show {
+    if show {
         // (the first stands where the game's player does: it walks off behind them; three stay
         // where they are; the edge is to the +y side of the platform, which two walk to)
         rig.walkers.set_course(0, 1.0, core::f32::consts::PI);
@@ -693,7 +661,7 @@ fn remote_players_that_jump_fall_and_crouch_are_animated_by_the_engine() {
             .env("HALO_LARGE_GATEWAY", rig.gateway.local_addr().to_string())
             .env("HALO_LARGE_SPACETIMEDB", rig.server.uri())
             .env("HALO_LARGE_DATABASE", "headless-acrobats")
-            .env("HALO_TEST_INPUT", if show && !falling { "scan:3" } else { "" })
+            .env("HALO_TEST_INPUT", if show { "scan:3" } else { "" })
             .env("HALO_LARGE_LOG", "1")
             .env("HALO_NET_ONLINE", "0")
             .env("HALO_FULLSCREEN", "0")
@@ -717,8 +685,6 @@ fn remote_players_that_jump_fall_and_crouch_are_animated_by_the_engine() {
     let mut exit = None;
     let mut airborne_seen = 0u32;
     let mut last_tick = 0u64;
-    let mut walking_off = false;
-    let mut polled_log = Instant::now();
     while exit.is_none() && Instant::now() < until {
         let Some(mut seen) = rig.client.next_tick(Duration::from_secs(10)) else { panic!("no tick for 10 s") };
         // (a machine busy with the game queues ticks up: the walkers move for the newest, once)
@@ -729,16 +695,6 @@ fn remote_players_that_jump_fall_and_crouch_are_animated_by_the_engine() {
         // server judges the move against the time since the last)
         let elapsed = if last_tick == 0 { 1 } else { seen.marker.tick.saturating_sub(last_tick).clamp(1, 20) as u32 };
         last_tick = seen.marker.tick;
-        if falling && !walking_off && polled_log.elapsed() > Duration::from_millis(500) {
-            polled_log = Instant::now();
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-            if log.contains("the local unit is where the server has the player") {
-                walking_off = true;
-                for id in 0..6 {
-                    rig.walkers.set_course(id, 0.5, core::f32::consts::PI);
-                }
-            }
-        }
         rig.walkers.sync_with_server(seen.players.values());
         crowd.send_inputs(&rig.walkers.next_inputs_after(elapsed));
         airborne_seen += seen.players.values().filter(|p| p.flags & halo_sim::FLAG_AIRBORNE != 0).count() as u32;
