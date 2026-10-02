@@ -2,7 +2,9 @@
 //! file format: no game data needed, so these always run.
 //!
 //! The map is a square floor at z = 0 (solid below, open above) with one
-//! player start, one netgame flag, one netgame equipment and one vehicle.
+//! player start, one netgame flag, one netgame equipment and one vehicle, and
+//! the globals tag and multiplayer biped tag that hold the players' movement
+//! values.
 
 use std::io::Write;
 
@@ -11,7 +13,7 @@ use halo_map::{flag_type, game_type, HaloMap, MapError};
 const TAG_BASE: u32 = 0x803A_6000;
 const BSP_BASE: u32 = 0x4000_0000;
 const HEADER: usize = 0x800;
-const TAG_DATA_SIZE: usize = 0x1000;
+const TAG_DATA_SIZE: usize = 0x2000;
 const BSP_DATA_SIZE: usize = 0x1000;
 
 /// The map's inflated image, header included.
@@ -70,6 +72,10 @@ const T_EQUIPMENT: usize = 0xB80;
 const T_VEHICLES: usize = 0xC80;
 const T_PALETTE: usize = 0xD00;
 const T_BSP_REFS: usize = 0xD80;
+const T_GLOBALS: usize = 0x1000;
+const T_PLAYER_INFORMATION: usize = 0x11C0;
+const T_MULTIPLAYER_INFORMATION: usize = 0x12C0;
+const T_BIPED: usize = 0x1380;
 
 /// Offsets within the structure BSP data.
 const B_SBSP: usize = 0x40;
@@ -102,13 +108,15 @@ fn build() -> Image {
     let t = HEADER;
     m.u32(t, TAG_BASE + T_INSTANCES as u32);
     m.u32(t + 4, tag_id(0));
-    m.u32(t + 0xC, 4);
+    m.u32(t + 0xC, 6);
     m.code(t + 0x20, b"tags");
-    let tags: [(&[u8; 4], &str); 4] = [
+    let tags: [(&[u8; 4], &str); 6] = [
         (b"scnr", "levels\\synth\\synth"),
         (b"itmc", "item collections\\pistol"),
         (b"vehi", "vehicles\\warthog\\warthog"),
         (b"sbsp", "levels\\synth\\synth"),
+        (b"matg", "globals\\globals"),
+        (b"bipd", "characters\\cyborg_mp\\cyborg_mp"),
     ];
     let mut name_at = T_NAMES;
     for (i, (group, name)) in tags.iter().enumerate() {
@@ -120,6 +128,8 @@ fn build() -> Image {
         name_at += 0x40;
     }
     m.u32(t + T_INSTANCES + 0x14, TAG_BASE + T_SCENARIO as u32);
+    m.u32(t + T_INSTANCES + 4 * 0x20 + 0x14, TAG_BASE + T_GLOBALS as u32);
+    m.u32(t + T_INSTANCES + 5 * 0x20 + 0x14, TAG_BASE + T_BIPED as u32);
 
     // scenario
     let s = t + T_SCENARIO;
@@ -156,6 +166,20 @@ fn build() -> Image {
     m.f32s(v + 8, &[-2.0, -2.0, 0.5]);
     m.f32s(v + 0x14, &[0.25, 0.0, 0.0]);
     m.tag_ref(t + T_PALETTE, 2);
+
+    // globals: the multiplayer information names the biped, the player
+    // information has the speeds; the biped has the pill and the slopes
+    let g = t + T_GLOBALS;
+    m.tag_block(g + 0x164, 1, T_MULTIPLAYER_INFORMATION);
+    m.tag_block(g + 0x170, 1, T_PLAYER_INFORMATION);
+    m.tag_ref(t + T_MULTIPLAYER_INFORMATION + 0x10, 5);
+    let pi = t + T_PLAYER_INFORMATION;
+    m.f32s(pi + 0x34, &[2.5, 2.0, 1.75, 0.5, 1.0, 0.75, 0.625, 0.25, 0.04]);
+    let bd = t + T_BIPED + 0x2F0;
+    m.f32(bd + 0x74, 1.5); // downhill velocity scale
+    m.f32(bd + 0x80, 0.5); // uphill velocity scale
+    m.f32s(bd + 0x134, &[0.75, 0.5, 0.25]); // collision height standing, crouching, radius
+    m.f32s(bd + 0x1E0, &[0.7, -0.3, -0.7, 0.3, 0.7]);
 
     let b = HEADER + TAG_DATA_SIZE; // structure bsp data, which the scenario locates
     let r = t + T_BSP_REFS;
@@ -258,6 +282,33 @@ fn a_plain_map_loads_its_placements() {
 }
 
 #[test]
+fn the_players_movement_values_are_read_from_the_globals_and_the_multiplayer_biped() {
+    let m = HaloMap::from_bytes(&build().0).unwrap().movement;
+    assert_eq!((m.run_forward_speed, m.run_backward_speed, m.run_sideways_speed), (2.5, 2.0, 1.75));
+    assert_eq!((m.run_acceleration, m.sneak_forward_speed, m.sneak_backward_speed), (0.5, 1.0, 0.75));
+    assert_eq!((m.sneak_sideways_speed, m.sneak_acceleration, m.airborne_acceleration), (0.625, 0.25, 0.04));
+    assert_eq!((m.collision_height_standing, m.collision_height_crouching, m.collision_radius), (0.75, 0.5, 0.25));
+    assert_eq!((m.downhill_velocity_scale, m.uphill_velocity_scale), (1.5, 0.5));
+    assert_eq!(
+        (m.minimum_normal_k, m.downhill_k0, m.downhill_k1, m.uphill_k0, m.uphill_k1),
+        (0.7, -0.3, -0.7, 0.3, 0.7)
+    );
+}
+
+#[test]
+fn a_map_without_the_globals_or_with_a_biped_that_cannot_stand_is_refused() {
+    let mut image = build();
+    // the globals tag is not one
+    image.code(HEADER + T_INSTANCES + 4 * 0x20, b"scnr");
+    assert!(matches!(HaloMap::from_bytes(&image.0), Err(MapError::Malformed(_))));
+
+    let mut image = build();
+    // a pill with no radius
+    image.f32(HEADER + T_BIPED + 0x2F0 + 0x13C, 0.0);
+    assert!(matches!(HaloMap::from_bytes(&image.0), Err(MapError::Malformed(_))));
+}
+
+#[test]
 fn a_compressed_map_loads_the_same_as_a_plain_one() {
     let image = build().0;
     let compressed = HaloMap::from_bytes(&compress(&image)).unwrap();
@@ -289,6 +340,34 @@ fn the_floor_is_open_above_and_solid_below() {
     let map = HaloMap::from_bytes(&build().0).unwrap();
     assert_eq!(map.collision.leaf_at_point([0.0, 0.0, 1.0]), Some(0));
     assert_eq!(map.collision.leaf_at_point([0.0, 0.0, -1.0]), None);
+}
+
+#[test]
+fn a_sphere_finds_the_surfaces_edges_and_vertices_within_its_reach() {
+    let map = HaloMap::from_bytes(&build().0).unwrap();
+    // over the middle of the floor, close enough to touch it: the surface and nothing else
+    let hits = map.collision.test_sphere([0.0, 0.0, 0.3], 0.5);
+    assert_eq!((hits.surfaces, hits.edges, hits.vertices), (vec![0], vec![], vec![]));
+    // too high to reach it
+    let hits = map.collision.test_sphere([0.0, 0.0, 0.6], 0.5);
+    assert_eq!((hits.surfaces.len(), hits.edges.len(), hits.vertices.len()), (0, 0, 0));
+    // under it, in the solid: nothing to touch
+    let hits = map.collision.test_sphere([0.0, 0.0, -3.0], 0.5);
+    assert!(hits.surfaces.is_empty() && hits.edges.is_empty());
+    // by the corner (5, 5): the surface, the two edges meeting there and that vertex
+    let hits = map.collision.test_sphere([4.9, 4.9, 0.1], 0.5);
+    assert_eq!(hits.surfaces, vec![0]);
+    assert_eq!(hits.vertices, vec![2]);
+    let mut edges = hits.edges;
+    edges.sort();
+    assert_eq!(edges, vec![1, 2]);
+    // past the edge of the polygon, over the open air beyond it: its edge is
+    // within reach, so the surface is too
+    let hits = map.collision.test_sphere([5.3, 0.0, 0.1], 0.5);
+    assert_eq!((hits.surfaces, hits.edges), (vec![0], vec![1]));
+    // further out, the plane is within reach but the polygon is not
+    let hits = map.collision.test_sphere([5.8, 0.0, 0.1], 0.5);
+    assert!(hits.surfaces.is_empty() && hits.edges.is_empty());
 }
 
 #[test]
