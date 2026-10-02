@@ -145,8 +145,8 @@ impl ServerRun {
             // a first match, or one to replace a match that was lost
             if current.is_none() && Instant::now() >= retry_at {
                 match self.make_next(&mut draining) {
-                    Ok(live) => {
-                        let listed = self.announce(&live);
+                    Ok(mut live) => {
+                        let listed = self.announce(&mut live);
                         current = Some(live);
                         last_log = Instant::now();
                         if let Err(e) = listed {
@@ -197,8 +197,8 @@ impl ServerRun {
                         },
                     };
                     match upcoming {
-                        Some(upcoming) => {
-                            let listed = self.announce(&upcoming);
+                        Some(mut upcoming) => {
+                            let listed = self.announce(&mut upcoming);
                             current = Some(upcoming);
                             last_log = Instant::now();
                             last_count = (Instant::now(), u32::MAX);
@@ -312,7 +312,9 @@ impl ServerRun {
     }
 
     /// Write the server's row so that it names this match: the players go here.
-    fn announce(&self, live: &Live) -> Result<(), String> {
+    fn announce(&self, live: &mut Live) -> Result<(), String> {
+        // its time begins now, not when it was made ready (up to PREPARE_SECS earlier)
+        live.matched.started = Instant::now();
         let started_us = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_micros() as i64);
         let row = ServerRow {
             id: self.server.id.clone(),
@@ -365,6 +367,9 @@ impl ServerRun {
                 }
                 RootChange::Lifted { identity } => {
                     self.bans.remove(identity);
+                }
+                RootChange::Named { identity, name } if name.is_empty() => {
+                    self.names.remove(identity);
                 }
                 RootChange::Named { identity, name } => {
                     self.names.insert(*identity, name.clone());

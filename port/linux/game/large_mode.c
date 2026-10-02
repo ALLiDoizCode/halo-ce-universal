@@ -137,6 +137,25 @@ enum
 	_large_text_gateway
 };
 
+/* the numbers of halo_large_browse_entry, and the kinds halo_large_refusal returns */
+enum
+{
+	_large_entry_players,
+	_large_entry_capacity,
+	_large_entry_match_number,
+	_large_entry_seconds,
+	_large_entry_joinable,
+	k_large_entry_count
+};
+
+enum
+{
+	_large_refusal_none,
+	_large_refusal_banned,
+	_large_refusal_full,
+	_large_refusal_other
+};
+
 /* where the player is, picking a server from the list */
 enum
 {
@@ -915,7 +934,7 @@ static void large_mode_command_servers(
 	console_printf(FALSE, "   server                  map          game type    players");
 	for (index = 0; index < count; index++)
 	{
-		unsigned long numbers[5];
+		unsigned long numbers[k_large_entry_count];
 		char id[64], title[96], map[64], game_type[32];
 
 		if (!halo_large_browse_entry(index, numbers))
@@ -924,10 +943,10 @@ static void large_mode_command_servers(
 		large_mode_text(index, _large_text_title, title, sizeof(title));
 		large_mode_text(index, _large_text_map, map, sizeof(map));
 		large_mode_text(index, _large_text_game_type, game_type, sizeof(game_type));
-		if (numbers[4])
+		if (numbers[_large_entry_joinable])
 		{
 			console_printf(FALSE, "%c%lu  %-22.22s  %-11.11s  %-11.11s  %lu/%lu", !strcmp(id, large.server_id) ? '*' : ' ',
-				index + 1, title, map, game_type, numbers[0], numbers[1]);
+				index + 1, title, map, game_type, numbers[_large_entry_players], numbers[_large_entry_capacity]);
 		}
 		else
 		{
@@ -998,7 +1017,7 @@ static void large_mode_command_join(
 {
 	unsigned long count;
 	unsigned long index;
-	unsigned long numbers[5];
+	unsigned long numbers[k_large_entry_count];
 
 	large_mode_browse_start();
 	count = halo_large_browse_list();
@@ -1016,7 +1035,7 @@ static void large_mode_command_join(
 		console_warning("no server %s in the list (servers)", argument);
 		return;
 	}
-	if (!numbers[4])
+	if (!numbers[_large_entry_joinable])
 	{
 		console_warning("that server is between matches: try again in a moment");
 		return;
@@ -1031,6 +1050,7 @@ static void large_mode_command_join(
 		halo_large_stop();
 		large.started = FALSE;
 		large.phase = _large_phase_moving;
+		large.phase_seconds = 0.0f;
 		large.entered_game = FALSE;
 		network_test_large_leave_game();
 		return;
@@ -1093,13 +1113,13 @@ in has moved on: back to the lobby, and join the new one */
 static void large_mode_follow(
 	boolean main_menu_loaded)
 {
-	unsigned long at, numbers[5];
+	unsigned long at, numbers[k_large_entry_count];
 	char database[128];
 
 	if (!halo_large_browse_list())
 		return;
 	at = halo_large_browse_find(large.server_id);
-	if (!at || !halo_large_browse_entry(at - 1, numbers) || !numbers[4])
+	if (!at || !halo_large_browse_entry(at - 1, numbers) || !numbers[_large_entry_joinable])
 		return;
 	large_mode_text(at - 1, _large_text_database, database, sizeof(database));
 	if (!strcmp(database, large.database))
@@ -1111,6 +1131,7 @@ static void large_mode_follow(
 	halo_large_stop();
 	large.started = FALSE;
 	large.phase = _large_phase_moving;
+	large.phase_seconds = 0.0f;
 	large.entered_game = FALSE;
 	if (main_menu_loaded)
 		return;
@@ -1148,9 +1169,9 @@ void large_mode_update(
 				console_warning("%s", message);
 				platform_log("large mode: %s", message);
 			}
-			if (kind == 1 || large.phase_seconds > LARGE_JOIN_PATIENCE)
+			if (kind == _large_refusal_banned || large.phase_seconds > LARGE_JOIN_PATIENCE)
 			{
-				if (kind != 1)
+				if (kind != _large_refusal_banned)
 					console_warning("giving up on %s", large.server_title);
 				large_mode_leave();
 			}
@@ -1186,7 +1207,7 @@ void large_mode_update(
 		join says why. The game ends (its scores are shown, the player goes on
 		from them as at the end of any game) and the player is off the server. */
 		kind = halo_large_refusal(message, sizeof(message));
-		if (kind == 1)
+		if (kind == _large_refusal_banned)
 		{
 			console_warning("%s", message);
 			platform_log("large mode: %s", message);
@@ -1202,14 +1223,22 @@ void large_mode_update(
 		}
 		break;
 	case _large_phase_moving:
-		/* back in the lobby: the server's next match */
+		/* back in the lobby: the server's next match (which a server gone from the list, or
+		long between matches, does not have) */
+		large.phase_seconds += seconds;
+		if (large.phase_seconds > 6.0f * LARGE_JOIN_PATIENCE)
+		{
+			console_warning("%s has no match to join: giving up", large.server_title);
+			large_mode_leave();
+			break;
+		}
 		if (main_menu_loaded)
 		{
 			unsigned long count = halo_large_browse_list();
 			unsigned long at = halo_large_browse_find(large.server_id);
-			unsigned long numbers[5];
+			unsigned long numbers[k_large_entry_count];
 
-			if (at && at <= count && halo_large_browse_entry(at - 1, numbers) && numbers[4])
+			if (at && at <= count && halo_large_browse_entry(at - 1, numbers) && numbers[_large_entry_joinable])
 				large_mode_begin_join(at - 1);
 		}
 		break;

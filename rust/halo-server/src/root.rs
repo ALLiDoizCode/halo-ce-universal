@@ -24,7 +24,7 @@ pub enum RootChange {
     Lifted {
         identity: Identity,
     },
-    /// An identity's name (never empty: no name is not a change worth telling).
+    /// An identity's name; empty when it gave its name up.
     Named {
         identity: Identity,
         name: String,
@@ -77,7 +77,8 @@ impl Root {
         {
             let sinks = sinks.clone();
             conn.db.known_identity().on_update(move |_, old, row| {
-                if old.name != row.name && !row.name.is_empty() {
+                // (a name given up is told too: the matches forget it)
+                if old.name != row.name {
                     send(&sinks, RootChange::Named { identity: row.identity, name: row.name.clone() })
                 }
             });

@@ -129,9 +129,12 @@ impl Running {
     }
 
     /// Wait until the servers are told to stop (by [`Running::stop`] or
-    /// `request_stop` from another thread) or one of them has given up.
+    /// `request_stop` from another thread) or one of them has given up, or the root database is lost.
     pub fn wait(&self) {
-        while !self.shared.stop.load(Relaxed) && self.threads.iter().all(|t| !t.is_finished()) {
+        while !self.shared.stop.load(Relaxed)
+            && self.threads.iter().all(|t| !t.is_finished())
+            && self.shared.root.is_connected()
+        {
             std::thread::sleep(Duration::from_millis(100));
         }
     }

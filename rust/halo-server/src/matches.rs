@@ -45,6 +45,8 @@ pub struct RunningMatch {
     pub database: String,
     /// The database's identity, hex: what the server's metrics are labelled with.
     pub database_identity: String,
+    /// When the match began to count against its time limit: when it was
+    /// announced to players, not when it was made ready.
     pub started: Instant,
     pub bind: SocketAddr,
     client: MatchClient,

@@ -98,11 +98,13 @@ fn a_server_cycles_through_its_rotation_unattended_each_match_in_a_fresh_databas
 
     // watch the list as a player's client does, through three matches
     let mut seen: Vec<ServerRow> = Vec::new();
+    let mut seen_at: Vec<Instant> = Vec::new();
     let mut joined = false;
     wait_for("three matches", 60, || {
         let row = the_row(running.root())?;
         if seen.last().is_none_or(|last| last.match_number != row.match_number) {
             seen.push(row.clone());
+            seen_at.push(Instant::now());
         }
         // the first match: a player takes a seat, and the list counts them
         if !joined && row.match_number == 1 {
@@ -125,6 +127,10 @@ fn a_server_cycles_through_its_rotation_unattended_each_match_in_a_fresh_databas
         (row.match_number >= 3).then_some(())
     });
 
+    // each match lasts its time from when the list named it, however early it was made ready
+    for pair in seen_at.windows(2) {
+        assert!(pair[1] - pair[0] >= Duration::from_millis(4500), "a match of 5 s lasted {:?}", pair[1] - pair[0]);
+    }
     let maps: Vec<&str> = seen.iter().map(|r| r.map.as_str()).collect();
     assert_eq!(maps, ["alpha", "beta", "alpha"], "the rotation, in order and from the top again");
     let databases: Vec<&String> = seen.iter().map(|r| &r.database).collect();
