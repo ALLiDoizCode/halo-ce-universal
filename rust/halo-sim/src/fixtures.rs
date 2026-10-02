@@ -121,7 +121,24 @@ fn world_bounds() -> [f32; 6] {
 }
 
 fn map_of(collision: CollisionBsp) -> MapData {
-    MapData { collision, world_bounds: world_bounds(), movement: movement() }
+    MapData { collision, world_bounds: world_bounds(), movement: movement(), starts: Vec::new() }
+}
+
+/// `map` with `starts` for its player starting locations.
+pub fn with_starts(mut map: MapData, starts: &[crate::spawn::Start]) -> MapData {
+    map.starts = starts.to_vec();
+    map
+}
+
+/// A starting location for any game on the floor at `(x, y)`, for `team`
+/// (anything but 0 and 1 is for none), facing along `x`.
+pub fn start_at(x: f32, y: f32, team: i16) -> crate::spawn::Start {
+    crate::spawn::Start {
+        position: [x, y, 0.01],
+        yaw: 0.0,
+        team,
+        game_types: [halo_map::game_type::ALL, 0, 0, 0],
+    }
 }
 
 /// An open space above a flat floor at height 0 with solid ground under it. The

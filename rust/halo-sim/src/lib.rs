@@ -35,6 +35,8 @@ pub mod math;
 mod movement;
 mod pill;
 mod rng;
+pub mod rules;
+pub mod spawn;
 mod state;
 mod step;
 pub mod walk;
