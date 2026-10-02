@@ -1,0 +1,9 @@
+[package]
+name = "halo-sim"
+version = "0.1.0"
+description = "The large-scale mode's game simulation: one step function shared by the server (WebAssembly) and the client (native)"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+halo-map = { path = "../halo-map" }

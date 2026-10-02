@@ -88,7 +88,10 @@ jobs:
     # The Rust libraries of the large-scale mode (rust/). They are tested on
     # the host without any game data (tests that need the game's own maps
     # skip themselves), and built for the other two targets they ship on: the
-    # 32-bit client and WebAssembly.
+    # 32-bit client and WebAssembly. The simulation's WebAssembly build is also
+    # run, inside the tests (halo-sim-parity), on a pure-Rust interpreter
+    # that cargo fetches: no runtime to install, and the test fails rather than
+    # skips if the wasm32 target is missing.
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:

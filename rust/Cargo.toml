@@ -1,7 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["halo-map"]
+members = ["halo-map", "halo-sim", "halo-sim-parity"]
 
 [workspace.package]
 edition = "2021"
 publish = false
+
+# The WebAssembly runtime the parity test runs the simulation in is an
+# interpreter; optimised, it runs the 10,000-tick scenario in a second or two
+# instead of minutes.
+[profile.dev.package."*"]
+opt-level = 3
