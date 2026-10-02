@@ -1,0 +1,11 @@
+[package]
+name = "halo-map"
+version = "0.1.0"
+description = "Reads the collision BSP and multiplayer placements from Xbox Halo CE map files"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Pure Rust inflate (miniz_oxide), so the crate builds unchanged for the host,
+# 32-bit x86 and WebAssembly.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
