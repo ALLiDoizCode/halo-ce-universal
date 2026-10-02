@@ -166,7 +166,7 @@ fn status() -> (u32, u32) {
 
 const LOUNGE: &str = "[[server.rotation]]\nmap = \"alpha\"\ngame_type = \"slayer\"\ncapacity = 5\nseconds = 0\n";
 const ARENA: &str =
-    "[[server.rotation]]\nmap = \"beta\"\ngame_type = \"ctf\"\nvariant = \"small\"\ncapacity = 7\nseconds = 0\n";
+    "[[server.rotation]]\nmap = \"beta\"\ngame_type = \"team_slayer\"\nvariant = \"small\"\ncapacity = 7\nseconds = 0\n";
 
 #[test]
 fn a_player_sees_the_servers_with_their_map_game_type_and_players_and_joins_one_from_the_list() {
@@ -179,7 +179,7 @@ fn a_player_sees_the_servers_with_their_map_game_type_and_players_and_joins_one_
     let (arena, lounge) = (find("arena"), find("lounge"));
     assert_eq!(
         (text(arena, 1), text(arena, 2), text(arena, 3), text(arena, 4)),
-        ("Server arena".into(), "beta".into(), "ctf".into(), "small".into())
+        ("Server arena".into(), "beta".into(), "team_slayer".into(), "small".into())
     );
     assert_eq!(
         (text(lounge, 1), text(lounge, 2), text(lounge, 3)),

@@ -358,3 +358,112 @@ fn empty_row() -> ServerRow {
         updated_us: 0,
     }
 }
+
+// ---- the game: spawning, deaths, the score limit and the cap
+
+/// A server on a SpacetimeDB of the test's own, with the given rotation.
+fn running_server(
+    name: &str,
+    rotation: &str,
+    log: Log,
+) -> Option<(halo_server::Running, Stdb, String, std::path::PathBuf)> {
+    let bin = stdb_bin_dir().or_else(|| {
+        eprintln!("HALO_STDB_BIN is not set: skipping, this test needs a SpacetimeDB 2.10.x release");
+        None
+    })?;
+    let dir = scratch(name);
+    let stdb = Stdb::start(&bin);
+    let url = stdb.uri();
+    std::fs::write(dir.join("owner.token"), &stdb.owner().token).unwrap();
+    let config = test_config(&dir, &url, None, &[("lounge", rotation)]);
+    let running = halo_server::start(config, Arc::new(FlatFloors), log).expect("the server starts");
+    Some((running, stdb, url, dir))
+}
+
+#[test]
+fn a_match_without_a_cap_of_its_own_holds_what_its_map_holds() {
+    let _serial = serial();
+    let rotation = "[[server.rotation]]\nmap = \"alpha\"\nseconds = 0\n";
+    let Some((running, _stdb, _url, dir)) = running_server("defaults", rotation, Log::new()) else { return };
+    let row = wait_for("the match", 30, || the_row(running.root()));
+    // (a map that is none of the original ones: 16)
+    assert_eq!(row.capacity, 16);
+    assert_eq!(halo_server::maps::default_capacity("bloodgulch"), 500);
+    running.stop().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `count` players' seats in `database`, and the connection the owner watches it with.
+fn seat_in(url: &str, database: &str, owner_token: &str, count: usize) -> (Vec<PlayerClient>, MatchClient) {
+    let watcher = MatchClient::connect_as(url, database, Some(owner_token));
+    let clients: Vec<PlayerClient> = (0..count)
+        .map(|i| {
+            let player = new_player(url);
+            let client = PlayerClient::connect_unsubscribed(url, database, &player.token);
+            client.join([i as u8 + 1; 32]).unwrap();
+            client
+        })
+        .collect();
+    wait_for("the seats", 20, || (watcher.seats().len() == count).then_some(()));
+    (clients, watcher)
+}
+
+#[test]
+fn a_match_ends_when_a_player_reaches_the_score_limit_and_the_server_moves_on_to_the_next() {
+    let _serial = serial();
+    let (log, lines) = Log::keeping();
+    let rotation = "[[server.rotation]]\nmap = \"alpha\"\ncapacity = 8\nseconds = 0\nscore_limit = 2\n\
+                    respawn_seconds = 1\nwave_seconds = 1\n";
+    let Some((running, stdb, url, dir)) = running_server("limit", rotation, log) else { return };
+    let first = wait_for("the first match", 30, || the_row(running.root()));
+    let (_clients, watcher) = seat_in(&url, &first.database, &stdb.owner().token, 3);
+    wait_for("all spawned", 10, || (watcher.standings().values().filter(|s| s.state == 0).count() == 3).then_some(()));
+
+    // nothing can deal damage yet: the server's own way to kill is the owner's
+    watcher.report_death(1, Some(0)).unwrap();
+    wait_for("the first point", 10, || (watcher.standings()[&0].score == 1).then_some(()));
+    assert_eq!(watcher.game().unwrap().ending, 0, "one of two");
+    watcher.report_death(2, Some(0)).unwrap();
+    wait_for("the end", 10, || (watcher.game().unwrap().ending == 1).then_some(()));
+    assert_eq!((watcher.game().unwrap().winner_kind, watcher.game().unwrap().winner), (1, 0));
+
+    // the final scoreboard stays for end_secs (1 here), then the rotation moves on
+    let second = wait_for("the next match", 30, || the_row(running.root()).filter(|r| r.match_number == 2));
+    assert_ne!(second.database, first.database);
+    let log = lines.lock().unwrap().join("\n");
+    assert!(log.contains("has ended: its score limit was reached, won by Player 0"), "the log:\n{log}");
+    assert!(log.contains("is over: its score limit was reached"), "the log:\n{log}");
+    running.stop().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_match_ends_at_its_time_limit_and_a_crowd_larger_than_the_starts_spawns_in_waves() {
+    let _serial = serial();
+    let (log, lines) = Log::keeping();
+    // the map has four starting locations; eight players join
+    let rotation = "[[server.rotation]]\nmap = \"alpha\"\ncapacity = 8\nseconds = 8\nwave_seconds = 2\n";
+    let Some((running, stdb, url, dir)) = running_server("waves", rotation, log) else { return };
+    let first = wait_for("the first match", 30, || the_row(running.root()));
+    let (_clients, watcher) = seat_in(&url, &first.database, &stdb.owner().token, 8);
+    wait_for("the standings", 10, || (watcher.standings().len() == 8).then_some(()));
+    wait_for("the waves", 20, || (watcher.standings().values().all(|s| s.state == 0)).then_some(()));
+    let rows = watcher.players();
+    assert_eq!(rows.len(), 8, "all eight are in the world after the waves");
+    let mut points: Vec<[f32; 3]> = rows.values().map(|r| [r.x, r.y, r.z]).collect();
+    points.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    for (i, a) in points.iter().enumerate() {
+        for b in &points[i + 1..] {
+            assert!(((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt() >= 0.4, "two players on top of one another");
+        }
+    }
+
+    // 8 s after the list named the match its time limit ends it
+    wait_for("the end", 20, || (watcher.game().unwrap().ending == 2).then_some(()));
+    wait_for("the next match", 30, || the_row(running.root()).filter(|r| r.match_number == 2));
+    let log = lines.lock().unwrap().join("\n");
+    assert!(log.contains("has ended: its time is up, nobody won"), "the log:\n{log}");
+    assert!(log.contains("is over: its time is up"), "the log:\n{log}");
+    running.stop().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

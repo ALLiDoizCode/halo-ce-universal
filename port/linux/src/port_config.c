@@ -217,6 +217,10 @@ static const struct config_setting config_settings[] =
 	{ "large.log_players", _config_boolean, "false", "HALO_LARGE_LOG", _environment_set_is_true, _platform_desktop,
 		"Log every player the gateway has sent, with their state, once a second\n"
 		"(for tests; the log has the session's own line every second anyway)." },
+	{ "large.scoreboard", _config_boolean, "false", "HALO_LARGE_SCOREBOARD", _environment_set_is_true, _platform_desktop,
+		"Keep the large-scale mode's scoreboard (every player of the match) on\n"
+		"screen, as if the score button were held (for tests' pictures; it comes up\n"
+		"by itself when the game has ended)." },
 	{ "debug.network_test", _config_string, "\"\"", "HALO_NETWORK_TEST", _environment_value, _platform_all,
 		"Automated system link sessions for testing (port/linux/game/network_test.c):\n"
 		"\"host:<map>\" hosts a game on that map, \"join\" joins the first game found;\n"

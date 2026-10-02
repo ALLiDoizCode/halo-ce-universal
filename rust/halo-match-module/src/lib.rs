@@ -1,6 +1,7 @@
 //! The match module: one SpacetimeDB database holds one large-scale match.
 //!
-//! - A scheduled reducer, [`tick`], runs `halo_sim::step` 30 times a second.
+//! - A scheduled reducer, [`tick`], runs `halo_sim::rules::play` (the game's
+//!   rules and `halo_sim::step`) 30 times a second.
 //! - [`submit_inputs`] takes every player's input for a tick as one batch (the
 //!   gateway calls it once a tick); nothing is called per player.
 //! - Each tick writes the players whose state changed to `player` and then the
@@ -17,13 +18,33 @@
 //!   name and a team. It changes only when a player joins or leaves, so every
 //!   client subscribes to all of it, as it must not to `player`, which
 //!   changes every tick.
+//! - `standing` (public) says how each player is doing: score, deaths, whether
+//!   they are in the world (alive, dead until a tick, or waiting for a
+//!   respawn wave because no starting location is free) and where they last
+//!   spawned. `game_state` (public, one row) is the game: its rules, clock, team
+//!   scores and how it ended. Both are slow state, written when a player scores,
+//!   dies or spawns (the clock in `game_state.tick` twice a second): clients
+//!   subscribe to all of them for the scoreboard and for the player's own
+//!   respawn, and the orchestration reads `game_state` for the match's end.
+//!
+//! # The game
+//!
+//! The server owns spawns, deaths, score and the end (`halo_sim::rules`). The
+//! owner sets the game (`set_game`: Slayer or Team Slayer, the score and time
+//! limits, the respawn times and the waves) and starts its clock (`begin_game`).
+//! A player who `join`s spawns at a starting location of the map, which the
+//! map's data carries, by the engine's rules, or is told to wait for the next
+//! wave when none is free. A death is applied by the next tick (`report_death`
+//! queues it: the owner's way to kill until hit reports are validated into the
+//! same `halo_sim::rules::Death`).
 //!
 //! # Who may call what
 //!
 //! - The **owner** (the identity that published the database, which `init`
 //!   records) runs the match: `load_map`, `add_players`, `remove_players`,
-//!   `start`, `stop`, `reset`, `set_spawn_points`, `set_capacity`,
-//!   `set_away_grace` and `set_gateway`. Any other caller is refused.
+//!   `start`, `stop`, `reset`, `set_game`, `begin_game`, `report_death`,
+//!   `set_spawn_points`, `set_capacity`, `set_away_grace` and `set_gateway`.
+//!   Any other caller is refused.
 //! - The **gateway** (the owner until `set_gateway` names another identity)
 //!   calls `submit_inputs`: nobody else may put input into the match.
 //! - **Anyone** may `join` (take a seat: a player, tied to their identity, and
@@ -54,8 +75,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use halo_map::MapError;
+use halo_sim::rules::{self, Contestant, Death, EndReason, Ending, Game, GameEvent, GameStore, Life, Rules, Winner};
 use halo_sim::wire::{decode_inputs, INPUT_SIZE};
-use halo_sim::{step, Event, MapData, Player, PlayerId, RejectReason, Rng, Store, TICKS_PER_SECOND};
+use halo_sim::{Event, MapData, Player, PlayerId, RejectReason, Rng, Store, TICKS_PER_SECOND};
 use spacetimedb::{reducer, table, ConnectionId, Identity, ReducerContext, ScheduleAt, Table};
 
 /// Microseconds between ticks.
@@ -92,7 +114,7 @@ pub struct MatchTick {
     tick: u64,
     /// Server time at the start of the tick, microseconds since the Unix epoch.
     stamped_us: i64,
-    /// Players in the match after the tick.
+    /// Players in the match after the tick: every player with a standing, dead or waiting for a wave too.
     players: u32,
     /// Inputs this tick took from the batches (accepted, rejected, or dropped because no map is loaded).
     inputs: u32,
@@ -187,6 +209,104 @@ pub struct RosterRow {
     name: String,
 }
 
+/// What a player's life is: the values of [`StandingRow::state`].
+pub const STATE_ALIVE: u8 = 0;
+/// Dead, until `due_tick`.
+pub const STATE_DEAD: u8 = 1;
+/// Waiting for the wave at `due_tick`: no starting location was free.
+pub const STATE_WAITING: u8 = 2;
+
+/// How a player is doing: the scoreboard, and whether they are in the world
+/// and when they will be. One row per player in the match; public, and slow
+/// state: it changes when the player scores, dies or spawns, and not with
+/// every move. Clients subscribe to all of it (they show every player on the
+/// scoreboard, in range or not).
+#[table(accessor = standing, public)]
+pub struct StandingRow {
+    #[primary_key]
+    player: u16,
+    /// 0 (red) or 1 (blue), as on the roster.
+    team: u8,
+    /// Kills, less what betrayals and suicides cost.
+    score: i32,
+    deaths: u32,
+    /// `STATE_ALIVE`, `STATE_DEAD` or `STATE_WAITING`.
+    #[index(btree)]
+    state: u8,
+    /// The match tick the player spawns on, when dead (the respawn timer's
+    /// end) or waiting (the wave); 0 when alive. The match tick is the one
+    /// the gateway's datagrams carry.
+    due_tick: u64,
+    /// Counts the player's spawns: a change says they are somewhere new.
+    spawns: u32,
+    /// The match tick the player last spawned on: a state of them sent before it is
+    /// from where they were.
+    spawned_tick: u64,
+    /// Where the player last spawned, and which way they faced.
+    x: f32,
+    y: f32,
+    z: f32,
+    yaw: f32,
+    /// Ticks added to the player's respawn timer.
+    penalty: u32,
+}
+
+/// The game: its rules, its clock and the team scores, and how it ended.
+/// One row; public; it changes when a team scores or the match ends.
+#[table(accessor = game_state, public)]
+pub struct GameStateRow {
+    #[primary_key]
+    id: u8,
+    /// Team Slayer.
+    teams: bool,
+    score_limit: u32,
+    /// Ticks the match lasts from `started_tick`; 0 for no limit.
+    time_limit_ticks: u32,
+    respawn_ticks: u32,
+    respawn_growth_ticks: u32,
+    suicide_penalty_ticks: u32,
+    /// Ticks between the waves players spawn in when no starting location is free.
+    wave_ticks: u32,
+    /// The match tick the clock started on.
+    started_tick: u64,
+    /// The match tick as of the latest `CLOCK_EVERY_TICKS`: a client that is not
+    /// being sent the match's datagrams (a player who is waiting for a wave) keeps
+    /// the time from it, between updates, by its own clock.
+    tick: u64,
+    red_score: i32,
+    blue_score: i32,
+    /// `ENDING_NONE` while the match is on; `ENDING_SCORE_LIMIT` or `ENDING_TIME_LIMIT`.
+    ending: u8,
+    /// `WINNER_NOBODY`, `WINNER_PLAYER` or `WINNER_TEAM`, once it has ended.
+    winner_kind: u8,
+    /// The winning player's id, or team.
+    winner: u16,
+}
+
+/// How often `game_state.tick` is written: twice a second.
+pub const CLOCK_EVERY_TICKS: u64 = TICKS_PER_SECOND as u64 / 2;
+
+pub const ENDING_NONE: u8 = 0;
+pub const ENDING_SCORE_LIMIT: u8 = 1;
+pub const ENDING_TIME_LIMIT: u8 = 2;
+pub const WINNER_NOBODY: u8 = 0;
+pub const WINNER_PLAYER: u8 = 1;
+pub const WINNER_TEAM: u8 = 2;
+
+/// What `report_death` was told to apply at the next tick. Private.
+#[table(accessor = pending_death)]
+pub struct PendingDeath {
+    #[primary_key]
+    #[auto_inc]
+    id: u64,
+    victim: u16,
+    /// `NO_KILLER` for a death nobody caused.
+    killer: u16,
+}
+
+/// A `report_death` killer that says nobody.
+pub const NO_KILLER: u16 = u16::MAX;
+
 /// Which map the cache must hold. Private.
 #[table(accessor = match_state)]
 pub struct MatchState {
@@ -248,9 +368,10 @@ pub struct MatchConfig {
     away_grace_ticks: u64,
 }
 
-/// Where a joining player appears: the n-th of these for player id n (modulo
-/// how many there are), until a spawn rule of the game's own replaces it.
-/// Private.
+/// Where a joining player appears when the owner has said where, for tests
+/// and tools that need players exactly there: the n-th of these for player id
+/// n (modulo how many there are). Without any, the game's rules choose from the
+/// map's starting locations. Private.
 #[table(accessor = spawn_point)]
 pub struct SpawnPoint {
     #[primary_key]
@@ -335,7 +456,14 @@ fn require_gateway(ctx: &ReducerContext) -> Result<(), String> {
 }
 
 fn to_player(row: &PlayerRow) -> Player {
-    Player::new(row.id, [row.x, row.y, row.z], row.yaw, row.pitch)
+    Player {
+        flags: row.flags,
+        air_ticks: row.air_ticks,
+        air_z: row.air_z,
+        free_ticks: row.free_ticks,
+        free_z: row.free_z,
+        ..Player::new(row.id, [row.x, row.y, row.z], row.yaw, row.pitch)
+    }
 }
 
 /// Longest name a player has: the engine's name field.
@@ -440,6 +568,200 @@ impl Store for TableStore<'_> {
     }
 }
 
+fn game_of(row: &GameStateRow) -> Game {
+    let ending = match row.ending {
+        ENDING_SCORE_LIMIT | ENDING_TIME_LIMIT => Some(Ending {
+            reason: if row.ending == ENDING_SCORE_LIMIT { EndReason::ScoreLimit } else { EndReason::TimeLimit },
+            winner: match row.winner_kind {
+                WINNER_PLAYER => Winner::Player(row.winner),
+                WINNER_TEAM => Winner::Team(row.winner as u8),
+                _ => Winner::Nobody,
+            },
+        }),
+        _ => None,
+    };
+    Game {
+        rules: Rules {
+            teams: row.teams,
+            score_limit: row.score_limit,
+            time_limit_ticks: row.time_limit_ticks,
+            respawn_ticks: row.respawn_ticks,
+            respawn_growth_ticks: row.respawn_growth_ticks,
+            suicide_penalty_ticks: row.suicide_penalty_ticks,
+            wave_ticks: row.wave_ticks,
+        },
+        started_tick: row.started_tick,
+        team_scores: [row.red_score, row.blue_score],
+        ending,
+    }
+}
+
+fn game_row(game: &Game) -> GameStateRow {
+    let (ending, winner_kind, winner) = match game.ending {
+        None => (ENDING_NONE, WINNER_NOBODY, 0),
+        Some(e) => {
+            let ending = if e.reason == EndReason::ScoreLimit { ENDING_SCORE_LIMIT } else { ENDING_TIME_LIMIT };
+            match e.winner {
+                Winner::Nobody => (ending, WINNER_NOBODY, 0),
+                Winner::Player(p) => (ending, WINNER_PLAYER, p),
+                Winner::Team(t) => (ending, WINNER_TEAM, t as u16),
+            }
+        }
+    };
+    let r = &game.rules;
+    GameStateRow {
+        id: ONLY,
+        teams: r.teams,
+        score_limit: r.score_limit,
+        time_limit_ticks: r.time_limit_ticks,
+        respawn_ticks: r.respawn_ticks,
+        respawn_growth_ticks: r.respawn_growth_ticks,
+        suicide_penalty_ticks: r.suicide_penalty_ticks,
+        wave_ticks: r.wave_ticks,
+        started_tick: game.started_tick,
+        tick: 0,
+        red_score: game.team_scores[0],
+        blue_score: game.team_scores[1],
+        ending,
+        winner_kind,
+        winner,
+    }
+}
+
+fn contestant_of(row: &StandingRow) -> Contestant {
+    Contestant {
+        id: row.player,
+        team: row.team,
+        score: row.score,
+        deaths: row.deaths,
+        life: match row.state {
+            STATE_ALIVE => Life::Alive,
+            STATE_DEAD => Life::Dead { due: row.due_tick },
+            _ => Life::Waiting { wave: row.due_tick },
+        },
+        spawns: row.spawns,
+        spawn: [row.x, row.y, row.z],
+        spawn_yaw: row.yaw,
+        spawned_tick: row.spawned_tick,
+        penalty: row.penalty,
+    }
+}
+
+fn standing_row(c: &Contestant) -> StandingRow {
+    let (state, due_tick) = match c.life {
+        Life::Alive => (STATE_ALIVE, 0),
+        Life::Dead { due } => (STATE_DEAD, due),
+        Life::Waiting { wave } => (STATE_WAITING, wave),
+    };
+    StandingRow {
+        player: c.id,
+        team: c.team,
+        score: c.score,
+        deaths: c.deaths,
+        state,
+        due_tick,
+        spawns: c.spawns,
+        spawned_tick: c.spawned_tick,
+        x: c.spawn[0],
+        y: c.spawn[1],
+        z: c.spawn[2],
+        yaw: c.spawn_yaw,
+        penalty: c.penalty,
+    }
+}
+
+/// `halo_sim::rules::GameStore` over the `game_state` and `standing` tables.
+/// Rows are written only when they change: they are public, and what
+/// subscribers are sent.
+struct TableGame<'a> {
+    ctx: &'a ReducerContext,
+}
+
+impl GameStore for TableGame<'_> {
+    fn game(&self) -> Game {
+        match self.ctx.db.game_state().id().find(ONLY) {
+            Some(row) => game_of(&row),
+            None => Game::new(Rules::slayer(), 0),
+        }
+    }
+
+    fn set_game(&mut self, game: Game) {
+        let mut row = game_row(&game);
+        let table = self.ctx.db.game_state();
+        match table.id().find(ONLY) {
+            Some(old) if game_of(&old) == game => {}
+            Some(old) => {
+                row.tick = old.tick;
+                table.id().update(row);
+            }
+            None => {
+                table.insert(row);
+            }
+        }
+    }
+
+    fn contestant(&self, id: PlayerId) -> Option<Contestant> {
+        self.ctx.db.standing().player().find(id).as_ref().map(contestant_of)
+    }
+
+    fn set_contestant(&mut self, c: Contestant) {
+        let table = self.ctx.db.standing();
+        match table.player().find(c.id) {
+            Some(old) if contestant_of(&old) == c => {}
+            Some(_) => {
+                table.player().update(standing_row(&c));
+            }
+            None => {
+                table.insert(standing_row(&c));
+            }
+        }
+    }
+
+    fn remove_contestant(&mut self, id: PlayerId) -> bool {
+        self.ctx.db.standing().player().delete(id)
+    }
+
+    fn contestants(&self) -> Vec<Contestant> {
+        let mut all: Vec<Contestant> = self.ctx.db.standing().iter().map(|r| contestant_of(&r)).collect();
+        all.sort_unstable_by_key(|c| c.id);
+        all
+    }
+
+    fn unspawned(&self) -> Vec<Contestant> {
+        let table = self.ctx.db.standing();
+        let mut out: Vec<Contestant> = table
+            .state()
+            .filter(STATE_DEAD)
+            .chain(table.state().filter(STATE_WAITING))
+            .map(|r| contestant_of(&r))
+            .collect();
+        out.sort_unstable_by_key(|c| c.id);
+        out
+    }
+}
+
+/// What the rules did, for the log: deaths, the end, players told to wait. (Spawns
+/// are too many to log: a player's row says.)
+fn log_events(events: &[GameEvent]) {
+    for event in events {
+        match event {
+            GameEvent::Died { victim, killer, kind, respawn_at } => {
+                log::info!("player {victim} died ({kind:?}, killer {killer:?}): respawns at tick {respawn_at}")
+            }
+            GameEvent::DeathRefused { victim, reason } => {
+                log::warn!("a death of player {victim} was refused: {reason:?}")
+            }
+            GameEvent::Over(ending) => log::info!("the match is over: {ending:?}"),
+            _ => {}
+        }
+    }
+}
+
+/// The tick the match is on.
+fn match_tick_of(ctx: &ReducerContext) -> u64 {
+    ctx.db.match_tick().id().find(ONLY).map_or(0, |t| t.tick)
+}
+
 #[reducer(init)]
 pub fn init(ctx: &ReducerContext) {
     // whoever publishes owns the match, and is its gateway until they say otherwise
@@ -451,6 +773,8 @@ pub fn init(ctx: &ReducerContext) {
         away_grace_ticks: DEFAULT_AWAY_GRACE_TICKS,
     });
     ctx.db.match_state().insert(MatchState { id: ONLY, map_version: 0 });
+    // Slayer as the engine has it until the owner says otherwise (`set_game`)
+    ctx.db.game_state().insert(game_row(&Game::new(Rules::slayer(), 0)));
     ctx.db.match_tick().insert(MatchTick {
         id: ONLY,
         tick: 0,
@@ -490,11 +814,11 @@ pub fn load_map(ctx: &ReducerContext, data: Vec<u8>) -> Result<(), String> {
     Ok(())
 }
 
-/// Put players in the match. The batch has the layout of an input batch
-/// (`halo_sim::wire`): each record is a player's id and where they start.
-/// Fails, changing nothing, if the batch is malformed or a player is already
-/// in the match. Where a player should spawn is a later ticket's rule; the
-/// caller chooses for now.
+/// Put players in the match where the caller says, alive: the batch has the
+/// layout of an input batch (`halo_sim::wire`), each record a player's id and
+/// where they stand. For tests and tools; the players who join spawn by the
+/// game's rules. Fails, changing nothing, if the batch is malformed or a
+/// player is already in the match.
 #[reducer]
 pub fn add_players(ctx: &ReducerContext, batch: Vec<u8>) -> Result<(), String> {
     require_owner(ctx)?;
@@ -507,6 +831,7 @@ pub fn add_players(ctx: &ReducerContext, batch: Vec<u8>) -> Result<(), String> {
     }
     for p in players {
         add_to_roster(ctx, p.player, None);
+        rules::enter_placed(&mut TableGame { ctx }, p.player, roster_team(ctx, p.player), p.position, p.yaw);
         ctx.db.player().insert(PlayerRow {
             id: p.player,
             x: p.position[0],
@@ -542,14 +867,22 @@ fn remove_player(ctx: &ReducerContext, id: u16) {
     ctx.db.player().id().delete(id);
     ctx.db.seat().player().delete(id);
     ctx.db.roster().player().delete(id);
+    rules::leave(&mut TableGame { ctx }, id);
+}
+
+/// The team the roster has a player on.
+fn roster_team(ctx: &ReducerContext, id: u16) -> u8 {
+    ctx.db.roster().player().find(id).map_or(0, |r| r.team)
 }
 
 /// Take a seat in the match: a player, tied to the caller's identity.
 /// `udp_key` is the public key of an Ed25519 key pair the caller keeps; the
 /// gateway believes a UDP address is this player only if it can sign with the
 /// private one. Calling again (from this connection or a new one, after a
-/// drop) keeps the player and replaces the key. Fails if the match is full,
-/// or has no spawn point yet.
+/// drop) keeps the player and replaces the key. The player spawns where the
+/// game's rules say (at a free starting location of the map now, or in the next
+/// wave), or where the owner's `set_spawn_points` put them. Fails if the match
+/// is full, or has no map, or the map no starting location for the game.
 #[reducer]
 pub fn join(ctx: &ReducerContext, udp_key: Vec<u8>) -> Result<(), String> {
     if udp_key.len() != UDP_KEY_SIZE {
@@ -566,40 +899,59 @@ pub fn join(ctx: &ReducerContext, udp_key: Vec<u8>) -> Result<(), String> {
         return Ok(());
     }
     let capacity = ctx.db.match_config().id().find(ONLY).map_or(DEFAULT_CAPACITY, |c| c.capacity);
-    let Some(id) = (0..capacity).find(|id| ctx.db.player().id().find(*id).is_none()) else {
+    // (a player who waits for a wave has a standing and a seat, and no row in `player` yet)
+    let taken = |id: &u16| {
+        ctx.db.player().id().find(*id).is_some()
+            || ctx.db.standing().player().find(*id).is_some()
+            || ctx.db.seat().player().find(*id).is_some()
+    };
+    let Some(id) = (0..capacity).find(|id| !taken(id)) else {
         return Err(format!("{FULL_PREFIX}the match has its {capacity} players"));
     };
-    let spawns = ctx.db.spawn_point().count() as u32;
-    if spawns == 0 {
-        return Err("the match has no spawn points".into());
+    let tick = match_tick_of(ctx);
+    let explicit = ctx.db.spawn_point().count() as u32;
+    if explicit > 0 {
+        // the owner has said where players go (`set_spawn_points`): the n-th for player n,
+        // standing on the ground (a spawn point is a little above it, and a player placed
+        // there would fall for a few ticks that the server would refuse to see)
+        let spawn = ctx.db.spawn_point().index().find(id as u32 % explicit).ok_or("a spawn point is missing")?;
+        let [x, y, z] = match current_map(ctx) {
+            Some(map) => halo_sim::walk::settled(&map, [spawn.x, spawn.y, spawn.z]),
+            None => [spawn.x, spawn.y, spawn.z],
+        };
+        ctx.db.player().insert(PlayerRow {
+            id,
+            x,
+            y,
+            z,
+            yaw: spawn.yaw,
+            pitch: 0.0,
+            updated_tick: tick,
+            rejected_moves: 0,
+            last_reject: REJECT_NONE,
+            last_reject_tick: 0,
+            flags: 0,
+            air_ticks: 0,
+            air_z: 0.0,
+            free_ticks: 0,
+            free_z: 0.0,
+        });
+        add_to_roster(ctx, id, Some(ctx.sender()));
+        rules::enter_placed(&mut TableGame { ctx }, id, roster_team(ctx, id), [x, y, z], spawn.yaw);
+    } else {
+        // the game's rules say where: at a free starting location now, or in the next wave
+        let map = current_map(ctx).ok_or("the match has no map yet")?;
+        if !map.starts.iter().any(|s| s.is_for_slayer()) {
+            return Err("the map has no starting locations for the game".into());
+        }
+        add_to_roster(ctx, id, Some(ctx.sender()));
+        let mut game = TableGame { ctx };
+        rules::enter(&mut game, id, roster_team(ctx, id), tick);
+        let mut store = TableStore { ctx, tick };
+        let mut rng = Rng::seeded(tick ^ ((id as u64) << 32) ^ 0x5EED);
+        let events = rules::spawn_due(&mut store, &mut game, &map, &mut rng, tick);
+        log_events(&events);
     }
-    let spawn = ctx.db.spawn_point().index().find(id as u32 % spawns).ok_or("a spawn point is missing")?;
-    let tick = ctx.db.match_tick().id().find(ONLY).map_or(0, |t| t.tick);
-    // the player starts standing on the ground: a spawn point is a little above
-    // it, and a player placed there would fall for a few ticks that the server
-    // would refuse to see
-    let [x, y, z] = match current_map(ctx) {
-        Some(map) => halo_sim::walk::settled(&map, [spawn.x, spawn.y, spawn.z]),
-        None => [spawn.x, spawn.y, spawn.z],
-    };
-    ctx.db.player().insert(PlayerRow {
-        id,
-        x,
-        y,
-        z,
-        yaw: spawn.yaw,
-        pitch: 0.0,
-        updated_tick: tick,
-        rejected_moves: 0,
-        last_reject: REJECT_NONE,
-        last_reject_tick: 0,
-        flags: 0,
-        air_ticks: 0,
-        air_z: 0.0,
-        free_ticks: 0,
-        free_z: 0.0,
-    });
-    add_to_roster(ctx, id, Some(ctx.sender()));
     ctx.db.seat().insert(Seat {
         player: id,
         owner: ctx.sender(),
@@ -686,8 +1038,10 @@ pub fn clear_ban(ctx: &ReducerContext, identity: Identity) -> Result<(), String>
     Ok(())
 }
 
-/// Where joining players appear, in the batch layout of `add_players` (only
-/// positions and yaw are used). Replaces the earlier ones.
+/// Where joining players appear instead of where the game's rules put them,
+/// in the batch layout of `add_players` (only positions and yaw are used): for
+/// tests and tools that need each player exactly where they say. Replaces the
+/// earlier ones; none (the default) leaves the choice to the rules.
 #[reducer]
 pub fn set_spawn_points(ctx: &ReducerContext, batch: Vec<u8>) -> Result<(), String> {
     require_owner(ctx)?;
@@ -793,8 +1147,76 @@ pub fn reset(ctx: &ReducerContext) -> Result<(), String> {
     for id in batches {
         ctx.db.input_batch().id().delete(id);
     }
+    let deaths: Vec<u64> = ctx.db.pending_death().iter().map(|d| d.id).collect();
+    for id in deaths {
+        ctx.db.pending_death().id().delete(id);
+    }
     let blank = MatchTick { id: ONLY, tick: 0, stamped_us: 0, players: 0, inputs: 0, rejected: 0, rejected_total: 0 };
     ctx.db.match_tick().id().update(blank);
+    rules::begin(&mut TableGame { ctx }, 0);
+    Ok(())
+}
+
+/// Set the game: Slayer, or Team Slayer (`teams`), and its limits, and begin
+/// it (see `begin_game`). `score_limit` is the score that ends the match (a
+/// team's, in Team Slayer; 0 for none); `time_limit_ticks` how long it lasts
+/// (0 for no limit); the respawn times and the wave are in ticks (30 a second).
+#[reducer]
+#[allow(clippy::too_many_arguments)]
+pub fn set_game(
+    ctx: &ReducerContext,
+    teams: bool,
+    score_limit: u32,
+    time_limit_ticks: u32,
+    respawn_ticks: u32,
+    respawn_growth_ticks: u32,
+    suicide_penalty_ticks: u32,
+    wave_ticks: u32,
+) -> Result<(), String> {
+    require_owner(ctx)?;
+    if wave_ticks == 0 {
+        return Err("a wave every 0 ticks".into());
+    }
+    let rules = Rules {
+        teams,
+        score_limit,
+        time_limit_ticks,
+        respawn_ticks,
+        respawn_growth_ticks,
+        suicide_penalty_ticks,
+        wave_ticks,
+    };
+    let tick = match_tick_of(ctx);
+    let mut game = TableGame { ctx };
+    game.set_game(Game::new(rules, tick));
+    rules::begin(&mut game, tick);
+    Ok(())
+}
+
+/// Start the match's clock now: the time limit and the waves count from this
+/// tick, and scores, deaths and respawn penalties go back to nothing. The
+/// orchestration calls it when it tells players where the match is.
+#[reducer]
+pub fn begin_game(ctx: &ReducerContext) -> Result<(), String> {
+    require_owner(ctx)?;
+    rules::begin(&mut TableGame { ctx }, match_tick_of(ctx));
+    Ok(())
+}
+
+/// Kill a player: the server's way for a death to happen and a kill to be
+/// credited. `killer` is the player who gets the credit, or `NO_KILLER`
+/// (65535) for a death nobody caused (which is the victim's own, as the
+/// engine counts a fall). The death is applied by the next tick's rules (see
+/// `halo_sim::rules`): a victim who is not alive then, or a match that is
+/// over, refuses it, and nothing counts. The weapons' hit validation will
+/// produce the same `Death` from validated hit reports.
+#[reducer]
+pub fn report_death(ctx: &ReducerContext, victim: u16, killer: u16) -> Result<(), String> {
+    require_owner(ctx)?;
+    if ctx.db.standing().player().find(victim).is_none() {
+        return Err(format!("player {victim} is not in the match"));
+    }
+    ctx.db.pending_death().insert(PendingDeath { id: 0, victim, killer });
     Ok(())
 }
 
@@ -820,11 +1242,24 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
     }
     let inputs = halo_sim::wire::collapse_batches(decoded);
 
+    let mut deaths: Vec<PendingDeath> = ctx.db.pending_death().iter().collect();
+    deaths.sort_unstable_by_key(|d| d.id);
+    for death in &deaths {
+        ctx.db.pending_death().id().delete(death.id);
+    }
+    let deaths: Vec<Death> = deaths
+        .iter()
+        .map(|d| Death { victim: d.victim, killer: (d.killer != NO_KILLER).then_some(d.killer) })
+        .collect();
+
     let mut rejected = 0u32;
     if let Some(map) = current_map(ctx) {
         let mut store = TableStore { ctx, tick: marker.tick };
-        let events = step(&mut store, &inputs, &map, &mut Rng::seeded(marker.tick));
-        for event in events {
+        let mut game = TableGame { ctx };
+        let outcome =
+            rules::play(&mut store, &mut game, &map, &mut Rng::seeded(marker.tick), marker.tick, &deaths, &inputs);
+        log_events(&outcome.events);
+        for event in outcome.moves {
             let Event::MoveRejected { player, reason } = event else { continue };
             rejected += 1;
             if let Some(mut row) = ctx.db.player().id().find(player) {
@@ -853,7 +1288,13 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
         }
     }
 
-    marker.players = ctx.db.player().count() as u32;
+    if marker.tick.is_multiple_of(CLOCK_EVERY_TICKS) {
+        if let Some(mut row) = ctx.db.game_state().id().find(ONLY) {
+            row.tick = marker.tick;
+            ctx.db.game_state().id().update(row);
+        }
+    }
+    marker.players = ctx.db.standing().count() as u32;
     marker.inputs = inputs.len() as u32;
     marker.rejected = rejected;
     marker.rejected_total += rejected as u64;

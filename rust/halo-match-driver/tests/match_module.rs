@@ -388,13 +388,13 @@ fn a_player_who_joins_gets_a_seat_tied_to_their_identity() {
 }
 
 #[test]
-fn a_full_match_and_a_match_without_spawn_points_turn_joiners_away() {
+fn a_full_match_and_a_match_without_starting_locations_turn_joiners_away() {
     let Some(server) = start_server("full") else { return };
     let owner = server.connect("full");
     owner.load_map(flat_floor_map().to_bytes()).unwrap();
     let joiner = |_: u8| PlayerClient::connect(&server.uri(), "full", &server.new_account().token);
 
-    is_refused(joiner(0).join(KEY_A), "no spawn points");
+    is_refused(joiner(0).join(KEY_A), "no starting locations");
     owner.set_spawn_points(&[at(0, 1.0)]).unwrap();
     owner.set_capacity(2).unwrap();
     let (x, y, z) = (joiner(1), joiner(2), joiner(3));

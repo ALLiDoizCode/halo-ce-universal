@@ -8,12 +8,11 @@ use std::sync::OnceLock;
 
 use halo_match_driver::root_bindings::{register, DbConnection};
 use halo_match_driver::server::{build_module, build_root_module};
-use halo_sim::fixtures::flat_floor_map;
-use halo_sim::PlayerInput;
+use halo_sim::fixtures::{flat_floor_map, start_at, with_starts};
 use spacetimedb_sdk::DbContext;
 
 use crate::config::Config;
-use crate::maps::{LoadedMap, MapSource};
+use crate::maps::{default_capacity, LoadedMap, MapSource};
 
 /// A flat floor under every map name but `nomap`, which cannot be loaded.
 pub struct FlatFloors;
@@ -23,10 +22,9 @@ impl MapSource for FlatFloors {
         if name == "nomap" {
             return Err("nomap.map: no such map".into());
         }
-        let spawns = (0..4u16)
-            .map(|i| PlayerInput { player: i, position: [i as f32 * 2.0, 0.0, 0.01], yaw: 0.0, pitch: 0.0, flags: 0 })
-            .collect();
-        Ok(LoadedMap { data: flat_floor_map(), spawns })
+        // starting locations 10 world units apart (the rules keep enemies 2 apart)
+        let starts: Vec<_> = (0..4).map(|i| start_at(i as f32 * 10.0 - 15.0, 0.0, -1)).collect();
+        Ok(LoadedMap { data: with_starts(flat_floor_map(), &starts), default_capacity: default_capacity(name) })
     }
 }
 
@@ -94,6 +92,7 @@ budget = 50000
 send_threads = 2
 log_secs = 1
 handover_secs = 1
+end_secs = 1
 {rotation}
 "#,
             udp = free_udp_pair(),

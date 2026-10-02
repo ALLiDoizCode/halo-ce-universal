@@ -29,8 +29,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use halo_match_driver::module_bindings::{
-    join, leave, DbConnection, MapInfo, MapInfoTableAccess, PlayerTableAccess, RemoteReducers, RosterRow,
-    RosterTableAccess, Seat, SeatTableAccess,
+    join, leave, DbConnection, GameStateRow, GameStateTableAccess, MapInfo, MapInfoTableAccess, PlayerTableAccess,
+    RemoteReducers, RosterRow, RosterTableAccess, Seat, SeatTableAccess, StandingRow, StandingTableAccess,
 };
 use halo_match_driver::PlayerRow;
 use halo_sim::PlayerInput;
@@ -133,12 +133,104 @@ pub struct Member {
     pub name: String,
 }
 
+/// Whether a player is in the world: how the match's `standing` says they are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifeState {
+    Alive,
+    /// Dead until the tick `due_tick` of their [`Standing`].
+    Dead,
+    /// No starting location was free: they spawn in the wave at `due_tick`.
+    Waiting,
+}
+
+/// How a player is doing, from the match's `standing` table: the scoreboard,
+/// and whether they are in the world and when they will be. The server holds
+/// all of it (spawns, deaths, score).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Standing {
+    pub team: u8,
+    pub score: i32,
+    pub deaths: u32,
+    pub state: LifeState,
+    /// The server tick (the one the gateway's datagrams carry) the player
+    /// spawns on, when dead (their respawn timer's end) or waiting (the
+    /// wave); 0 when alive.
+    pub due_tick: u64,
+    /// Counts the player's spawns: a change says they are somewhere new.
+    pub spawns: u32,
+    /// The tick the player last spawned on: a state of them from before it is
+    /// from where they were.
+    pub spawned_tick: u64,
+    /// Where the player last spawned: `x y z yaw`.
+    pub spawn: [f32; 4],
+}
+
+impl Standing {
+    fn from_row(row: &StandingRow) -> Standing {
+        Standing {
+            team: row.team,
+            score: row.score,
+            deaths: row.deaths,
+            state: match row.state {
+                0 => LifeState::Alive,
+                1 => LifeState::Dead,
+                _ => LifeState::Waiting,
+            },
+            due_tick: row.due_tick,
+            spawns: row.spawns,
+            spawned_tick: row.spawned_tick,
+            spawn: [row.x, row.y, row.z, row.yaw],
+        }
+    }
+}
+
+/// The game, from the match's `game_state` table: its rules, its clock, the
+/// team scores and how it ended.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct GameInfo {
+    /// Team Slayer.
+    pub teams: bool,
+    pub score_limit: u32,
+    /// Ticks the match lasts from `started_tick`; 0 for no limit.
+    pub time_limit_ticks: u32,
+    pub started_tick: u64,
+    /// The match's tick as of the latest word of it (twice a second).
+    pub tick: u64,
+    /// Ticks between the waves.
+    pub wave_ticks: u32,
+    pub red_score: i32,
+    pub blue_score: i32,
+    /// 0 while it is on; 1 when a score limit ended it, 2 a time limit.
+    pub ending: u8,
+    /// 0 nobody, 1 a player, 2 a team.
+    pub winner_kind: u8,
+    pub winner: u16,
+}
+
+impl GameInfo {
+    fn from_row(row: &GameStateRow) -> GameInfo {
+        GameInfo {
+            teams: row.teams,
+            score_limit: row.score_limit,
+            time_limit_ticks: row.time_limit_ticks,
+            started_tick: row.started_tick,
+            tick: row.tick,
+            wave_ticks: row.wave_ticks,
+            red_score: row.red_score,
+            blue_score: row.blue_score,
+            ending: row.ending,
+            winner_kind: row.winner_kind,
+            winner: row.winner,
+        }
+    }
+}
+
 /// The other players as of now, sorted by player id: those in range. A player
 /// is in range while they are on the match's roster (one the gateway has sent
 /// but the roster does not hold yet is not shown, and one who has left the
-/// match is gone at once) and the gateway has sent a state of them within
-/// [`OUT_OF_RANGE_TICKS`] of the newest tick; one the gateway sends again is
-/// back.
+/// match is gone at once), they are alive, and the gateway has sent a state of
+/// them from after they spawned, within [`OUT_OF_RANGE_TICKS`] of the newest
+/// tick; one the gateway sends again is back.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Frame {
     /// The newest tick any datagram has carried; 0 before the first.
@@ -186,6 +278,11 @@ struct Shared {
     units: BTreeMap<u16, RemoteUnit>,
     /// Everyone in the match, from the direct connection.
     roster: BTreeMap<u16, Member>,
+    /// How each of them is doing (score, alive, when they spawn), likewise.
+    standings: BTreeMap<u16, Standing>,
+    /// The game, likewise, and when its row last came.
+    game: Option<GameInfo>,
+    game_at: Option<Instant>,
     newest_tick: u32,
     /// The Snapshots received, which every Input says.
     ack: Ack,
@@ -355,6 +452,43 @@ impl Session {
         self.inner.shared().roster.get(&player).cloned()
     }
 
+    /// How a player is doing, if the match has them.
+    pub fn standing(&self, player: u16) -> Option<Standing> {
+        self.inner.shared().standings.get(&player).copied()
+    }
+
+    /// How this session's own player is doing, once the match has said.
+    pub fn life(&self) -> Option<Standing> {
+        let shared = self.inner.shared();
+        shared.standings.get(&shared.player?).copied()
+    }
+
+    /// Everyone in the match with how they are doing and who they are, by
+    /// player id: what the scoreboard lists, in range or not.
+    pub fn scoreboard(&self) -> Vec<(u16, Standing, Member)> {
+        scoreboard_of(&self.inner.shared())
+    }
+
+    /// The game: its rules, clock and scores, once the match has said.
+    pub fn game(&self) -> Option<GameInfo> {
+        self.inner.shared().game
+    }
+
+    /// The match's tick now (30 a second): what the game's row says, which is
+    /// written twice a second, and the time since it came. A player who is not
+    /// in the world is sent no datagrams (the gateway sends the states to the
+    /// players there are), so the datagrams' tick would not be there for the
+    /// countdown to a respawn wave. 0 before the match has said.
+    pub fn server_tick(&self) -> u32 {
+        let shared = self.inner.shared();
+        match (shared.game, shared.game_at) {
+            (Some(game), Some(at)) => {
+                (game.tick + (at.elapsed().as_secs_f64() * halo_sim::TICKS_PER_SECOND as f64) as u64) as u32
+            }
+            _ => shared.newest_tick,
+        }
+    }
+
     /// Tell the gateway where this player is now; each call is the next
     /// input. `flags` is what the player says of themselves
     /// (`halo_sim::FLAG_CROUCHED`). Not sent (false) before the gateway has
@@ -394,11 +528,27 @@ impl Drop for Session {
     }
 }
 
+/// Every player of the match as of `shared`, from the slow state alone: the
+/// scoreboard lists the players the gateway does not send (the ones out of
+/// range) as it does the others.
+fn scoreboard_of(shared: &Shared) -> Vec<(u16, Standing, Member)> {
+    shared
+        .standings
+        .iter()
+        .filter_map(|(id, standing)| Some((*id, *standing, shared.roster.get(id)?.clone())))
+        .collect()
+}
+
 /// The players in range as of `shared`.
 fn frame_of(shared: &Shared) -> Frame {
     let newest = shared.newest_tick;
     let in_range = |unit: &&RemoteUnit| {
+        let in_the_world = shared.standings.get(&unit.state.player).is_none_or(|s| {
+            // (a state from before the player spawned is from where they were)
+            s.state == LifeState::Alive && (unit.tick.wrapping_sub(s.spawned_tick as u32) as i32) >= 0
+        });
         shared.roster.contains_key(&unit.state.player)
+            && in_the_world
             && (newest.wrapping_sub(unit.tick) as i32) <= OUT_OF_RANGE_TICKS as i32
     };
     Frame { tick: newest, units: shared.units.values().filter(in_range).copied().collect() }
@@ -606,6 +756,7 @@ fn connect(inner: &Arc<Inner>) -> Result<DbConnection, String> {
             // (the subscription sends the whole roster again: what was left
             // while the connection was down is no longer on it)
             connected.shared().roster.clear();
+            connected.shared().standings.clear();
             *connected.token.lock().unwrap_or_else(|p| p.into_inner()) = Some(token.into());
             *connected.identity.lock().unwrap_or_else(|p| p.into_inner()) = Some(identity.to_hex().to_string());
             if let Err(e) = connected.config.identity.save(token) {
@@ -624,6 +775,8 @@ fn connect(inner: &Arc<Inner>) -> Result<DbConnection, String> {
                 .subscribe([
                     "SELECT * FROM map_info".to_string(),
                     "SELECT * FROM roster".to_string(),
+                    "SELECT * FROM standing".to_string(),
+                    "SELECT * FROM game_state".to_string(),
                     format!("SELECT * FROM seat WHERE owner = 0x{}", identity.to_hex()),
                 ]);
             join(&connected, &connection.reducers);
@@ -709,6 +862,31 @@ fn connect(inner: &Arc<Inner>) -> Result<DbConnection, String> {
         shared.units.remove(&row.player);
     });
 
+    // how everyone is doing, and the game: slow state like the roster (they change
+    // when someone scores, dies or spawns, not with every move)
+    let standings = inner.clone();
+    let on_standing = move |row: &StandingRow| {
+        standings.shared().standings.insert(row.player, Standing::from_row(row));
+    };
+    let table = connection.db.standing();
+    let on_standing_insert = on_standing.clone();
+    table.on_insert(move |_, row| on_standing_insert(row));
+    table.on_update(move |_, _, row| on_standing(row));
+    let gone = inner.clone();
+    table.on_delete(move |_, row| {
+        gone.shared().standings.remove(&row.player);
+    });
+    let game = inner.clone();
+    let on_game = move |row: &GameStateRow| {
+        let mut shared = game.shared();
+        shared.game = Some(GameInfo::from_row(row));
+        shared.game_at = Some(Instant::now());
+    };
+    let table = connection.db.game_state();
+    let on_game_insert = on_game.clone();
+    table.on_insert(move |_, row| on_game_insert(row));
+    table.on_update(move |_, _, row| on_game(row));
+
     let own = inner.clone();
     let on_player = move |row: &PlayerRow| {
         let mut shared = own.shared();
@@ -767,6 +945,53 @@ mod tests {
         shared.units.insert(2, held(2, 10u32.wrapping_sub(OUT_OF_RANGE_TICKS + 1)));
         assert!(ids(&frame_of(&shared)).contains(&1));
         assert!(!ids(&frame_of(&shared)).contains(&2));
+    }
+
+    fn standing(state: LifeState, spawned_tick: u64) -> Standing {
+        Standing { team: 0, score: 0, deaths: 0, state, due_tick: 0, spawns: 1, spawned_tick, spawn: [0.0; 4] }
+    }
+
+    #[test]
+    fn a_dead_player_is_not_in_the_frame_and_one_who_has_spawned_is_from_their_spawn_on() {
+        let mut shared = Shared { newest_tick: 1000, ..Shared::default() };
+        for id in [1, 2, 3, 4] {
+            shared.roster.insert(id, member());
+            shared.units.insert(id, held(id, 1000));
+        }
+        shared.standings.insert(1, standing(LifeState::Alive, 10));
+        shared.standings.insert(2, standing(LifeState::Dead, 10));
+        shared.standings.insert(3, standing(LifeState::Waiting, 10));
+        // spawned at tick 1000: a state of tick 999 is from where they were
+        shared.standings.insert(4, standing(LifeState::Alive, 1000));
+        shared.units.insert(4, held(4, 999));
+        let ids = |frame: &Frame| frame.units.iter().map(|u| u.state.player).collect::<Vec<_>>();
+        assert_eq!(ids(&frame_of(&shared)), vec![1]);
+        // the state of the tick it spawned on is theirs
+        shared.units.insert(4, held(4, 1000));
+        assert_eq!(ids(&frame_of(&shared)), vec![1, 4]);
+    }
+
+    #[test]
+    fn the_scoreboard_lists_every_player_of_the_match_the_gateway_sends_or_not() {
+        let mut shared = Shared { newest_tick: 100, ..Shared::default() };
+        for id in 0..300u16 {
+            shared.roster.insert(id, Member { team: (id % 2) as u8, name: format!("Player {id}") });
+            shared.standings.insert(id, standing(if id % 5 == 0 { LifeState::Dead } else { LifeState::Alive }, 1));
+        }
+        // the gateway sends ten of them
+        for id in 1..=10u16 {
+            shared.units.insert(id, held(id, 100));
+        }
+        let frame = frame_of(&shared);
+        assert!(frame.units.len() <= 10, "{} players in range", frame.units.len());
+        let board = scoreboard_of(&shared);
+        assert_eq!(board.len(), 300, "everyone is on the scoreboard");
+        assert!(board.iter().any(|(id, _, m)| *id == 299 && m.name == "Player 299"), "one who is nowhere near");
+        // (a dead player is on it too, and says so)
+        assert_eq!(board.iter().filter(|(_, s, _)| s.state == LifeState::Dead).count(), 60);
+        // a player the roster does not have yet has no name to show
+        shared.standings.insert(500, standing(LifeState::Alive, 1));
+        assert_eq!(scoreboard_of(&shared).len(), 300);
     }
 
     #[test]

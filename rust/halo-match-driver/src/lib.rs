@@ -53,7 +53,7 @@ use halo_sim::PlayerInput;
 use module_bindings::*;
 use spacetimedb_sdk::{Compression, DbContext, Table, TableWithPrimaryKey};
 
-pub use module_bindings::{MatchTick, PlayerRow, RosterRow, Seat};
+pub use module_bindings::{GameStateRow, MatchTick, PlayerRow, RosterRow, Seat, StandingRow};
 
 pub fn now_us() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as i64
@@ -96,7 +96,7 @@ pub struct MatchClient {
 
 impl MatchClient {
     /// Connect with a fresh identity (which owns nothing: the owner-only
-    /// reducers refuse it) and subscribe to `match_tick`, `player`, `seat` and `roster`;
+    /// reducers refuse it) and subscribe to `match_tick`, `player`, `seat`, `roster`, `standing` and `game_state`;
     /// returns once the subscription has applied.
     pub fn connect(uri: &str, database: &str) -> MatchClient {
         MatchClient::connect_as(uri, database, None)
@@ -135,6 +135,8 @@ impl MatchClient {
                 "SELECT * FROM player",
                 "SELECT * FROM seat",
                 "SELECT * FROM roster",
+                "SELECT * FROM standing",
+                "SELECT * FROM game_state",
             ]);
         conn.run_threaded();
         applied
@@ -156,10 +158,39 @@ impl MatchClient {
         call_reducer("remove_players", |cb| self.conn.reducers.remove_players_then(ids, cb))
     }
 
-    /// Where players that join appear (positions and yaw of the inputs).
+    /// Where players that join appear (positions and yaw of the inputs), instead of
+    /// where the game's rules put them: for tests and tools that need players where they
+    /// say.
     pub fn set_spawn_points(&self, points: &[PlayerInput]) -> Result<(), String> {
         let batch = encode_inputs(points);
         call_reducer("set_spawn_points", |cb| self.conn.reducers.set_spawn_points_then(batch, cb))
+    }
+
+    /// Set the game (see the module's `set_game`) and begin it.
+    pub fn set_game(&self, rules: &halo_sim::rules::Rules) -> Result<(), String> {
+        call_reducer("set_game", |cb| {
+            self.conn.reducers.set_game_then(
+                rules.teams,
+                rules.score_limit,
+                rules.time_limit_ticks,
+                rules.respawn_ticks,
+                rules.respawn_growth_ticks,
+                rules.suicide_penalty_ticks,
+                rules.wave_ticks,
+                cb,
+            )
+        })
+    }
+
+    /// Start the match's clock now, and clear the scores.
+    pub fn begin_game(&self) -> Result<(), String> {
+        call_reducer("begin_game", |cb| self.conn.reducers.begin_game_then(cb))
+    }
+
+    /// Kill a player, crediting `killer` (`None`: nobody caused it).
+    pub fn report_death(&self, victim: u16, killer: Option<u16>) -> Result<(), String> {
+        let killer = killer.unwrap_or(u16::MAX);
+        call_reducer("report_death", |cb| self.conn.reducers.report_death_then(victim, killer, cb))
     }
 
     pub fn set_capacity(&self, capacity: u16) -> Result<(), String> {
@@ -217,6 +248,17 @@ impl MatchClient {
     /// subscriber's copy of the table now, by player id.
     pub fn roster(&self) -> BTreeMap<u16, RosterRow> {
         self.conn.db.roster().iter().map(|r| (r.player, r)).collect()
+    }
+
+    /// How every player is doing (score, deaths, alive or when they spawn) in the
+    /// subscriber's copy of the table now, by player id.
+    pub fn standings(&self) -> BTreeMap<u16, StandingRow> {
+        self.conn.db.standing().iter().map(|s| (s.player, s)).collect()
+    }
+
+    /// The game: its rules, its clock, the team scores and how it ended.
+    pub fn game(&self) -> Option<GameStateRow> {
+        self.conn.db.game_state().iter().next()
     }
 
     /// Submit one batch without waiting for the answer (the per-tick path).
