@@ -164,7 +164,12 @@ fn walking_up_a_slope_is_slower_by_the_tags_and_stays_on_the_ground() {
     // the direction of travel along the slope, and the tags' scale for it
     let k = rise / halo_sim::math::sqrt(1.0 + rise * rise);
     let scale = (k - m.uphill_k0) * (m.uphill_velocity_scale - 1.0) / (m.uphill_k1 - m.uphill_k0) + 1.0;
-    assert!(close(speed(&body), m.run_forward_speed * scale, 0.01), "{} not {}", speed(&body), m.run_forward_speed * scale);
+    assert!(
+        close(speed(&body), m.run_forward_speed * scale, 0.01),
+        "{} not {}",
+        speed(&body),
+        m.run_forward_speed * scale
+    );
     assert!(speed(&body) < m.run_forward_speed);
     assert!(body.velocity[2] > 0.0, "climbing");
 }

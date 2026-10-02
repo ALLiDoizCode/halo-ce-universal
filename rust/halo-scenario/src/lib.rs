@@ -37,12 +37,15 @@ pub struct Scenario {
     pub inputs: Vec<TickInput>,
 }
 
+/// An `input` line: the first tick, the tick it ends before, and its key=value words.
+type InputLine = (usize, usize, Vec<(String, f32)>);
+
 /// Read a scenario file's text (`tools/scenarios/README.md` has the format).
 /// `tolerance` lines are the comparison's, not the simulation's, and are
 /// skipped.
 pub fn parse(text: &str) -> Result<Scenario, String> {
     let (mut name, mut map, mut start, mut ticks) = (None, None, None, None);
-    let mut lines: Vec<(usize, usize, Vec<(String, f32)>)> = Vec::new();
+    let mut lines: Vec<InputLine> = Vec::new();
     for (number, line) in text.lines().enumerate() {
         let words: Vec<&str> = line.split('#').next().unwrap_or("").split_whitespace().collect();
         let Some((keyword, rest)) = words.split_first() else { continue };
@@ -78,10 +81,8 @@ pub fn parse(text: &str) -> Result<Scenario, String> {
     let (Some(name), Some(map), Some((start, start_yaw)), Some(ticks)) = (name, map, start, ticks) else {
         return Err("the scenario needs a scenario, map, start and ticks line".into());
     };
-    let mut inputs = vec![
-        TickInput { forward: 0.0, strafe: 0.0, yaw: start_yaw, pitch: 0.0, jump: false, crouch: false };
-        ticks
-    ];
+    let mut inputs =
+        vec![TickInput { forward: 0.0, strafe: 0.0, yaw: start_yaw, pitch: 0.0, jump: false, crouch: false }; ticks];
     for (first, end, keys) in lines {
         if first > end || end > ticks {
             return Err(format!("input ticks {first} to {end} are outside 0 to {ticks}"));
@@ -121,7 +122,11 @@ pub fn trace(scenario: &Scenario, map: &MapData) -> Result<String, String> {
     );
     let mut body = Body::at(scenario.start);
     for (tick, input) in scenario.inputs.iter().enumerate() {
-        walk(map, &mut body, &Controls { forward: input.forward, strafe: input.strafe, yaw: input.yaw, pitch: input.pitch });
+        walk(
+            map,
+            &mut body,
+            &Controls { forward: input.forward, strafe: input.strafe, yaw: input.yaw, pitch: input.pitch },
+        );
         let v = body.velocity_per_second();
         let state = if body.airborne { STATE_AIRBORNE } else { 0 };
         out.push_str(&format!(
@@ -148,7 +153,10 @@ mod tests {
     #[test]
     fn a_scenario_expands_to_the_inputs_of_every_tick() {
         let s = parse(WALK).unwrap();
-        assert_eq!((s.name.as_str(), s.map.as_str(), s.start, s.start_yaw, s.inputs.len()), ("walk", "flat", [1.0, 2.0, 3.0], 0.5, 6));
+        assert_eq!(
+            (s.name.as_str(), s.map.as_str(), s.start, s.start_yaw, s.inputs.len()),
+            ("walk", "flat", [1.0, 2.0, 3.0], 0.5, 6)
+        );
         let forward: Vec<f32> = s.inputs.iter().map(|i| i.forward).collect();
         assert_eq!(forward, [0.0, 0.0, 1.0, 1.0, 0.5, 0.0]);
         let yaw: Vec<f32> = s.inputs.iter().map(|i| i.yaw).collect();

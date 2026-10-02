@@ -133,8 +133,7 @@ pub fn walk(map: &MapData, body: &mut Body, controls: &Controls) {
 
     // biped_update: a throttle too small to mean it is none
     let (mut throttle_forward, mut throttle_strafe) = (controls.forward, controls.strafe);
-    if throttle_forward * throttle_forward + throttle_strafe * throttle_strafe
-        < THROTTLE_DEAD_ZONE * THROTTLE_DEAD_ZONE
+    if throttle_forward * throttle_forward + throttle_strafe * throttle_strafe < THROTTLE_DEAD_ZONE * THROTTLE_DEAD_ZONE
     {
         throttle_forward = 0.0;
         throttle_strafe = 0.0;
@@ -159,9 +158,8 @@ pub fn walk(map: &MapData, body: &mut Body, controls: &Controls) {
 
     // biped_update_physics
     let velocity = body.velocity;
-    let new_velocity: Vec3;
     let mut facing = [0.0f32; 2];
-    if body.airborne {
+    let new_velocity: Vec3 = if body.airborne {
         let desired = [
             movement_desired[0] * forward[0] - forward[1] * movement_desired[1],
             movement_desired[1] * forward[0] + movement_desired[0] * forward[1],
@@ -173,7 +171,7 @@ pub fn walk(map: &MapData, body: &mut Body, controls: &Controls) {
         } else {
             acceleration
         };
-        new_velocity = [change[0] + velocity[0], change[1] + velocity[1], velocity[2] - GRAVITY];
+        [change[0] + velocity[0], change[1] + velocity[1], velocity[2] - GRAVITY]
     } else {
         let mut speed = magnitude(&movement_desired);
         let ground_normal = body.ground_plane.n;
@@ -235,8 +233,8 @@ pub fn walk(map: &MapData, body: &mut Body, controls: &Controls) {
         change[0] -= ground_normal[0] * (1.0 / 128.0);
         change[1] -= ground_normal[1] * (1.0 / 128.0);
         change[2] -= ground_normal[2] * (1.0 / 128.0);
-        new_velocity = add(&change, &velocity);
-    }
+        add(&change, &velocity)
+    };
 
     let mut moved = move_pill(&map.collision, position, new_velocity, height, radius);
     let mut clipped_position = moved.position;
@@ -246,7 +244,8 @@ pub fn walk(map: &MapData, body: &mut Body, controls: &Controls) {
     // nothing hit, but standing on a surface: stay on the walkable surface
     // next to it that the move is about to leave it for
     if moved.contacts.is_empty() && body.support_surface != NONE {
-        if let Some(stuck) = stick_to_neighbour(map, body.support_surface, radius, &mut clipped_position, &mut clipped_velocity)
+        if let Some(stuck) =
+            stick_to_neighbour(map, body.support_surface, radius, &mut clipped_position, &mut clipped_velocity)
         {
             moved.contacts = alloc::vec![stuck];
             stick_surface = stuck.surface;
@@ -335,11 +334,8 @@ fn stick_to_neighbour(
     let surface = bsp.surfaces.get(support_surface as usize)?;
     let plane = bsp.surface_plane(support_surface as usize)?;
     let distance = -(plane.n[0] * position[0] + plane.n[1] * position[1] + plane.n[2] * position[2] - plane.d);
-    let point = [
-        plane.n[0] * distance + position[0],
-        plane.n[1] * distance + position[1],
-        plane.n[2] * distance + position[2],
-    ];
+    let point =
+        [plane.n[0] * distance + position[0], plane.n[1] * distance + position[1], plane.n[2] * distance + position[2]];
 
     let mut best: Option<(i32, Plane3d, f32)> = None;
     let mut best_distance_squared = f32::MAX;
@@ -389,8 +385,7 @@ fn stick_to_neighbour(
     }
 
     let (best_index, best_plane, best_velocity_dot) = best?;
-    if !(best_distance_squared <= (width * 2.0) * (width * 2.0) && best_velocity_dot <= 1.6 / TICKS_PER_SECOND as f32)
-    {
+    if !(best_distance_squared <= (width * 2.0) * (width * 2.0) && best_velocity_dot <= 1.6 / TICKS_PER_SECOND as f32) {
         return None;
     }
     let distance = best_plane.n[0] * position[0] + best_plane.n[1] * position[1] + best_plane.n[2] * position[2]

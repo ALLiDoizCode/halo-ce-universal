@@ -15,9 +15,7 @@ use alloc::vec::Vec;
 
 use halo_map::collision::{project, CollisionBsp, Plane3d, MAX_SPHERE_FEATURES, PROJECTION};
 
-use crate::math::{
-    along, cross, dot, magnitude, magnitude_squared, normalize, scale, sqrt, sub, Vec3, EPSILON,
-};
+use crate::math::{along, cross, dot, magnitude, magnitude_squared, normalize, scale, sqrt, sub, Vec3, EPSILON};
 
 pub(crate) const NONE: i32 = -1;
 
@@ -112,7 +110,7 @@ impl Features {
     }
 
     /// collision_features_from_point
-    fn from_point(&mut self, point: Vec3, height: f32, width: f32, origin: Origin) {
+    fn add_point(&mut self, point: Vec3, height: f32, width: f32, origin: Origin) {
         if self.spheres.len() < MAX_SPHERE_FEATURES {
             self.spheres.push(Sphere { center: point, radius: width, origin });
         }
@@ -133,7 +131,7 @@ impl Features {
     }
 
     /// collision_features_from_line
-    fn from_line(&mut self, point: Vec3, vector: Vec3, height: f32, width: f32, origin: Origin) {
+    fn add_line(&mut self, point: Vec3, vector: Vec3, height: f32, width: f32, origin: Origin) {
         if self.cylinders.len() < MAX_SPHERE_FEATURES {
             self.cylinders.push(Cylinder { base: point, height: vector, width, origin });
         }
@@ -160,8 +158,7 @@ impl Features {
         // one slab on each side of the edge's vertical wall, the second with
         // the polygon turned over
         for pass in 0..2 {
-            let (normal, d) =
-                if pass == 0 { ([n[0], n[1], 0.0], distance) } else { ([-n[0], -n[1], 0.0], -distance) };
+            let (normal, d) = if pass == 0 { ([n[0], n[1], 0.0], distance) } else { ([-n[0], -n[1], 0.0], -distance) };
             let axis = projection_axis(&normal);
             let sign = normal[axis] > 0.0;
             if self.prisms.len() < MAX_SPHERE_FEATURES {
@@ -179,7 +176,7 @@ impl Features {
     }
 
     /// collision_features_from_polygon
-    fn from_polygon(&mut self, points: &[Vec3], plane: Plane3d, height: f32, width: f32, origin: Origin) {
+    fn add_polygon(&mut self, points: &[Vec3], plane: Plane3d, height: f32, width: f32, origin: Origin) {
         if self.prisms.len() >= MAX_SPHERE_FEATURES {
             return;
         }
@@ -206,15 +203,15 @@ impl Features {
     }
 
     /// collision_features_from_vertex
-    fn from_vertex(&mut self, bsp: &CollisionBsp, vertex_index: i32, height: f32, width: f32) {
+    fn add_vertex(&mut self, bsp: &CollisionBsp, vertex_index: i32, height: f32, width: f32) {
         let vertex = &bsp.vertices[vertex_index as usize];
         let edge = &bsp.edges[vertex.first_edge as usize];
         let Some(surface) = bsp.surfaces.get(edge.surfaces[0] as usize) else { return };
-        self.from_point(vertex.point, height, width, Origin { surface: edge.surfaces[0], flags: surface.flags });
+        self.add_point(vertex.point, height, width, Origin { surface: edge.surfaces[0], flags: surface.flags });
     }
 
     /// collision_features_from_edge
-    fn from_edge(&mut self, bsp: &CollisionBsp, edge_index: i32, height: f32, width: f32) {
+    fn add_edge(&mut self, bsp: &CollisionBsp, edge_index: i32, height: f32, width: f32) {
         let edge = &bsp.edges[edge_index as usize];
         // (an edge with no surface on one side is not an edge of the closed map the engine expects)
         let (Some(surface0), Some(surface1)) =
@@ -243,16 +240,16 @@ impl Features {
             dot(&cross(&plane0.n, &plane1.n), &vector) < EPSILON
         };
         if valid {
-            self.from_line(vertex0, vector, height, width, Origin { surface: edge.surfaces[0], flags: surface0.flags });
+            self.add_line(vertex0, vector, height, width, Origin { surface: edge.surfaces[0], flags: surface0.flags });
         }
     }
 
     /// collision_features_from_surface
-    fn from_surface(&mut self, bsp: &CollisionBsp, surface_index: i32, height: f32, width: f32) {
+    fn add_surface(&mut self, bsp: &CollisionBsp, surface_index: i32, height: f32, width: f32) {
         let Some(points) = bsp.surface_polygon(surface_index as usize, MAX_PRISM_POINTS) else { return };
         let Some(plane) = bsp.surface_plane(surface_index as usize) else { return };
         let flags = bsp.surfaces[surface_index as usize].flags;
-        self.from_polygon(&points, plane, height, width, Origin { surface: surface_index, flags });
+        self.add_polygon(&points, plane, height, width, Origin { surface: surface_index, flags });
     }
 
     /// collision_features_test_vector: the first feature the point meets
@@ -476,7 +473,7 @@ impl Sphere {
         let radius = self.radius + margin;
         let w = sub(point, &self.center);
         let distance_squared = magnitude_squared(&w);
-        if !(distance_squared < radius * radius) {
+        if distance_squared >= radius * radius || distance_squared.is_nan() {
             return None;
         }
         let distance = sqrt(distance_squared);
@@ -501,11 +498,8 @@ impl Cylinder {
         {
             return None;
         }
-        let mut n = if height_squared > 0.0 {
-            sub(&w, &scale(&self.height, height_distance / height_squared))
-        } else {
-            w
-        };
+        let mut n =
+            if height_squared > 0.0 { sub(&w, &scale(&self.height, height_distance / height_squared)) } else { w };
         let radial_distance = normalize(&mut n);
         if radial_distance == 0.0 {
             n = [0.0, 0.0, 1.0];
@@ -577,9 +571,8 @@ pub(crate) fn footing(bsp: &CollisionBsp, base: Vec3, height: f32, radius: f32, 
     // on the surface they moved along for a tick or two after the ground
     // gets steeper than that, and on a climbable one (a ladder's) however
     // steep it is. A report that touches nothing at all is in the air.
-    let walkable = |plane: &Plane3d, flags: u8| {
-        flags & halo_map::collision::SURFACE_CLIMBABLE != 0 || plane.n[2] >= 0.0
-    };
+    let walkable =
+        |plane: &Plane3d, flags: u8| flags & halo_map::collision::SURFACE_CLIMBABLE != 0 || plane.n[2] >= 0.0;
     // (a pill the engine put somewhere touches what it rests on, and is a hair
     // inside it as often as a hair outside)
     let penetration = features.inside(&base, 0.0).iter().fold(0.0f32, |deepest, (depth, _, _)| deepest.max(*depth));
@@ -598,13 +591,13 @@ fn features_in_sphere(bsp: &CollisionBsp, center: Vec3, radius: f32, height: f32
         return features;
     }
     for &v in &hits.vertices {
-        features.from_vertex(bsp, v, height, width);
+        features.add_vertex(bsp, v, height, width);
     }
     for &e in &hits.edges {
-        features.from_edge(bsp, e, height, width);
+        features.add_edge(bsp, e, height, width);
     }
     for &s in &hits.surfaces {
-        features.from_surface(bsp, s, height, width);
+        features.add_surface(bsp, s, height, width);
     }
     features
 }
@@ -774,13 +767,8 @@ fn move_point(old_position: Vec3, old_velocity: Vec3, features: &Features) -> Mo
     // which way is out of the crease
     if clip_count > 1 && contacts.len() < MAX_CONTACTS {
         let last = contacts[clip_indices[clip_count - 1]];
-        let mut contact = Contact {
-            t: last.t,
-            point: last.point,
-            plane: Plane3d { n: [0.0; 3], d: 0.0 },
-            surface: NONE,
-            flags: 0,
-        };
+        let mut contact =
+            Contact { t: last.t, point: last.point, plane: Plane3d { n: [0.0; 3], d: 0.0 }, surface: NONE, flags: 0 };
         let mut minimum_k = 0.0f32;
         let mut steepest: Option<usize> = None;
         for (clip_index, &c) in clip_indices[..clip_count].iter().enumerate() {

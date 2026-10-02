@@ -9,11 +9,18 @@
 //! there were. Any difference between two builds, on any tick, changes the
 //! bytes.
 //!
+//! Beside the crowd, four players walk (`halo_sim::walk`) on a floor with a
+//! wall and on a floor with a ramp, each tick on seeded controls, turning,
+//! running, strafing and pressing into the wall and up the ramp: every tick's
+//! bodies are chained into the hash and their last ones are in the result
+//! (between the crowd's state and the hash).
+//!
 //! The scenario uses only integer work and IEEE-754 `f32` arithmetic, like the
 //! simulation itself. The `.wasm` build exports [`parity_run`] and
 //! [`parity_output`] for a host to call; the test in `tests/` does so.
 
-use halo_sim::fixtures::{flat_floor_map, FLOOR_HALF_SIZE};
+use halo_sim::fixtures::{flat_floor_map, ramp_map, walled_floor_map, FLOOR_HALF_SIZE, RAMP_START_X, WALL_X};
+use halo_sim::walk::{walk, Body, Controls};
 use halo_sim::{snapshot, step, Event, MemoryStore, Player, PlayerInput, RejectReason, Rng, Store};
 
 pub const PLAYERS: u16 = 24;
@@ -56,6 +63,19 @@ fn signed(rng: &mut Rng) -> f32 {
     rng.next_f32() - 0.5
 }
 
+/// A body as bytes: where it is, how it moves, what it stands on.
+fn body_bytes(body: &Body) -> Vec<u8> {
+    let mut out = Vec::new();
+    for v in body.position.iter().chain(&body.velocity).chain(&body.ground_plane.n) {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out.extend_from_slice(&body.ground_plane.d.to_le_bytes());
+    out.extend_from_slice(&body.landing_velocity.to_le_bytes());
+    out.extend_from_slice(&body.support_surface.to_le_bytes());
+    out.push(body.airborne as u8);
+    out
+}
+
 /// Play the scenario; see the crate docs for the layout of the result.
 pub fn run(seed: u64, ticks: u32) -> Vec<u8> {
     let map = flat_floor_map();
@@ -66,9 +86,22 @@ pub fn run(seed: u64, ticks: u32) -> Vec<u8> {
         store.set_player(Player { id, position: [x, y, 0.0], yaw: 0.0, pitch: 0.0 });
     }
 
+    // the walkers: two on each of the maps with a wall and a ramp, from a random
+    // generator of their own so that the crowd's stays as it was
+    let mut walker_rng = Rng::seeded(seed ^ 0x57A1_C0DE);
+    let maps = [walled_floor_map(), walled_floor_map(), ramp_map(0.36), ramp_map(0.36)];
+    let starts = [
+        [WALL_X - 6.0, 0.0, 0.0],
+        [WALL_X - 3.0, 4.0, 0.0],
+        [RAMP_START_X - 6.0, 0.0, 0.0],
+        [RAMP_START_X + 12.0, 3.0, 4.3],
+    ];
+    let mut walkers: Vec<(Body, Controls)> =
+        starts.iter().map(|p| (Body::at(*p), Controls { forward: 0.0, strafe: 0.0, yaw: 0.0, pitch: 0.0 })).collect();
+
     let mut chain = Fnv(0xCBF2_9CE4_8422_2325);
     let mut counts = [0u32; EVENT_KINDS];
-    for _ in 0..ticks {
+    for tick in 0..ticks {
         let mut inputs = Vec::with_capacity(PLAYERS as usize + 1);
         for id in 0..PLAYERS {
             let p = store.player(id).unwrap().position;
@@ -110,9 +143,23 @@ pub fn run(seed: u64, ticks: u32) -> Vec<u8> {
             chain.bytes(&[code]);
         }
         chain.bytes(&snapshot(&store));
+
+        // (a new heading and throttle every second or so, held in between)
+        for (i, (body, controls)) in walkers.iter_mut().enumerate() {
+            if tick % 40 == (i as u32 * 9) % 40 {
+                controls.yaw = signed(&mut walker_rng) * 2.0 * core::f32::consts::PI;
+                controls.forward = (walker_rng.next_f32() * 1.4 - 0.2).min(1.0);
+                controls.strafe = signed(&mut walker_rng) * 2.0;
+            }
+            walk(&maps[i], body, controls);
+            chain.bytes(&body_bytes(body));
+        }
     }
 
     let mut out = snapshot(&store);
+    for (body, _) in &walkers {
+        out.extend_from_slice(&body_bytes(body));
+    }
     out.extend_from_slice(&chain.0.to_le_bytes());
     for c in counts {
         out.extend_from_slice(&c.to_le_bytes());

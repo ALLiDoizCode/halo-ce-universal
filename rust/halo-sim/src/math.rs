@@ -17,7 +17,7 @@ pub fn sqrt(x: f32) -> f32 {
     if x == 0.0 || x == f32::INFINITY {
         return x;
     }
-    if !(x > 0.0) {
+    if x.is_nan() || x < 0.0 {
         return f32::NAN;
     }
     // halve the exponent for a first guess within a few percent, then Newton:
@@ -29,8 +29,11 @@ pub fn sqrt(x: f32) -> f32 {
     y
 }
 
+// (Cephes' constants as published, to more digits than an `f32` holds)
 const DP1: f32 = 0.785_156_25;
+#[allow(clippy::excessive_precision)]
 const DP2: f32 = 2.418_756_484_985_351_6e-4;
+#[allow(clippy::excessive_precision)]
 const DP3: f32 = 3.774_894_977_445_941e-8;
 const FOUR_OVER_PI: f32 = 1.273_239_5;
 
@@ -128,6 +131,8 @@ pub fn along(point: &Vec3, vector: &Vec3, t: f32) -> Vec3 {
 
 /// Scale `v` to length 1 and return its length, or leave it as it is and
 /// return 0 when it is shorter than the engine's epsilon (`normalize3d`).
+// (the engine's own form of the comparison, which a NaN length fails)
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 pub fn normalize(v: &mut Vec3) -> f32 {
     let magnitude = magnitude(v);
     if !(EPSILON > (magnitude - 0.0).abs()) {
@@ -139,6 +144,7 @@ pub fn normalize(v: &mut Vec3) -> f32 {
 }
 
 /// The same for two components (`normalize2d`).
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 pub fn normalize2(v: &mut [f32; 2]) -> f32 {
     let magnitude = sqrt(v[0] * v[0] + v[1] * v[1]);
     if !(EPSILON > (magnitude - 0.0).abs()) {

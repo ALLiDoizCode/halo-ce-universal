@@ -4,6 +4,7 @@
 //!
 //! - [`session`]: one session, in Rust terms: UDP to the gateway, SpacetimeDB
 //!   directly, each on its own thread.
+//! - [`local`]: the local player's own movement, from the map's collision data.
 //! - [`ffi`]: the same, as C functions that pass only floats, 32-bit integers
 //!   and pointers.
 //!
@@ -13,6 +14,7 @@
 //! `i686-pc-windows-msvc` (with Schannel); `tools/rust_client.py` builds it.
 
 pub mod ffi;
+pub mod local;
 pub mod session;
 
 pub use session::{Config, Frame, RemoteUnit, Session, Slow};

@@ -2,9 +2,7 @@
 //! events and state after a step and nothing else.
 
 use halo_sim::fixtures::flat_floor_map;
-use halo_sim::{
-    step, Event, MapData, MemoryStore, Player, PlayerInput, RejectReason, Rng, Store, TICKS_PER_SECOND,
-};
+use halo_sim::{step, Event, MapData, MemoryStore, Player, PlayerInput, RejectReason, Rng, Store, TICKS_PER_SECOND};
 
 fn max_step() -> f32 {
     flat_floor_map().max_move_speed() / TICKS_PER_SECOND as f32

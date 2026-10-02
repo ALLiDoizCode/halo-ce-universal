@@ -15,6 +15,8 @@ crate-type = ["staticlib", "rlib"]
 [dependencies]
 spacetimedb-sdk = "=2.10.2"
 halo-sim = { path = "../halo-sim" }
+# the player's own copy of the map, for their movement
+halo-map = { path = "../halo-map" }
 halo-wire = { path = "../halo-wire" }
 # the key pair of the UDP proof
 getrandom = "0.3"
@@ -24,7 +26,6 @@ halo-match-driver = { path = "../halo-match-driver" }
 [dev-dependencies]
 # the wire tests' simulated players, gateway and server launcher
 halo-gateway = { path = "../halo-gateway" }
-halo-map = { path = "../halo-map" }
 
 # The SDK's websocket TLS is native-tls: Schannel on Windows, which needs
 # nothing, and OpenSSL on Linux. The 32-bit game build has no 32-bit libssl to

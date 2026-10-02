@@ -17,10 +17,12 @@ input 300 360 strafe=-1.0
 input 390 450 forward=1.0 strafe=1.0
 input 480 520 forward=1.0 yaw=1.0
 
-# what the Rust simulation may differ from the C engine by (starting values,
-# to be tuned by the features' tickets as the comparison shows what is
-# reachable); a run of the C engine against itself allows none
-tolerance position 0.25
-tolerance velocity 0.25
-tolerance facing 0.02
+# what the Rust simulation may differ from the C engine by: what walking on
+# the ground reaches (its port of the engine's movement differs only by the
+# rounding of its own square root, sine and cosine: at most 6e-5 world units
+# and 4e-4 world units a second in the runs of these scenarios), with room
+# for another machine's; a run of the C engine against itself allows none
+tolerance position 0.001
+tolerance velocity 0.005
+tolerance facing 0.001
 tolerance state 0
