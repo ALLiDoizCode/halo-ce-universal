@@ -1,9 +1,11 @@
 //! The headless C client in the large-scale mode, against a real local
 //! SpacetimeDB and gateway on Blood Gulch, with simulated players walking
-//! beside it. The game starts a session from its settings, joins, and logs
-//! every player the gateway sends it once a second; this test compares that
-//! log with what the server held. It covers the adapter: the C game, the
-//! library linked into it, and the boundary between them.
+//! beside it. The game starts a session from its settings, joins, and once a
+//! second logs every player the gateway sends it and where the engine has
+//! drawn each remote player's unit; this test compares both logs with what the
+//! server held, and has one player leave the match and join it again to see
+//! the unit go and come back. It covers the adapter: the C game, the library
+//! linked into it, and the boundary between them.
 //!
 //! It needs the game's own data, so it skips itself (and says why) without
 //! all of:
@@ -27,6 +29,7 @@
 //! (`HALO_NULL_RENDERER` would need no display, but then there is no window
 //! and `HALO_EXIT_AFTER` never fires.)
 
+use halo_gateway::harness::sim_public_key;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -41,7 +44,12 @@ const OTHERS: u16 = 120;
 const ME: u16 = OTHERS;
 /// How long the game runs, from the moment its window opens, seconds. Booting
 /// and loading Blood Gulch take a few seconds of it.
-const GAME_SECONDS: u32 = 40;
+const GAME_SECONDS: u32 = 50;
+/// The player who leaves the match (seconds after the game was started) and
+/// joins it again, to go out of range and come back.
+const LEAVER: usize = 7;
+const LEAVES_AT: u64 = 20;
+const RETURNS_AT: u64 = 30;
 
 fn env_path(name: &str) -> Option<PathBuf> {
     std::env::var_os(name).map(PathBuf::from)
@@ -63,6 +71,37 @@ struct Logged {
     player: u16,
     tick: u32,
     position: [f32; 3],
+}
+
+/// What one `drawn` line says about one remote player: the tick of the state
+/// it was driven from, and where the engine had the unit.
+#[derive(Debug, Clone, PartialEq)]
+struct Drawn {
+    player: u16,
+    tick: u32,
+    position: [f32; 3],
+    team: u8,
+    /// The engine's player of the unit, if it has one.
+    engine_player: i32,
+}
+
+/// `large mode: drawn 7 tick 812 (1.2345 -2.5000 3.0000) team 1 player 3`
+fn parse_drawn_line(line: &str) -> Option<Drawn> {
+    let rest = line.split("large mode: drawn ").nth(1)?;
+    let mut words = rest.split_whitespace();
+    let player = words.next()?.parse().ok()?;
+    words.next().filter(|w| *w == "tick")?;
+    let tick = words.next()?.parse().ok()?;
+    let open = rest.find('(')?;
+    let close = rest.find(')')?;
+    let mut numbers = rest[open + 1..close].split_whitespace().map(|n| n.parse::<f32>());
+    let position = [numbers.next()?.ok()?, numbers.next()?.ok()?, numbers.next()?.ok()?];
+    let mut after = rest[close + 1..].split_whitespace();
+    after.next().filter(|w| *w == "team")?;
+    let team = after.next()?.parse().ok()?;
+    after.next().filter(|w| *w == "player")?;
+    let engine_player = after.next()?.parse().ok()?;
+    Some(Drawn { player, tick, position, team, engine_player })
 }
 
 /// `large mode: player 7 tick 812 (1.2345 -2.5000 3.0000) v (...) yaw .. pitch ..`
@@ -137,8 +176,19 @@ fn the_logged_players_are_the_ones_the_server_sent() {
     let mut truth = Truth::new(OTHERS as usize + 1);
     let until = Instant::now() + Duration::from_secs(GAME_SECONDS as u64 + 40);
     let mut exit = None;
+    let started = Instant::now();
+    let (mut left, mut returned) = (false, false);
     while exit.is_none() && Instant::now() < until {
         let Some(seen) = rig.client.next_tick(Duration::from_secs(10)) else { panic!("no tick for 10 s") };
+        // one player goes out of the match for a while: out of range
+        if !left && started.elapsed() > Duration::from_secs(LEAVES_AT) {
+            left = true;
+            rig.seats.clients[LEAVER].leave().unwrap();
+        }
+        if !returned && started.elapsed() > Duration::from_secs(RETURNS_AT) {
+            returned = true;
+            rig.seats.clients[LEAVER].join(sim_public_key(LEAVER as u16)).unwrap();
+        }
         truth.record(&seen);
         rig.walkers.sync_with_server(seen.players.values());
         crowd.send_inputs(&rig.walkers.next_inputs());
@@ -188,6 +238,57 @@ fn the_logged_players_are_the_ones_the_server_sent() {
     );
     assert!(compared > 300, "only {compared} logged players could be compared; the end of the log:\n{}", tail());
     assert!(heard_of.len() > 20, "only {} different players were logged", heard_of.len());
+
+    // the remote players the game drew: a unit for each of the others, where the
+    // server has the player (the engine's own position of the unit, which the
+    // adapter set from the library's state of that tick), in the colour of the
+    // team the roster gives
+    let roster = rig.client.roster();
+    let drawn: Vec<Drawn> = output.lines().filter_map(parse_drawn_line).collect();
+    let mut drawn_compared = 0;
+    let mut drawn_players = std::collections::BTreeSet::new();
+    for d in &drawn {
+        assert_ne!(d.player, ME, "the game drew its own player as a remote one");
+        assert_eq!(d.team, roster[&d.player].team, "player {} was drawn in a team the roster does not give", d.player);
+        let Some(at) = truth.ticks.get(&d.tick) else { continue };
+        let want = at.positions[d.player as usize].expect("a state of a player the server has");
+        for (axis, held) in want.iter().enumerate() {
+            let step = (bounds.max[axis] - bounds.min[axis]) / 65535.0 + 0.0001;
+            assert!(
+                (d.position[axis] - held).abs() <= step,
+                "tick {}, player {}, axis {axis}: drawn at {} but the server held {}",
+                d.tick,
+                d.player,
+                d.position[axis],
+                held
+            );
+        }
+        drawn_players.insert(d.player);
+        drawn_compared += 1;
+    }
+    println!("{} drawn lines, {drawn_compared} compared with the server, {} distinct players", drawn.len(), drawn_players.len());
+    assert!(drawn_compared > 300, "only {drawn_compared} drawn positions could be compared:\n{}", tail());
+    assert!(drawn_players.len() >= OTHERS as usize - 2, "only {} players drawn", drawn_players.len());
+    assert!(drawn.iter().any(|d| d.team == 0) && drawn.iter().any(|d| d.team == 1), "both teams are drawn");
+    // (the engine's players are limited to 127 remote ones; 120 are far fewer)
+    assert!(drawn.iter().all(|d| d.engine_player >= 0), "every one of the {OTHERS} has an engine player");
+
+    // the summary line says how many units, and how many have engine players
+    let summaries: Vec<&str> = output.lines().filter(|l| l.contains(" remote units, ")).collect();
+    let last = summaries.last().expect("a summary of the remote units");
+    assert!(last.contains(&format!("{OTHERS} remote units, {OTHERS} with players")), "the last summary was {last:?}");
+
+    // the one who left was out of range, then came back
+    let id = LEAVER;
+    let appeared = output.matches(&format!("large mode: player {id} appears: ")).count();
+    let gone = output.matches(&format!("large mode: player {id} is out of range: unit deleted")).count();
+    assert_eq!((appeared, gone), (2, 1), "player {id} should appear, go out of range and appear again");
+    let first_appears = output.find(&format!("large mode: player {id} appears")).unwrap();
+    let goes = output.find(&format!("large mode: player {id} is out of range")).unwrap();
+    let returns = output.rfind(&format!("large mode: player {id} appears")).unwrap();
+    assert!(first_appears < goes && goes < returns);
+    let after_return = output[returns..].lines().filter_map(parse_drawn_line).any(|d| d.player as usize == id);
+    assert!(after_return, "player {id} was not drawn after coming back");
 
     let rejected = rig.client.players()[&ME].rejected_moves;
     println!("the game's player had {rejected} moves rejected");

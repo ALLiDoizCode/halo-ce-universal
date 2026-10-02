@@ -22,6 +22,8 @@ pub mod player_row_type;
 pub mod player_table;
 pub mod remove_players_reducer;
 pub mod reset_reducer;
+pub mod roster_row_type;
+pub mod roster_table;
 pub mod seat_table;
 pub mod seat_type;
 pub mod set_away_grace_reducer;
@@ -50,6 +52,8 @@ pub use player_row_type::PlayerRow;
 pub use player_table::*;
 pub use remove_players_reducer::remove_players;
 pub use reset_reducer::reset;
+pub use roster_row_type::RosterRow;
+pub use roster_table::*;
 pub use seat_table::*;
 pub use seat_type::Seat;
 pub use set_away_grace_reducer::set_away_grace;
@@ -150,6 +154,7 @@ pub struct DbUpdate {
     map_info: __sdk::TableUpdate<MapInfo>,
     match_tick: __sdk::TableUpdate<MatchTick>,
     player: __sdk::TableUpdate<PlayerRow>,
+    roster: __sdk::TableUpdate<RosterRow>,
     seat: __sdk::TableUpdate<Seat>,
 }
 
@@ -162,6 +167,7 @@ impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
                 "map_info" => db_update.map_info.append(map_info_table::parse_table_update(table_update)?),
                 "match_tick" => db_update.match_tick.append(match_tick_table::parse_table_update(table_update)?),
                 "player" => db_update.player.append(player_table::parse_table_update(table_update)?),
+                "roster" => db_update.roster.append(roster_table::parse_table_update(table_update)?),
                 "seat" => db_update.seat.append(seat_table::parse_table_update(table_update)?),
 
                 unknown => {
@@ -186,6 +192,8 @@ impl __sdk::DbUpdate for DbUpdate {
         diff.match_tick =
             cache.apply_diff_to_table::<MatchTick>("match_tick", &self.match_tick).with_updates_by_pk(|row| &row.id);
         diff.player = cache.apply_diff_to_table::<PlayerRow>("player", &self.player).with_updates_by_pk(|row| &row.id);
+        diff.roster =
+            cache.apply_diff_to_table::<RosterRow>("roster", &self.roster).with_updates_by_pk(|row| &row.player);
         diff.seat = cache.apply_diff_to_table::<Seat>("seat", &self.seat).with_updates_by_pk(|row| &row.player);
 
         diff
@@ -197,6 +205,7 @@ impl __sdk::DbUpdate for DbUpdate {
                 "map_info" => db_update.map_info.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "match_tick" => db_update.match_tick.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "player" => db_update.player.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "roster" => db_update.roster.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "seat" => db_update.seat.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 unknown => {
                     return Err(__sdk::InternalError::unknown_name("table", unknown, "QueryRows").into());
@@ -212,6 +221,7 @@ impl __sdk::DbUpdate for DbUpdate {
                 "map_info" => db_update.map_info.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "match_tick" => db_update.match_tick.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "player" => db_update.player.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "roster" => db_update.roster.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "seat" => db_update.seat.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 unknown => {
                     return Err(__sdk::InternalError::unknown_name("table", unknown, "QueryRows").into());
@@ -229,6 +239,7 @@ pub struct AppliedDiff<'r> {
     map_info: __sdk::TableAppliedDiff<'r, MapInfo>,
     match_tick: __sdk::TableAppliedDiff<'r, MatchTick>,
     player: __sdk::TableAppliedDiff<'r, PlayerRow>,
+    roster: __sdk::TableAppliedDiff<'r, RosterRow>,
     seat: __sdk::TableAppliedDiff<'r, Seat>,
     __unused: std::marker::PhantomData<&'r ()>,
 }
@@ -242,6 +253,7 @@ impl<'r> __sdk::AppliedDiff<'r> for AppliedDiff<'r> {
         callbacks.invoke_table_row_callbacks::<MapInfo>("map_info", &self.map_info, event);
         callbacks.invoke_table_row_callbacks::<MatchTick>("match_tick", &self.match_tick, event);
         callbacks.invoke_table_row_callbacks::<PlayerRow>("player", &self.player, event);
+        callbacks.invoke_table_row_callbacks::<RosterRow>("roster", &self.roster, event);
         callbacks.invoke_table_row_callbacks::<Seat>("seat", &self.seat, event);
     }
 }
@@ -900,7 +912,8 @@ impl __sdk::SpacetimeModule for RemoteModule {
         map_info_table::register_table(client_cache);
         match_tick_table::register_table(client_cache);
         player_table::register_table(client_cache);
+        roster_table::register_table(client_cache);
         seat_table::register_table(client_cache);
     }
-    const ALL_TABLE_NAMES: &'static [&'static str] = &["map_info", "match_tick", "player", "seat"];
+    const ALL_TABLE_NAMES: &'static [&'static str] = &["map_info", "match_tick", "player", "roster", "seat"];
 }

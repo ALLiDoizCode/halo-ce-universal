@@ -188,6 +188,7 @@ void scenario_harness_record(void);
 void large_mode_new_game(void);
 void large_mode_game_tick(void);
 void large_mode_dispose(void);
+void large_mode_game_tick_after_objects(void);
 
 /* ---------- constants */
 
@@ -347,6 +348,8 @@ void game_tick(
 	the local player's input to it */
 	large_mode_game_tick();
 	objects_update();
+	/* (and what physics, suspended for them, took of the remote players' velocities) */
+	large_mode_game_tick_after_objects();
 	/* port: the comparison harness's trace of the tick */
 	scenario_harness_record();
 	players_update_after_game();
