@@ -79,6 +79,8 @@ boolean network_distributed_server_send_to_all_reliably(void *message, word size
 boolean network_distributed_server_send_to_machine(long machine_index, void *message, word size);
 boolean network_distributed_server_send_to_machine_reliably(long machine_index, void *message, word size);
 short network_distributed_server_machines(long *machine_indices, short maximum);
+/* large_mode.c's */
+boolean large_mode_active(void);
 /* players.c's */
 void network_player_attach_unit(long player_index, long unit_index);
 void network_player_detach_unit(long player_index);
@@ -3142,6 +3144,10 @@ void network_distributed_tick(
 {
 	short connection = game_connection();
 
+	/* the large-scale mode's session is the library's, whose game of one
+	machine has nothing for this to tell (port/linux/game/large_mode.c) */
+	if (large_mode_active())
+		return;
 	if (game_time_get() == distributed_last_sent_time)
 		return;
 	distributed_last_sent_time = game_time_get();
@@ -3614,8 +3620,9 @@ void network_distributed_handle_message(
 	short index;
 	word entry_size;
 
-	/* (none between games: loading, or in the menus) */
-	if (size < sizeof(header) || !game_in_progress())
+	/* (none between games: loading, or in the menus; and none in the
+	large-scale mode, which this netcode does not run in) */
+	if (size < sizeof(header) || !game_in_progress() || large_mode_active())
 		return;
 	csmemcpy(&header, message, sizeof(header));
 	/* a tick's messages in one: each as if it came alone */

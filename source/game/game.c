@@ -184,6 +184,10 @@ struct game_options;
 boolean network_game_distributed_client(void);
 /* port: the comparison harness's (port/linux/game/scenario_harness.c) */
 void scenario_harness_record(void);
+/* port: the large-scale mode's adapter (port/linux/game/large_mode.c) */
+void large_mode_new_game(void);
+void large_mode_game_tick(void);
+void large_mode_dispose(void);
 
 /* ---------- constants */
 
@@ -339,6 +343,9 @@ void game_tick(
 	editor_update();
 	hs_update();
 	recorded_animations_update();
+	/* port: the large-scale mode's players, as the library holds them, and
+	the local player's input to it */
+	large_mode_game_tick();
 	objects_update();
 	/* port: the comparison harness's trace of the tick */
 	scenario_harness_record();
@@ -596,6 +603,8 @@ void game_initialize_for_new_map(
 	(the flags of capture the flag, game_engine_initialize_for_new_map), at
 	the host's indices, not its own objects' of the last game's */
 	network_distributed_new_game();
+	/* port: the large-scale mode's session for this game */
+	large_mode_new_game();
 	render_interpolation_reset();
 	render_initialize_for_new_map();
 	structures_initialize_for_new_map();
@@ -824,6 +833,7 @@ void game_precache_new_map(
 void game_dispose_from_old_map(
 	void)
 {
+	large_mode_dispose();
 	rasterizer_dispose_from_old_map();
 	game_state_dispose_from_old_map();
 	cheats_dispose_from_old_map();

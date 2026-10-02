@@ -71,6 +71,9 @@ void network_distributed_item_statistics(long *creates, long *deletes, long *fai
 void network_damage_statistics(long *sent_reports, long *dealt_reports, long *rejected_reports, long *replayed_events);
 /* xinput_sdl.c's */
 void test_input_hold_action(int hold);
+/* large_mode.c's */
+boolean large_mode_active(void);
+char const *large_mode_map(void);
 
 enum
 {
@@ -140,6 +143,18 @@ static void network_test_read_settings(
 	char const *setting = config_string("debug.network_test");
 
 	network_test.checked = TRUE;
+	/* the large-scale mode (large_mode.c) plays a game of one machine on its
+	map, started once it is set up (the map at a second, the player at two): the
+	library brings the other players */
+	if (large_mode_active())
+	{
+		network_test.mode = _network_test_host;
+		snprintf(network_test.map_name, sizeof(network_test.map_name), "%s", large_mode_map());
+		snprintf(network_test.variant_name, sizeof(network_test.variant_name), "slayer");
+		network_test.start_delay = 3.0f;
+		platform_log("network test: the large-scale mode hosts %s", network_test.map_name);
+		return;
+	}
 	if (!strncmp(setting, "host:", 5) && setting[5])
 	{
 		char *colon;

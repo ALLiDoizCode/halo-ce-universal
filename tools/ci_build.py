@@ -48,6 +48,10 @@ def main() -> int:
     args = parser.parse_args()
 
     configure = [sys.executable, "configure.py", "--portable"]
+    # the large-scale mode's Rust library is in the Linux and Windows builds
+    # (the workflow installs the toolchain, so a build without it fails),
+    # and not yet in Android's
+    configure.append("--large-mode=off" if args.platform == "android" else "--large-mode=on")
     if args.config == "release":
         configure.append("--release")
     else:

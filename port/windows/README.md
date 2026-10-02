@@ -18,6 +18,11 @@ You do not need the Xbox SDK.
   SDK. It does not use the MSVC compiler.
 - LLVM (clang and lld), Python 3 and ninja in the `PATH`. For example,
   enter `scoop install llvm python ninja`.
+- For the large-scale mode, Rust (`scoop install rustup`) with the 32-bit
+  target (`rustup target add i686-pc-windows-msvc`). `configure.py` links the
+  mode's library when it finds `cargo`; `--large-mode=on` fails without it,
+  and `--large-mode=off` builds the game without the mode. Refer to the
+  [Linux port](../linux/README.md#large-scale-mode).
 - A network connection for the first build. `configure.py` downloads the
   Visual C++ development package of SDL 3.4.16 to
   `build/windows/third_party`.

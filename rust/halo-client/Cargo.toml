@@ -1,0 +1,33 @@
+[package]
+name = "halo-client"
+version = "0.1.0"
+description = "The large-scale mode's client library: linked into the C client as a 32-bit static library, it owns the match connection (UDP to the gateway, SpacetimeDB directly)"
+edition = "2021"
+publish = false
+
+# Its own workspace and Cargo.lock, like the gateway and the driver
+# (rust/Cargo.toml excludes it): it needs the SpacetimeDB client SDK.
+[workspace]
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+spacetimedb-sdk = "=2.10.2"
+halo-sim = { path = "../halo-sim" }
+halo-wire = { path = "../halo-wire" }
+# the generated bindings of the match module
+halo-match-driver = { path = "../halo-match-driver" }
+
+[dev-dependencies]
+# the wire tests' simulated players, gateway and server launcher
+halo-gateway = { path = "../halo-gateway" }
+halo-map = { path = "../halo-map" }
+
+# The SDK's websocket TLS is native-tls: Schannel on Windows, which needs
+# nothing, and OpenSSL on Linux. The 32-bit game build has no 32-bit libssl to
+# link, so there `vendored` builds one from source into this static library (the
+# game gains no runtime dependency on a system libssl); a build for this
+# machine, which the tests are, uses the system's.
+[target.'cfg(all(target_os = "linux", target_arch = "x86"))'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }

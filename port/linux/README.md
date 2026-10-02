@@ -22,6 +22,12 @@ To build:
   `gcc-multilib` and `libc6-dev-i386` on Debian and Ubuntu.
 - The 32-bit SDL3: `lib32-sdl3` on Arch Linux, `libsdl3-dev:i386` on Debian
   and Ubuntu.
+- For the large-scale mode (below), Rust with the 32-bit target
+  (`rustup target add i686-unknown-linux-gnu`), and perl and make, with the
+  32-bit `libgcc_s` and `libatomic` (`lib32-gcc-libs` on Arch Linux), which
+  build the OpenSSL that the library carries. `configure.py` links the
+  library when it finds `cargo`; `--large-mode=on` fails without it, and
+  `--large-mode=off` builds the game without the mode.
 
 To start the game:
 
@@ -188,11 +194,53 @@ the setting for one start of the game. It has priority over the file.
 | `debug.gpu_skip_vertex_shaders`, `debug.gpu_debug_expression`, `debug.gpu_debug_flat`, `debug.gpu_debug_texture0` | off | `HALO_GPU_SKIP_VS`, `HALO_GPU_DEBUG_EXPR`, `HALO_GPU_DEBUG_FLAT`, `HALO_GPU_DEBUG_T0` | Tools to find problems in the graphics: skip the draws of a vertex shader, or replace the output of all pixel shaders with a GLSL expression (for example `t0.rgb`). |
 | `debug.network_test`, `debug.network_test_start`, `debug.network_test_kill`, `debug.network_test_score`, `debug.network_test_shoot`, `debug.network_test_vehicle`, `debug.network_test_pickup`, `debug.network_test_pickup_weapon`, `debug.test_input` | off | `HALO_NETWORK_TEST`, `HALO_NETWORK_TEST_START`, `HALO_NETWORK_TEST_KILL`, `HALO_NETWORK_TEST_SCORE`, `HALO_NETWORK_TEST_SHOOT`, `HALO_NETWORK_TEST_VEHICLE`, `HALO_NETWORK_TEST_PICKUP`, `HALO_NETWORK_TEST_PICKUP_WEAPON`, `HALO_TEST_INPUT` | Automatic tests of system link (`game/network_test.c`). Refer to `NETCODE.md`. |
 | `debug.scenario`, `debug.scenario_trace` | `""` | `HALO_SCENARIO`, `HALO_SCENARIO_TRACE` | The comparison harness: plays a scenario file with the first player of a network test game, alone, and writes a trace of the player's state. `tools/scenario_harness.py` runs it. Refer to `tools/scenarios/README.md`. |
+| `large.map`, `large.gateway`, `large.spacetimedb`, `large.database`, `large.player`, `large.log_players` | `""`, `127.0.0.1:7777`, `http://127.0.0.1:3000`, `""`, `0`, `false` | `HALO_LARGE_MAP`, `HALO_LARGE_GATEWAY`, `HALO_LARGE_SPACETIMEDB`, `HALO_LARGE_DATABASE`, `HALO_LARGE_PLAYER`, `HALO_LARGE_LOG` | The large-scale mode. Refer to "Large-scale mode". |
 | `debug.network_latency`, `debug.network_loss` | `0` | `HALO_NETWORK_LATENCY`, `HALO_NETWORK_LOSS` | The game holds all the data that it receives for this number of milliseconds, and ignores this percentage of the datagrams. Use these settings to test the netcode as on the internet. |
 | `debug.telnet_console`, `debug.telnet_console_port` | `false`, `2323` | `HALO_TELNET_CONSOLE`, `HALO_TELNET_CONSOLE_PORT` | The game listens on 127.0.0.1, on this port, for a script console (connect with telnet). The console has no password, so only this computer can reach it. |
 
 With Mesa drivers, the game sends its GL calls through the GL thread of
 Mesa. To stop this, set the environment variable `mesa_glthread=false`.
+
+## Large-scale mode
+
+A mode for about 500 players in one match, on a dedicated server (a
+SpacetimeDB with the match module, and a UDP gateway beside it:
+`rust/halo-match-module`, `rust/halo-gateway`). The mode for up to 128 players
+is the default and is not changed. The Rust library `rust/halo-client` is
+linked into the game as a 32-bit static library (`ninja linux`; on Windows,
+`ninja windows`; not on Android) and owns the match connection: the per-tick
+state from the gateway over UDP, the slow state from SpacetimeDB directly. The
+adapter between it and the game is `game/large_mode.c`.
+
+Setting `large.map` (for example, `bloodgulch`) starts a session from the
+settings, without the lobby: the game hosts a game of one machine on that map,
+as `debug.network_test` does, and when the map is loaded the library connects to
+`large.gateway` and `large.spacetimedb`, and joins the match in the database
+`large.database` as the player `large.player`, who must be in it already.
+In this mode the distributed netcode does not run (`network_distributed.c`
+ignores its tick and its messages), and the other players are what the gateway
+sends, held by the library.
+
+Each second, the game logs one line for the session (`large mode: tick ...`:
+whether the gateway has welcomed the player and the direct connection is
+up, and what has been received) and, with `large.log_players`, a line for
+each player the gateway has sent (`large mode: player 7 tick 812 (x y z) v
+(...) yaw .. pitch ..`). The local player stands where the server has them, and
+tells the gateway where they are. The other players are not drawn yet.
+
+The test of the mode runs the game headless against a local server:
+
+```
+HALO_STDB_BIN=<SpacetimeDB 2.10.x directory> HALO_MAP_DIR=<folder of the .map files> \
+HALO_GAME_BIN=build/linux/halo HALO_DATA_ROOT=<folder that contains maps/> \
+cargo test --release --manifest-path rust/halo-client/Cargo.toml --test headless -- --nocapture
+```
+
+It starts its own SpacetimeDB and gateway on Blood Gulch with 120 simulated
+players walking, runs the game for 40 seconds in a hidden window, and compares
+every position the game logged with the server's. Without the data, it skips.
+The library's own tests (`rust/halo-client/tests/boundary.rs`) need only
+`HALO_STDB_BIN`.
 
 ## Updates
 

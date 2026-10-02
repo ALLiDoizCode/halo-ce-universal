@@ -18,10 +18,11 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .linux_build import (LINUX_PROFILE, MINIUPNPC_DIR, OPTIMISATION, WINDOWS_PROFILE, XDK_INCLUDE, lto_mode,
-                          march_flag, miniupnpc_sources, pgo_mode, compile_launcher, game_defines_and_includes,
-                          game_sources, musl_math_cflags, musl_math_sources, pgo_profile, profile_use_flags,
-                          xdk_headers)
+from . import rust_client
+from .linux_build import (LARGE_MODE_DEFINE, LARGE_MODE_SOURCE, LINUX_PROFILE, MINIUPNPC_DIR, OPTIMISATION,
+                          WINDOWS_PROFILE, XDK_INCLUDE, large_mode, lto_mode, march_flag, miniupnpc_sources, pgo_mode,
+                          compile_launcher, game_defines_and_includes, game_sources, musl_math_cflags,
+                          musl_math_sources, pgo_profile, profile_use_flags, rust_library_rule, xdk_headers)
 from .embed_assets import hud_assets_build, hud_configure_inputs
 from .ninja_syntax import Writer
 
@@ -133,7 +134,8 @@ def _load_config() -> Dict[str, Any]:
 
 def windows_configure_inputs() -> List[Path]:
     """Files whose change must re-run configure.py."""
-    return [Path(__file__), PORT_CONFIG, PORT_DIR / "src", LINUX_DIR / "src", LINUX_DIR / "game", *hud_configure_inputs()]
+    return [Path(__file__), PORT_CONFIG, PORT_DIR / "src", LINUX_DIR / "src", LINUX_DIR / "game", *hud_configure_inputs(),
+            *(folder / "src" for folder in rust_client.SOURCE_FOLDERS)]
 
 
 def _quote(path: Any) -> str:
@@ -288,6 +290,15 @@ def generate_windows_build(n: Writer, sln: Any) -> None:
         description="WINDOWS COPY $out",
     )
 
+    # the large-scale mode's client library (rust/halo-client), 32-bit, linked
+    # into the game with what it needs of Windows
+    rust_lib: Optional[Path] = None
+    if large_mode(sln):
+        rust_library_rule(n)
+        rust_lib = BUILD / rust_client.library_name(rust_client.WINDOWS_TARGET)
+        n.build(outputs=rust_lib, rule="rust_client", implicit=rust_client.source_files(),
+                variables={"target": rust_client.WINDOWS_TARGET})
+
     # the high-res HUD's textures (port/assets/hud; port/linux/src/hud_hires.c)
     embedded_assets = hud_assets_build(n, "windows", BUILD / "generated" / "hud_hires_assets.c")
 
@@ -296,6 +307,8 @@ def generate_windows_build(n: Writer, sln: Any) -> None:
     libs = " ".join(
         [_quote(SDL_DIR / "lib" / "x86" / "SDL3.lib")]
         + [f"-l{lib}" for lib in config.get("libraries", [])]
+        + ([_quote(rust_lib)] + [f"-l{lib}" for lib in rust_client.system_libraries(rust_client.WINDOWS_TARGET)]
+           if rust_lib else [])
     )
     base_ldflags = [
         "--target=i686-pc-windows-msvc",
@@ -341,7 +354,8 @@ def generate_windows_build(n: Writer, sln: Any) -> None:
         for source in game_sources(linux_config):
             add_object(source, game_cflags)
         for source in sorted(Path(linux_config["game_sources"]).glob("*.c")):
-            add_object(source, game_cflags)
+            add_object(source, f"{game_cflags} {LARGE_MODE_DEFINE}" if rust_lib and source.name == LARGE_MODE_SOURCE
+                       else game_cflags)
 
         linux_platform = Path(linux_config["platform_sources"])
         platform_cflags = " ".join([
@@ -403,6 +417,7 @@ def generate_windows_build(n: Writer, sln: Any) -> None:
             outputs=output,
             rule="windows_link",
             inputs=objects + extra_objects,
+            implicit=[rust_lib] if rust_lib else None,
             variables={"ldflags": " ".join(base_ldflags + extra_ldflags), "libs": libs},
         )
 

@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-from tools import ninja_syntax
+from tools import ninja_syntax, rust_client
 from tools.android_build import android_configure_inputs, generate_android_build
 from tools.linux_build import generate_linux_build, linux_configure_inputs
 from tools.windows_build import generate_windows_build, windows_configure_inputs
@@ -64,6 +64,15 @@ parser.add_argument(
     help="profile-guided optimisation from this profile instead",
 )
 parser.add_argument(
+    "--large-mode",
+    choices=["auto", "on", "off"],
+    default="auto",
+    help="the large-scale mode (Linux, Windows): on links the Rust client library (rust/halo-client, built with "
+    "cargo for 32-bit x86: the target i686-unknown-linux-gnu, or i686-pc-windows-msvc on Windows) into the game and "
+    "fails if there is no Rust toolchain, off builds the game without it, auto (the default) links it when cargo is "
+    "found. Android never has it",
+)
+parser.add_argument(
     "--android-ndk",
     type=str,
     help="Android NDK for `ninja android` (default: ANDROID_NDK_HOME, or the newest under the Android SDK)",
@@ -74,6 +83,8 @@ parser.add_argument(
     help="clang with the arm64_32 target for the Android guest (default: clang)",
 )
 args = parser.parse_args()
+if args.large_mode == "on" and not rust_client.available():
+    parser.error("--large-mode=on needs a Rust toolchain (cargo), and there is none")
 
 # the settings the builds read
 sln = SimpleNamespace(
@@ -85,6 +96,7 @@ sln = SimpleNamespace(
     port_portable=args.portable,
     port_pgo=args.pgo,
     port_pgo_profile=args.pgo_profile,
+    port_large_mode=args.large_mode == "on" or (args.large_mode == "auto" and rust_client.available()),
     android_ndk=args.android_ndk,
     android_guest_cc=args.android_guest_cc,
 )

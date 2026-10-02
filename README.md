@@ -114,6 +114,7 @@ Give these options to `configure.py`:
 | `--lto=thin`, `--lto=off` | Less link-time optimization. The link is faster. |
 | `--pgo=off` | No profile-guided optimization. |
 | `--pgo=train` | Records a new optimization profile. Refer to "Optimization profiles". |
+| `--large-mode=on`, `--large-mode=off` | The Linux and Windows builds link the Rust library of the large-scale mode (Rust with the 32-bit target is necessary), or do not. The default links it when `cargo` is present. Refer to the [Linux port](port/linux/README.md#large-scale-mode). |
 
 Without `--portable`, the Linux and Windows builds use all the instructions
 of the processor that builds them (`-march=native`). Such a build does not
