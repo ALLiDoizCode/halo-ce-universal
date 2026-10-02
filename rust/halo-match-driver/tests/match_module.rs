@@ -434,6 +434,39 @@ fn a_player_who_leaves_is_removed_and_no_longer_listed() {
 }
 
 #[test]
+fn the_roster_names_each_player_and_shares_the_teams_out_and_forgets_who_leaves() {
+    let Some((server, owner)) = seated_match("roster") else { return };
+    let players: Vec<PlayerClient> = (0..5)
+        .map(|_| PlayerClient::connect_unsubscribed(&server.uri(), "roster", &server.new_account().token))
+        .collect();
+    for (i, player) in players.iter().enumerate() {
+        player.join([i as u8 + 1; 32]).unwrap();
+    }
+    wait_until("five on the roster", || owner.roster().len() == 5);
+    let roster = owner.roster();
+    // a name each, and the teams alternate: red (0) and blue (1) differ by at most one player
+    assert_eq!(
+        roster.values().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+        ["Player 0", "Player 1", "Player 2", "Player 3", "Player 4"]
+    );
+    assert_eq!(roster.values().map(|r| r.team).collect::<Vec<_>>(), [0, 1, 0, 1, 0]);
+
+    // someone on the smaller team leaves, and the next to join takes it again
+    players[1].leave().unwrap();
+    wait_until("player 1 gone from the roster", || !owner.roster().contains_key(&1));
+    let sixth = PlayerClient::connect_unsubscribed(&server.uri(), "roster", &server.new_account().token);
+    sixth.join([9; 32]).unwrap();
+    wait_until("the sixth", || owner.roster().contains_key(&1));
+    assert_eq!(owner.roster()[&1].team, 1, "blue had one and red three");
+
+    // players added by the owner are on it too
+    owner.add_players(&[at(7, 3.0)]).unwrap();
+    wait_until("player 7 on the roster", || owner.roster().contains_key(&7));
+    owner.remove_players(vec![7]).unwrap();
+    wait_until("player 7 off the roster", || !owner.roster().contains_key(&7));
+}
+
+#[test]
 fn a_dropped_connection_holds_the_seat_and_the_same_identity_resumes_it() {
     let Some((server, owner)) = seated_match("rejoin") else { return };
     let a = server.new_account();

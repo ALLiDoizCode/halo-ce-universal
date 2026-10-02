@@ -278,6 +278,8 @@ symbols in this file:
 
 /* network_game_globals.c's */
 boolean network_game_distributed_client(void);
+/* port: the large-scale mode's adapter (port/linux/game/large_mode.c) */
+boolean large_mode_remote_player(long player_index);
 /* port: the comparison harness's (port/linux/game/scenario_harness.c) */
 void scenario_harness_control(long player_index, struct player_action *action);
 /* port/linux/game/network_distributed.c's */
@@ -1205,7 +1207,10 @@ long player_new(
 			csmemcpy(&player->network_player_data, network_player, sizeof(struct network_player));
 	}
 
-	machine_add_player(machine_index, player_index);
+	/* port: a player of no machine (the large-scale mode's remote players,
+	port/linux/game/large_mode.c) is on no machine's list */
+	if (machine_index != NONE)
+		machine_add_player(machine_index, player_index);
 
 	return player_index;
 }
@@ -3625,6 +3630,11 @@ void players_update_before_game(
 		data_iterator_new(&iterator, player_data);
 		while (player = data_iterator_next(&iterator))
 		{
+			/* port: the large-scale mode's remote players are driven from what
+			its library holds (port/linux/game/large_mode.c), and take no action
+			from this tick's update */
+			if (large_mode_remote_player(iterator.datum_index))
+				continue;
 			action_index = (short)iterator.datum_index;
 			action = &actions[action_index];
 			match_assert(

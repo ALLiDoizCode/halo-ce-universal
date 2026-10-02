@@ -53,7 +53,7 @@ use halo_sim::PlayerInput;
 use module_bindings::*;
 use spacetimedb_sdk::{Compression, DbContext, Table, TableWithPrimaryKey};
 
-pub use module_bindings::{MatchTick, PlayerRow, Seat};
+pub use module_bindings::{MatchTick, PlayerRow, RosterRow, Seat};
 
 pub fn now_us() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as i64
@@ -96,7 +96,7 @@ pub struct MatchClient {
 
 impl MatchClient {
     /// Connect with a fresh identity (which owns nothing: the owner-only
-    /// reducers refuse it) and subscribe to `match_tick`, `player` and `seat`;
+    /// reducers refuse it) and subscribe to `match_tick`, `player`, `seat` and `roster`;
     /// returns once the subscription has applied.
     pub fn connect(uri: &str, database: &str) -> MatchClient {
         MatchClient::connect_as(uri, database, None)
@@ -130,7 +130,12 @@ impl MatchClient {
                 let _ = applied_tx.send(());
             })
             .on_error(move |_, err| eprintln!("subscription to {database_name} failed: {err}"))
-            .subscribe(["SELECT * FROM match_tick", "SELECT * FROM player", "SELECT * FROM seat"]);
+            .subscribe([
+                "SELECT * FROM match_tick",
+                "SELECT * FROM player",
+                "SELECT * FROM seat",
+                "SELECT * FROM roster",
+            ]);
         conn.run_threaded();
         applied
             .recv_timeout(Duration::from_secs(30))
@@ -201,6 +206,12 @@ impl MatchClient {
     /// The seats in the subscriber's copy of the table now, by player id.
     pub fn seats(&self) -> BTreeMap<u16, Seat> {
         self.conn.db.seat().iter().map(|s| (s.player, s)).collect()
+    }
+
+    /// The roster (a name and a team for each player in the match) in the
+    /// subscriber's copy of the table now, by player id.
+    pub fn roster(&self) -> BTreeMap<u16, RosterRow> {
+        self.conn.db.roster().iter().map(|r| (r.player, r)).collect()
     }
 
     /// Submit one batch without waiting for the answer (the per-tick path).

@@ -153,7 +153,8 @@ static void network_test_read_settings(
 	{
 		network_test.mode = _network_test_host;
 		snprintf(network_test.map_name, sizeof(network_test.map_name), "%s", large_mode_map());
-		snprintf(network_test.variant_name, sizeof(network_test.variant_name), "slayer");
+		/* (two teams, as the mode's matches have) */
+		snprintf(network_test.variant_name, sizeof(network_test.variant_name), "team_slayer");
 		network_test.start_delay = 3.0f;
 		platform_log("network test: the large-scale mode hosts %s", network_test.map_name);
 		return;
@@ -1037,7 +1038,8 @@ void network_test_large_host(
 		network_test_read_settings();
 	network_test.mode = _network_test_host;
 	snprintf(network_test.map_name, sizeof(network_test.map_name), "%s", map);
-	snprintf(network_test.variant_name, sizeof(network_test.variant_name), "slayer");
+	/* (two teams, as the mode's matches have) */
+	snprintf(network_test.variant_name, sizeof(network_test.variant_name), "team_slayer");
 	network_test.variant_index = 0;
 	network_test.start_delay = 3.0f;
 	network_test.game_over = FALSE;
