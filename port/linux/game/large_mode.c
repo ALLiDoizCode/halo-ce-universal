@@ -219,6 +219,9 @@ enum
 	LARGE_NAME_LENGTH = 11,
 };
 
+/* the system's (milliseconds: the adapter's cost is told in cycles, which this clock gives a rate) */
+unsigned long system_milliseconds(void);
+
 /* players.c's */
 void placement_data_set_change_color(struct object_placement_data *placement_data, real_rgb_color const *change_color);
 void network_player_attach_unit(long player_index, long unit_index);
@@ -250,6 +253,15 @@ static struct
 	long create_failures;
 	long shared_time;
 	long logged_time;
+	/* what the adapter costs: the processor's cycles of this tick's update and
+	of its tail, and over the window since the last log their sum, the worst
+	tick, the ticks, and when the window began (in cycles and milliseconds) */
+	unsigned long long tick_cycles;
+	unsigned long long window_cycles;
+	unsigned long long worst_cycles;
+	unsigned long window_ticks;
+	unsigned long long window_start_cycles;
+	unsigned long window_start_ms;
 	boolean ignored_ids_said;
 } large_remote_data;
 
@@ -490,7 +502,7 @@ static void large_mode_drive_remote(
 
 /* the remote players, from what the library holds, before the objects are
 updated: a unit for each the gateway sends, driven; none for those out of range */
-static void large_mode_update_remotes(
+static void large_mode_update_remotes_work(
 	void)
 {
 	static boolean seen[LARGE_MAXIMUM_REMOTES];
@@ -549,12 +561,22 @@ static void large_mode_update_remotes(
 	}
 }
 
+static void large_mode_update_remotes(
+	void)
+{
+	unsigned long long start = __builtin_ia32_rdtsc();
+
+	large_mode_update_remotes_work();
+	large_remote_data.tick_cycles = __builtin_ia32_rdtsc() - start;
+}
+
 /* called from game_tick, after the objects are updated: the engine has no
 velocity for the units (the suspended physics zeroes it), and the motion
 sensor, which shows what moves, reads it: the library's */
 void large_mode_game_tick_after_objects(
 	void)
 {
+	unsigned long long start = __builtin_ia32_rdtsc();
 	long id;
 
 	if (!large.started || large_remote_data.count <= 0)
@@ -575,6 +597,11 @@ void large_mode_game_tick_after_objects(
 		object->object.translational_velocity.k = remote->state[5] / TICKS_PER_SECOND;
 	}
 
+	large_remote_data.tick_cycles += __builtin_ia32_rdtsc() - start;
+	large_remote_data.window_cycles += large_remote_data.tick_cycles;
+	large_remote_data.worst_cycles = MAX(large_remote_data.worst_cycles, large_remote_data.tick_cycles);
+	large_remote_data.window_ticks++;
+
 	if (game_time_get() - large_remote_data.logged_time >= TICKS_PER_SECOND)
 	{
 		large_remote_data.logged_time = game_time_get();
@@ -588,11 +615,29 @@ state it was driven from (the automated test compares these with the server's) *
 static void large_mode_log_remotes(
 	void)
 {
+	unsigned long long now_cycles = __builtin_ia32_rdtsc();
+	unsigned long now_ms = system_milliseconds();
 	long id;
 
 	platform_log("large mode: %ld remote units, %ld with players | created %ld removed %ld failures %ld",
 		large_remote_data.count, large_remote_data.players, large_remote_data.created, large_remote_data.removed,
 		large_remote_data.create_failures);
+	/* what the adapter cost a tick over the last second: the window's cycles at
+	the rate the window's own length gives them */
+	if (large_remote_data.window_start_ms && now_ms > large_remote_data.window_start_ms && large_remote_data.window_ticks)
+	{
+		double cycles_per_ms = (double)(now_cycles - large_remote_data.window_start_cycles) /
+			(double)(now_ms - large_remote_data.window_start_ms);
+
+		platform_log("large mode: the adapter cost %.3f ms a tick over %lu ticks, %.3f ms at worst",
+			(double)large_remote_data.window_cycles / cycles_per_ms / (double)large_remote_data.window_ticks,
+			large_remote_data.window_ticks, (double)large_remote_data.worst_cycles / cycles_per_ms);
+	}
+	large_remote_data.window_start_cycles = now_cycles;
+	large_remote_data.window_start_ms = now_ms;
+	large_remote_data.window_cycles = 0;
+	large_remote_data.worst_cycles = 0;
+	large_remote_data.window_ticks = 0;
 	if (!large.log_players)
 		return;
 	for (id = 0; id < LARGE_MAXIMUM_REMOTES; id++)

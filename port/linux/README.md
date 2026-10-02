@@ -222,14 +222,35 @@ seat is, proving it with an Ed25519 key pair whose public key is on the seat
 (`halo-wire`'s `auth`). The player leaves the match when the game ends.
 In this mode the distributed netcode does not run (`network_distributed.c`
 ignores its tick and its messages), and the other players are what the gateway
-sends, held by the library.
+sends, held by the library. The game plays Team Slayer, as the mode has two
+teams.
+
+The other players are drawn by the existing renderer. For each player the
+gateway sends, who is on the match's roster (a name and a team, which come over
+the direct connection: the `roster` table of the match module), the adapter
+makes a biped in the team's colour, with the engine's physics suspended: each
+tick the engine is given the controls of a player running at the velocity the
+server gave, which makes it choose and play the running animation, and the unit
+is put where the server has the player, facing as it faces. The engine's player
+records hold 128 players in all, so only 127 of the remote units have a player
+(a name over the head, a team, a contact on the motion sensor, which reads the
+unit's velocity: the adapter writes the server's after the objects are
+updated). The units nearest the local player have them, and a few are swapped
+each second as players move; the others are units alone, drawn all the same.
+A player the gateway has not sent a state of for 120 ticks is out of range, and
+one who has left the match is gone at once: the unit is deleted, and made
+afresh when the gateway sends the player again.
 
 Each second, the game logs one line for the session (`large mode: tick ...`:
 whether the gateway has welcomed the player and the direct connection is
 up, and what has been received) and, with `large.log_players`, a line for
 each player the gateway has sent (`large mode: player 7 tick 812 (x y z) v
-(...) yaw .. pitch ..`). The local player stands where the server has them, and
-tells the gateway where they are. The other players are not drawn yet.
+(...) yaw .. pitch ..`), and one for the remote units (how many there are, how
+many have players, and what the adapter cost a tick over the last second).
+With `large.log_players`, a line also says where the engine has each remote
+unit (`large mode: drawn 7 tick 812 (x y z) team 1 player 3`, with the tick of
+the state it was driven from). The local player stands where the server has
+them, and tells the gateway where they are.
 
 The test of the mode runs the game headless against a local server:
 
@@ -240,8 +261,12 @@ cargo test --release --manifest-path rust/halo-client/Cargo.toml --test headless
 ```
 
 It starts its own SpacetimeDB and gateway on Blood Gulch with 120 simulated
-seated players walking, runs the game for 40 seconds in a hidden window, and compares
-every position the game logged with the server's. Without the data, it skips.
+seated players walking (`HALO_HEADLESS_PLAYERS=500` for 500), runs the game for
+50 seconds in a hidden window, and compares every position the game logged,
+for the library and for the engine's units, with the server's. A player
+leaves the match and joins it again, to see the unit go and come back. With
+`HALO_SCREENSHOT_DIR` and `HALO_SCREENSHOT_EVERY` the game saves frames, and
+`HALO_HEADLESS_LOG` keeps its log. Without the data, it skips.
 The library's own tests (`rust/halo-client/tests/boundary.rs`) need only
 `HALO_STDB_BIN`.
 
