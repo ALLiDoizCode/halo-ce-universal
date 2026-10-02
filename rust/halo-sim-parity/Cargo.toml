@@ -1,0 +1,19 @@
+[package]
+name = "halo-sim-parity"
+version = "0.1.0"
+description = "Runs a long scripted scenario through the simulation, natively and as WebAssembly, to prove the two agree byte for byte"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+# rlib for the native run, cdylib for the .wasm the test executes
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+halo-sim = { path = "../halo-sim" }
+
+[dev-dependencies]
+# portable-dispatch: the default tail-call dispatch overflows the stack when the
+# interpreter is not optimised (it is here, via the workspace profile, but not
+# if that is overridden).
+wasmi = { version = "2", default-features = false, features = ["stable", "std", "validate", "portable-dispatch"] }
