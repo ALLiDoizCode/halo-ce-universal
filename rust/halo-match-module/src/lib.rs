@@ -27,6 +27,9 @@ use spacetimedb::{reducer, table, ReducerContext, ScheduleAt, Table};
 /// Microseconds between ticks.
 const TICK_INTERVAL_US: u64 = 1_000_000 / TICKS_PER_SECOND as u64;
 
+/// Batches that may wait for a tick before `submit_inputs` refuses more.
+const MAX_PENDING_BATCHES: u64 = 16;
+
 /// The one row of a single-row table.
 const ONLY: u8 = 0;
 
@@ -42,7 +45,7 @@ pub struct MatchTick {
     stamped_us: i64,
     /// Players in the match after the tick.
     players: u32,
-    /// Inputs this tick applied (accepted and rejected).
+    /// Inputs this tick took from the batches (accepted, rejected, or dropped because no map is loaded).
     inputs: u32,
     /// Inputs this tick rejected, including those for players who are not in
     /// the match (which no player row can count).
@@ -230,7 +233,7 @@ pub fn init(ctx: &ReducerContext) {
 /// nothing.
 #[reducer]
 pub fn load_map(ctx: &ReducerContext, data: Vec<u8>) -> Result<(), String> {
-    let map = MapData::from_bytes(&data).map_err(|e: MapError| e.to_string())?;
+    MapData::from_bytes(&data).map_err(|e: MapError| e.to_string())?;
     let mut state = match_state(ctx);
     state.map_version += 1;
     let blob = MapBlob { id: ONLY, data };
@@ -239,7 +242,8 @@ pub fn load_map(ctx: &ReducerContext, data: Vec<u8>) -> Result<(), String> {
     } else {
         ctx.db.map_blob().insert(blob);
     }
-    MAP_CACHE.with(|c| *c.borrow_mut() = Some((state.map_version, Rc::new(map))));
+    // the cache is refilled from the row by the next tick, so it can never disagree with the table
+    MAP_CACHE.with(|c| *c.borrow_mut() = None);
     ctx.db.match_state().id().update(state);
     Ok(())
 }
@@ -290,6 +294,10 @@ pub fn remove_players(ctx: &ReducerContext, ids: Vec<u16>) {
 pub fn submit_inputs(ctx: &ReducerContext, batch: Vec<u8>) -> Result<(), String> {
     if !batch.len().is_multiple_of(INPUT_SIZE) {
         return Err(format!("batch of {} bytes is not whole {INPUT_SIZE}-byte records", batch.len()));
+    }
+    // while the tick is stopped nothing drains the queue; stale inputs are of no use
+    if ctx.db.input_batch().count() >= MAX_PENDING_BATCHES {
+        return Err(format!("{MAX_PENDING_BATCHES} batches are already waiting for a tick"));
     }
     ctx.db.input_batch().insert(InputBatch { id: 0, data: batch });
     Ok(())
