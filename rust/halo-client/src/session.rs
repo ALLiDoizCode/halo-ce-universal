@@ -7,7 +7,8 @@
 //!   drops, as the same identity, so the seat comes back), calls the match's
 //!   `join` with the public key of this session's Ed25519 key pair, and reads
 //!   the player id off its `seat` row. It also keeps the map's bounds and the
-//!   player's own row current.
+//!   player's own row current, and the roster: who each player of the match
+//!   is (a name and a team), which changes only when someone joins or leaves.
 //! - The network thread, once there is a player id, joins over UDP (`join_step`,
 //!   the one place that knows the handshake: Hello, Challenge, Auth, Welcome),
 //!   then decodes every Snapshot into the newest state of each other player,
@@ -28,7 +29,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use halo_match_driver::module_bindings::{
-    join, leave, DbConnection, MapInfo, MapInfoTableAccess, PlayerTableAccess, RemoteReducers, Seat, SeatTableAccess,
+    join, leave, DbConnection, MapInfo, MapInfoTableAccess, PlayerTableAccess, RemoteReducers, RosterRow,
+    RosterTableAccess, Seat, SeatTableAccess,
 };
 use halo_match_driver::PlayerRow;
 use halo_sim::PlayerInput;
@@ -57,6 +59,11 @@ const RETRY_DELAY: Duration = Duration::from_secs(1);
 /// How long stopping a session waits for the module to take the player out.
 const LEAVE_WAIT: Duration = Duration::from_millis(300);
 
+/// How many ticks without a state of a player (the gateway sends every player at
+/// least every `STALENESS_BOUND_TICKS` ticks, loss aside) before the player is
+/// out of range: not in the [`Frame`], until the gateway sends them again.
+pub const OUT_OF_RANGE_TICKS: u32 = 3 * halo_wire::planner::STALENESS_BOUND_TICKS;
+
 /// Where a session connects.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -80,7 +87,20 @@ pub struct RemoteUnit {
     pub tick: u32,
 }
 
-/// The other players as of now, sorted by player id.
+/// Who a player is, from the match's roster.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Member {
+    /// The engine's number for the team: 0 red, 1 blue.
+    pub team: u8,
+    pub name: String,
+}
+
+/// The other players as of now, sorted by player id: those in range. A player
+/// is in range while they are on the match's roster (one the gateway has sent
+/// but the roster does not hold yet is not shown, and one who has left the
+/// match is gone at once) and the gateway has sent a state of them within
+/// [`OUT_OF_RANGE_TICKS`] of the newest tick; one the gateway sends again is
+/// back.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Frame {
     /// The newest tick any datagram has carried; 0 before the first.
@@ -126,6 +146,8 @@ struct Shared {
     /// The gateway's challenge to answer, and when it came.
     challenge: Option<(Challenge, Instant)>,
     units: BTreeMap<u16, RemoteUnit>,
+    /// Everyone in the match, from the direct connection.
+    roster: BTreeMap<u16, Member>,
     newest_tick: u32,
     /// The Snapshots received, which every Input says.
     ack: Ack,
@@ -269,10 +291,14 @@ impl Session {
         self.inner.shared().error.clone()
     }
 
-    /// The newest state of every other player the gateway has sent.
+    /// The newest state of every other player in range.
     pub fn frame(&self) -> Frame {
-        let shared = self.inner.shared();
-        Frame { tick: shared.newest_tick, units: shared.units.values().copied().collect() }
+        frame_of(&self.inner.shared())
+    }
+
+    /// Who a player is, if the roster has them.
+    pub fn member(&self, player: u16) -> Option<Member> {
+        self.inner.shared().roster.get(&player).cloned()
     }
 
     /// Tell the gateway where this player is now; each call is the next
@@ -310,6 +336,16 @@ impl Drop for Session {
             let _ = network.join();
         }
     }
+}
+
+/// The players in range as of `shared`.
+fn frame_of(shared: &Shared) -> Frame {
+    let newest = shared.newest_tick;
+    let in_range = |unit: &&RemoteUnit| {
+        shared.roster.contains_key(&unit.state.player)
+            && (newest.wrapping_sub(unit.tick) as i32) <= OUT_OF_RANGE_TICKS as i32
+    };
+    Frame { tick: newest, units: shared.units.values().filter(in_range).copied().collect() }
 }
 
 /// What a player sends to be let in, given what has come: Hello, and once the
@@ -500,18 +536,23 @@ fn connect(inner: &Arc<Inner>) -> Result<DbConnection, String> {
         // slow state is small
         .with_compression(Compression::None)
         .on_connect(move |connection, identity, token| {
+            // (the subscription sends the whole roster again: what was left
+            // while the connection was down is no longer on it)
+            connected.shared().roster.clear();
             *connected.token.lock().unwrap_or_else(|p| p.into_inner()) = Some(token.into());
             let applied = connected.clone();
             let failed = connected.clone();
-            // the map's bounds and this identity's own seat: the rest of the
-            // players reach the client by UDP, and a subscription to all of
-            // them would send every client every player's every move
+            // the map's bounds, who everyone is (which changes only when
+            // someone joins or leaves) and this identity's own seat: the rest
+            // of the players reach the client by UDP, and a subscription to all
+            // of them would send every client every player's every move
             connection
                 .subscription_builder()
                 .on_applied(move |_| applied.shared().slow.connected = true)
                 .on_error(move |_, e| failed.shared().error = Some(format!("the subscription: {e}")))
                 .subscribe([
                     "SELECT * FROM map_info".to_string(),
+                    "SELECT * FROM roster".to_string(),
                     format!("SELECT * FROM seat WHERE owner = 0x{}", identity.to_hex()),
                 ]);
             join(&connected, &connection.reducers);
@@ -560,6 +601,23 @@ fn connect(inner: &Arc<Inner>) -> Result<DbConnection, String> {
     table.on_insert(move |ctx, seat| on_seat_insert(ctx, seat));
     table.on_update(move |ctx, _, seat| on_seat(ctx, seat));
 
+    let roster = inner.clone();
+    let on_member = move |row: &RosterRow| {
+        roster.shared().roster.insert(row.player, Member { team: row.team, name: row.name.clone() });
+    };
+    let table = connection.db.roster();
+    let on_member_insert = on_member.clone();
+    table.on_insert(move |_, row| on_member_insert(row));
+    table.on_update(move |_, _, row| on_member(row));
+    let left = inner.clone();
+    table.on_delete(move |_, row| {
+        // (and what the gateway last sent of them: a player of the same id who
+        // joins later starts afresh)
+        let mut shared = left.shared();
+        shared.roster.remove(&row.player);
+        shared.units.remove(&row.player);
+    });
+
     let own = inner.clone();
     let on_player = move |row: &PlayerRow| {
         let mut shared = own.shared();
@@ -578,6 +636,56 @@ fn connect(inner: &Arc<Inner>) -> Result<DbConnection, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn held(player: u16, tick: u32) -> RemoteUnit {
+        let state = UnitState {
+            player,
+            position: [1.0, 2.0, 3.0],
+            velocity: [0.0; 3],
+            yaw: 0.0,
+            pitch: 0.0,
+            tick: 0,
+            flags: 0,
+        };
+        RemoteUnit { state, tick }
+    }
+
+    fn member() -> Member {
+        Member { team: 0, name: "x".into() }
+    }
+
+    #[test]
+    fn a_player_is_in_range_while_the_gateway_keeps_sending_them_and_comes_back_when_it_sends_again() {
+        let mut shared = Shared::default();
+        for id in [1, 2, 3] {
+            shared.roster.insert(id, member());
+        }
+        shared.newest_tick = 1000;
+        shared.units.insert(1, held(1, 1000));
+        shared.units.insert(2, held(2, 1000 - OUT_OF_RANGE_TICKS));
+        shared.units.insert(3, held(3, 1000 - OUT_OF_RANGE_TICKS - 1));
+        let ids = |frame: &Frame| frame.units.iter().map(|u| u.state.player).collect::<Vec<_>>();
+        // the last to be just in range, the next just out of it
+        assert_eq!(ids(&frame_of(&shared)), vec![1, 2]);
+        // sent again, and in range again
+        shared.units.insert(3, held(3, 1000));
+        assert_eq!(ids(&frame_of(&shared)), vec![1, 2, 3]);
+        // the ticks are a counter that wraps
+        shared.newest_tick = 10;
+        shared.units.insert(1, held(1, u32::MAX - 5));
+        shared.units.insert(2, held(2, 10u32.wrapping_sub(OUT_OF_RANGE_TICKS + 1)));
+        assert!(ids(&frame_of(&shared)).contains(&1));
+        assert!(!ids(&frame_of(&shared)).contains(&2));
+    }
+
+    #[test]
+    fn a_player_the_roster_does_not_hold_is_not_in_the_frame() {
+        let mut shared = Shared { newest_tick: 5, ..Shared::default() };
+        shared.units.insert(1, held(1, 5));
+        assert!(frame_of(&shared).units.is_empty(), "sent, but nobody knows who they are");
+        shared.roster.insert(1, member());
+        assert_eq!(frame_of(&shared).units.len(), 1);
+    }
 
     #[test]
     fn the_join_step_says_hello_and_then_answers_a_challenge_with_a_proof_the_seat_key_checks() {

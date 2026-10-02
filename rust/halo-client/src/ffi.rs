@@ -214,6 +214,33 @@ pub unsafe extern "C" fn halo_large_unit(index: u32, player: *mut u32, tick: *mu
     })
 }
 
+/// Who a player is, from the match's roster: `team` is the engine's number for
+/// it (0 red, 1 blue) and `name` is filled with the player's name, UTF-8,
+/// NUL-terminated and cut to `size`. Returns 1, or 0 when the roster does
+/// not have the player (and nothing is written).
+///
+/// # Safety
+/// `team` points to a writable `unsigned long`, `name` to `size` writable `char`s.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_member(player: u32, team: *mut u32, name: *mut c_char, size: u32) -> u32 {
+    guard(0, || {
+        let g = global();
+        if team.is_null() || name.is_null() || size == 0 {
+            return 0;
+        }
+        let Some(member) = u16::try_from(player).ok().and_then(|p| g.session.as_ref()?.member(p)) else { return 0 };
+        let bytes = member.name.as_bytes();
+        let length = bytes.len().min(size as usize - 1);
+        // SAFETY: `size` bytes are the caller's
+        unsafe {
+            *team = member.team as u32;
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), name as *mut u8, length);
+            *name.add(length) = 0;
+        }
+        1
+    })
+}
+
 /// The local player's state as the server holds it, from the direct
 /// connection: `x y z yaw pitch` in `out` (five `float`s). Returns 1, or 0
 /// before the server has said.
