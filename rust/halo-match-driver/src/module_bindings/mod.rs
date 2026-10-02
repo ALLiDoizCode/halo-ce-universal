@@ -8,10 +8,13 @@ use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 pub mod add_players_reducer;
 pub mod input_batch_type;
+pub mod join_reducer;
+pub mod leave_reducer;
 pub mod load_map_reducer;
 pub mod map_blob_type;
 pub mod map_info_table;
 pub mod map_info_type;
+pub mod match_config_type;
 pub mod match_state_type;
 pub mod match_tick_table;
 pub mod match_tick_type;
@@ -19,6 +22,13 @@ pub mod player_row_type;
 pub mod player_table;
 pub mod remove_players_reducer;
 pub mod reset_reducer;
+pub mod seat_table;
+pub mod seat_type;
+pub mod set_away_grace_reducer;
+pub mod set_capacity_reducer;
+pub mod set_gateway_reducer;
+pub mod set_spawn_points_reducer;
+pub mod spawn_point_type;
 pub mod start_reducer;
 pub mod stop_reducer;
 pub mod submit_inputs_reducer;
@@ -26,10 +36,13 @@ pub mod tick_timer_type;
 
 pub use add_players_reducer::add_players;
 pub use input_batch_type::InputBatch;
+pub use join_reducer::join;
+pub use leave_reducer::leave;
 pub use load_map_reducer::load_map;
 pub use map_blob_type::MapBlob;
 pub use map_info_table::*;
 pub use map_info_type::MapInfo;
+pub use match_config_type::MatchConfig;
 pub use match_state_type::MatchState;
 pub use match_tick_table::*;
 pub use match_tick_type::MatchTick;
@@ -37,6 +50,13 @@ pub use player_row_type::PlayerRow;
 pub use player_table::*;
 pub use remove_players_reducer::remove_players;
 pub use reset_reducer::reset;
+pub use seat_table::*;
+pub use seat_type::Seat;
+pub use set_away_grace_reducer::set_away_grace;
+pub use set_capacity_reducer::set_capacity;
+pub use set_gateway_reducer::set_gateway;
+pub use set_spawn_points_reducer::set_spawn_points;
+pub use spawn_point_type::SpawnPoint;
 pub use start_reducer::start;
 pub use stop_reducer::stop;
 pub use submit_inputs_reducer::submit_inputs;
@@ -51,9 +71,15 @@ pub use tick_timer_type::TickTimer;
 
 pub enum Reducer {
     AddPlayers { batch: Vec<u8> },
+    Join { udp_key: Vec<u8> },
+    Leave,
     LoadMap { data: Vec<u8> },
     RemovePlayers { ids: Vec<u16> },
     Reset,
+    SetAwayGrace { ticks: u64 },
+    SetCapacity { capacity: u16 },
+    SetGateway { gateway: __sdk::Identity },
+    SetSpawnPoints { batch: Vec<u8> },
     Start,
     Stop,
     SubmitInputs { batch: Vec<u8> },
@@ -67,9 +93,15 @@ impl __sdk::Reducer for Reducer {
     fn reducer_name(&self) -> &'static str {
         match self {
             Reducer::AddPlayers { .. } => "add_players",
+            Reducer::Join { .. } => "join",
+            Reducer::Leave => "leave",
             Reducer::LoadMap { .. } => "load_map",
             Reducer::RemovePlayers { .. } => "remove_players",
             Reducer::Reset => "reset",
+            Reducer::SetAwayGrace { .. } => "set_away_grace",
+            Reducer::SetCapacity { .. } => "set_capacity",
+            Reducer::SetGateway { .. } => "set_gateway",
+            Reducer::SetSpawnPoints { .. } => "set_spawn_points",
             Reducer::Start => "start",
             Reducer::Stop => "stop",
             Reducer::SubmitInputs { .. } => "submit_inputs",
@@ -82,11 +114,25 @@ impl __sdk::Reducer for Reducer {
             Reducer::AddPlayers { batch } => {
                 __sats::bsatn::to_vec(&add_players_reducer::AddPlayersArgs { batch: batch.clone() })
             }
+            Reducer::Join { udp_key } => __sats::bsatn::to_vec(&join_reducer::JoinArgs { udp_key: udp_key.clone() }),
+            Reducer::Leave => __sats::bsatn::to_vec(&leave_reducer::LeaveArgs {}),
             Reducer::LoadMap { data } => __sats::bsatn::to_vec(&load_map_reducer::LoadMapArgs { data: data.clone() }),
             Reducer::RemovePlayers { ids } => {
                 __sats::bsatn::to_vec(&remove_players_reducer::RemovePlayersArgs { ids: ids.clone() })
             }
             Reducer::Reset => __sats::bsatn::to_vec(&reset_reducer::ResetArgs {}),
+            Reducer::SetAwayGrace { ticks } => {
+                __sats::bsatn::to_vec(&set_away_grace_reducer::SetAwayGraceArgs { ticks: ticks.clone() })
+            }
+            Reducer::SetCapacity { capacity } => {
+                __sats::bsatn::to_vec(&set_capacity_reducer::SetCapacityArgs { capacity: capacity.clone() })
+            }
+            Reducer::SetGateway { gateway } => {
+                __sats::bsatn::to_vec(&set_gateway_reducer::SetGatewayArgs { gateway: gateway.clone() })
+            }
+            Reducer::SetSpawnPoints { batch } => {
+                __sats::bsatn::to_vec(&set_spawn_points_reducer::SetSpawnPointsArgs { batch: batch.clone() })
+            }
             Reducer::Start => __sats::bsatn::to_vec(&start_reducer::StartArgs {}),
             Reducer::Stop => __sats::bsatn::to_vec(&stop_reducer::StopArgs {}),
             Reducer::SubmitInputs { batch } => {
@@ -104,6 +150,7 @@ pub struct DbUpdate {
     map_info: __sdk::TableUpdate<MapInfo>,
     match_tick: __sdk::TableUpdate<MatchTick>,
     player: __sdk::TableUpdate<PlayerRow>,
+    seat: __sdk::TableUpdate<Seat>,
 }
 
 impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
@@ -115,6 +162,7 @@ impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
                 "map_info" => db_update.map_info.append(map_info_table::parse_table_update(table_update)?),
                 "match_tick" => db_update.match_tick.append(match_tick_table::parse_table_update(table_update)?),
                 "player" => db_update.player.append(player_table::parse_table_update(table_update)?),
+                "seat" => db_update.seat.append(seat_table::parse_table_update(table_update)?),
 
                 unknown => {
                     return Err(__sdk::InternalError::unknown_name("table", unknown, "DatabaseUpdate").into());
@@ -138,6 +186,7 @@ impl __sdk::DbUpdate for DbUpdate {
         diff.match_tick =
             cache.apply_diff_to_table::<MatchTick>("match_tick", &self.match_tick).with_updates_by_pk(|row| &row.id);
         diff.player = cache.apply_diff_to_table::<PlayerRow>("player", &self.player).with_updates_by_pk(|row| &row.id);
+        diff.seat = cache.apply_diff_to_table::<Seat>("seat", &self.seat).with_updates_by_pk(|row| &row.player);
 
         diff
     }
@@ -148,6 +197,7 @@ impl __sdk::DbUpdate for DbUpdate {
                 "map_info" => db_update.map_info.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "match_tick" => db_update.match_tick.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "player" => db_update.player.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "seat" => db_update.seat.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 unknown => {
                     return Err(__sdk::InternalError::unknown_name("table", unknown, "QueryRows").into());
                 }
@@ -162,6 +212,7 @@ impl __sdk::DbUpdate for DbUpdate {
                 "map_info" => db_update.map_info.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "match_tick" => db_update.match_tick.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "player" => db_update.player.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "seat" => db_update.seat.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 unknown => {
                     return Err(__sdk::InternalError::unknown_name("table", unknown, "QueryRows").into());
                 }
@@ -178,6 +229,7 @@ pub struct AppliedDiff<'r> {
     map_info: __sdk::TableAppliedDiff<'r, MapInfo>,
     match_tick: __sdk::TableAppliedDiff<'r, MatchTick>,
     player: __sdk::TableAppliedDiff<'r, PlayerRow>,
+    seat: __sdk::TableAppliedDiff<'r, Seat>,
     __unused: std::marker::PhantomData<&'r ()>,
 }
 
@@ -190,6 +242,7 @@ impl<'r> __sdk::AppliedDiff<'r> for AppliedDiff<'r> {
         callbacks.invoke_table_row_callbacks::<MapInfo>("map_info", &self.map_info, event);
         callbacks.invoke_table_row_callbacks::<MatchTick>("match_tick", &self.match_tick, event);
         callbacks.invoke_table_row_callbacks::<PlayerRow>("player", &self.player, event);
+        callbacks.invoke_table_row_callbacks::<Seat>("seat", &self.seat, event);
     }
 }
 
@@ -847,6 +900,7 @@ impl __sdk::SpacetimeModule for RemoteModule {
         map_info_table::register_table(client_cache);
         match_tick_table::register_table(client_cache);
         player_table::register_table(client_cache);
+        seat_table::register_table(client_cache);
     }
-    const ALL_TABLE_NAMES: &'static [&'static str] = &["map_info", "match_tick", "player"];
+    const ALL_TABLE_NAMES: &'static [&'static str] = &["map_info", "match_tick", "player", "seat"];
 }

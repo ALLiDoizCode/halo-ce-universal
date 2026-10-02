@@ -14,6 +14,30 @@
 //! - `map_info` (public) gives the gateway the map's world bounds, which its
 //!   position packing is relative to.
 //!
+//! # Who may call what
+//!
+//! - The **owner** (the identity that published the database, which `init`
+//!   records) runs the match: `load_map`, `add_players`, `remove_players`,
+//!   `start`, `stop`, `reset`, `set_spawn_points`, `set_capacity`,
+//!   `set_away_grace` and `set_gateway`. Any other caller is refused.
+//! - The **gateway** (the owner until `set_gateway` names another identity)
+//!   calls `submit_inputs`: nobody else may put input into the match.
+//! - **Anyone** may `join` (take a seat: a player, tied to their identity, and
+//!   the public key their UDP traffic is checked against) and `leave`.
+//! - `tick` is called by the database itself, nobody else.
+//!
+//! # Seats
+//!
+//! A `seat` (public) ties a player to a SpacetimeDB identity: the identity
+//! that `join`ed is the only one that may `leave`, and the only one to get
+//! that player id back by `join`ing again, from any connection, after a
+//! dropped one. The seat holds the player's UDP public key: the gateway
+//! checks the proof a UDP address gives against it (`halo_wire::auth`). A seat
+//! whose connection dropped is held for a grace period (30 seconds unless the
+//! owner says otherwise), then the player is removed. The player's state stays in `player`, which changes every tick,
+//! so the slow-changing seat is a separate table: the gateway and the
+//! scoreboard read both.
+//!
 //! The tests in `rust/halo-match-driver` publish and drive it against a real
 //! local SpacetimeDB.
 
@@ -24,7 +48,7 @@ use std::time::Duration;
 use halo_map::MapError;
 use halo_sim::wire::{decode_inputs, INPUT_SIZE};
 use halo_sim::{step, Event, MapData, Player, PlayerId, RejectReason, Rng, Store, TICKS_PER_SECOND};
-use spacetimedb::{reducer, table, ReducerContext, ScheduleAt, Table};
+use spacetimedb::{reducer, table, ConnectionId, Identity, ReducerContext, ScheduleAt, Table};
 
 /// Microseconds between ticks.
 const TICK_INTERVAL_US: u64 = 1_000_000 / TICKS_PER_SECOND as u64;
@@ -34,6 +58,16 @@ const MAX_PENDING_BATCHES: u64 = 16;
 
 /// The one row of a single-row table.
 const ONLY: u8 = 0;
+
+/// How long a seat is held, unless the owner says otherwise, for a player
+/// whose connection dropped: 30 seconds.
+pub const DEFAULT_AWAY_GRACE_TICKS: u64 = 30 * TICKS_PER_SECOND as u64;
+
+/// Players a match holds unless the owner says otherwise.
+pub const DEFAULT_CAPACITY: u16 = 500;
+
+/// Bytes of the UDP public key (Ed25519).
+const UDP_KEY_SIZE: usize = 32;
 
 /// The tick counter and the completion marker. Written last in every tick.
 #[table(accessor = match_tick, public)]
@@ -121,6 +155,52 @@ pub struct MatchState {
     map_version: u64,
 }
 
+/// Who a player is. One row per player who `join`ed; public, and changing
+/// only when someone joins, leaves or reconnects.
+#[table(accessor = seat, public)]
+pub struct Seat {
+    #[primary_key]
+    player: u16,
+    /// The SpacetimeDB identity this player is.
+    #[unique]
+    owner: Identity,
+    /// The player's Ed25519 public key: what their UDP address proves against.
+    udp_key: Vec<u8>,
+    /// The connection that joined last, to tell its disconnection from an older one's.
+    connection: Option<ConnectionId>,
+    /// 0 while the player is connected; otherwise one more than the tick their
+    /// connection dropped on. After the match's `away_grace_ticks` the player is removed.
+    away_since: u64,
+}
+
+/// Who runs the match. Private.
+#[table(accessor = match_config)]
+pub struct MatchConfig {
+    #[primary_key]
+    id: u8,
+    /// The publisher: may do everything but what only the gateway does.
+    owner: Identity,
+    /// The only identity that may `submit_inputs`.
+    gateway: Identity,
+    /// The most players the match holds.
+    capacity: u16,
+    /// Ticks a seat is held after its connection dropped.
+    away_grace_ticks: u64,
+}
+
+/// Where a joining player appears: the n-th of these for player id n (modulo
+/// how many there are), until a spawn rule of the game's own replaces it.
+/// Private.
+#[table(accessor = spawn_point)]
+pub struct SpawnPoint {
+    #[primary_key]
+    index: u32,
+    x: f32,
+    y: f32,
+    z: f32,
+    yaw: f32,
+}
+
 /// The map: `MapData::to_bytes`, in one row. Private; the source of truth.
 #[table(accessor = map_blob)]
 pub struct MapBlob {
@@ -180,6 +260,20 @@ fn current_map(ctx: &ReducerContext) -> Option<Rc<MapData>> {
     }
 }
 
+fn require_owner(ctx: &ReducerContext) -> Result<(), String> {
+    match ctx.db.match_config().id().find(ONLY) {
+        Some(config) if config.owner == ctx.sender() => Ok(()),
+        _ => Err("only the match's owner may do that".into()),
+    }
+}
+
+fn require_gateway(ctx: &ReducerContext) -> Result<(), String> {
+    match ctx.db.match_config().id().find(ONLY) {
+        Some(config) if config.gateway == ctx.sender() => Ok(()),
+        _ => Err("only the match's gateway may do that".into()),
+    }
+}
+
 fn to_player(row: &PlayerRow) -> Player {
     Player { id: row.id, position: [row.x, row.y, row.z], yaw: row.yaw, pitch: row.pitch }
 }
@@ -231,10 +325,23 @@ impl Store for TableStore<'_> {
         ids.sort_unstable();
         ids
     }
+
+    fn ticks_since_move(&self, id: PlayerId) -> u32 {
+        let since = self.ctx.db.player().id().find(id).map_or(1, |row| self.tick.saturating_sub(row.updated_tick));
+        since.clamp(1, u32::MAX as u64) as u32
+    }
 }
 
 #[reducer(init)]
 pub fn init(ctx: &ReducerContext) {
+    // whoever publishes owns the match, and is its gateway until they say otherwise
+    ctx.db.match_config().insert(MatchConfig {
+        id: ONLY,
+        owner: ctx.sender(),
+        gateway: ctx.sender(),
+        capacity: DEFAULT_CAPACITY,
+        away_grace_ticks: DEFAULT_AWAY_GRACE_TICKS,
+    });
     ctx.db.match_state().insert(MatchState { id: ONLY, map_version: 0 });
     ctx.db.match_tick().insert(MatchTick {
         id: ONLY,
@@ -252,6 +359,7 @@ pub fn init(ctx: &ReducerContext) {
 /// nothing.
 #[reducer]
 pub fn load_map(ctx: &ReducerContext, data: Vec<u8>) -> Result<(), String> {
+    require_owner(ctx)?;
     let map = MapData::from_bytes(&data).map_err(|e: MapError| e.to_string())?;
     let mut state = match_state(ctx);
     state.map_version += 1;
@@ -281,6 +389,7 @@ pub fn load_map(ctx: &ReducerContext, data: Vec<u8>) -> Result<(), String> {
 /// caller chooses for now.
 #[reducer]
 pub fn add_players(ctx: &ReducerContext, batch: Vec<u8>) -> Result<(), String> {
+    require_owner(ctx)?;
     let players = decode_inputs(&batch).map_err(|e| format!("batch of {} bytes is not whole records", e.0))?;
     let tick = ctx.db.match_tick().id().find(ONLY).map_or(0, |t| t.tick);
     for p in &players {
@@ -306,10 +415,142 @@ pub fn add_players(ctx: &ReducerContext, batch: Vec<u8>) -> Result<(), String> {
 }
 
 #[reducer]
-pub fn remove_players(ctx: &ReducerContext, ids: Vec<u16>) {
+pub fn remove_players(ctx: &ReducerContext, ids: Vec<u16>) -> Result<(), String> {
+    require_owner(ctx)?;
     for id in ids {
-        ctx.db.player().id().delete(id);
+        remove_player(ctx, id);
     }
+    Ok(())
+}
+
+/// Take a player out of the match, with their seat.
+fn remove_player(ctx: &ReducerContext, id: u16) {
+    ctx.db.player().id().delete(id);
+    ctx.db.seat().player().delete(id);
+}
+
+/// Take a seat in the match: a player, tied to the caller's identity.
+/// `udp_key` is the public key of an Ed25519 key pair the caller keeps; the
+/// gateway believes a UDP address is this player only if it can sign with the
+/// private one. Calling again (from this connection or a new one, after a
+/// drop) keeps the player and replaces the key. Fails if the match is full,
+/// or has no spawn point yet.
+#[reducer]
+pub fn join(ctx: &ReducerContext, udp_key: Vec<u8>) -> Result<(), String> {
+    if udp_key.len() != UDP_KEY_SIZE {
+        return Err(format!("the UDP key is {UDP_KEY_SIZE} bytes, not {}", udp_key.len()));
+    }
+    if let Some(mut seat) = ctx.db.seat().owner().find(ctx.sender()) {
+        seat.udp_key = udp_key;
+        seat.connection = ctx.connection_id();
+        seat.away_since = 0;
+        ctx.db.seat().player().update(seat);
+        return Ok(());
+    }
+    let capacity = ctx.db.match_config().id().find(ONLY).map_or(DEFAULT_CAPACITY, |c| c.capacity);
+    let Some(id) = (0..capacity).find(|id| ctx.db.player().id().find(*id).is_none()) else {
+        return Err("the match is full".into());
+    };
+    let spawns = ctx.db.spawn_point().count() as u32;
+    if spawns == 0 {
+        return Err("the match has no spawn points".into());
+    }
+    let spawn = ctx.db.spawn_point().index().find(id as u32 % spawns).ok_or("a spawn point is missing")?;
+    let tick = ctx.db.match_tick().id().find(ONLY).map_or(0, |t| t.tick);
+    ctx.db.player().insert(PlayerRow {
+        id,
+        x: spawn.x,
+        y: spawn.y,
+        z: spawn.z,
+        yaw: spawn.yaw,
+        pitch: 0.0,
+        updated_tick: tick,
+        rejected_moves: 0,
+        last_reject: REJECT_NONE,
+        last_reject_tick: 0,
+    });
+    ctx.db.seat().insert(Seat {
+        player: id,
+        owner: ctx.sender(),
+        udp_key,
+        connection: ctx.connection_id(),
+        away_since: 0,
+    });
+    Ok(())
+}
+
+/// Leave the match: the caller's player is removed, and with it their seat.
+#[reducer]
+pub fn leave(ctx: &ReducerContext) {
+    if let Some(seat) = ctx.db.seat().owner().find(ctx.sender()) {
+        remove_player(ctx, seat.player);
+    }
+}
+
+/// A connection dropped: if it was the one a seat joined from, the seat is
+/// held for the grace period for the player to come back to.
+#[reducer(client_disconnected)]
+pub fn disconnected(ctx: &ReducerContext) {
+    let Some(mut seat) = ctx.db.seat().owner().find(ctx.sender()) else { return };
+    if seat.connection != ctx.connection_id() {
+        return;
+    }
+    let tick = ctx.db.match_tick().id().find(ONLY).map_or(0, |t| t.tick);
+    seat.away_since = tick + 1;
+    ctx.db.seat().player().update(seat);
+}
+
+/// Where joining players appear, in the batch layout of `add_players` (only
+/// positions and yaw are used). Replaces the earlier ones.
+#[reducer]
+pub fn set_spawn_points(ctx: &ReducerContext, batch: Vec<u8>) -> Result<(), String> {
+    require_owner(ctx)?;
+    let points = decode_inputs(&batch).map_err(|e| format!("batch of {} bytes is not whole records", e.0))?;
+    let old: Vec<u32> = ctx.db.spawn_point().iter().map(|p| p.index).collect();
+    for index in old {
+        ctx.db.spawn_point().index().delete(index);
+    }
+    for (index, p) in points.iter().enumerate() {
+        ctx.db.spawn_point().insert(SpawnPoint {
+            index: index as u32,
+            x: p.position[0],
+            y: p.position[1],
+            z: p.position[2],
+            yaw: p.yaw,
+        });
+    }
+    Ok(())
+}
+
+/// The most players the match holds (500 to start with).
+#[reducer]
+pub fn set_capacity(ctx: &ReducerContext, capacity: u16) -> Result<(), String> {
+    require_owner(ctx)?;
+    let mut config = ctx.db.match_config().id().find(ONLY).ok_or("the match is not initialised")?;
+    config.capacity = capacity;
+    ctx.db.match_config().id().update(config);
+    Ok(())
+}
+
+/// How many ticks a seat is held after its connection dropped (900, 30
+/// seconds, to start with); the seats are checked once a second.
+#[reducer]
+pub fn set_away_grace(ctx: &ReducerContext, ticks: u64) -> Result<(), String> {
+    require_owner(ctx)?;
+    let mut config = ctx.db.match_config().id().find(ONLY).ok_or("the match is not initialised")?;
+    config.away_grace_ticks = ticks;
+    ctx.db.match_config().id().update(config);
+    Ok(())
+}
+
+/// Name the identity that runs the gateway: the only one that may `submit_inputs` from now on.
+#[reducer]
+pub fn set_gateway(ctx: &ReducerContext, gateway: Identity) -> Result<(), String> {
+    require_owner(ctx)?;
+    let mut config = ctx.db.match_config().id().find(ONLY).ok_or("the match is not initialised")?;
+    config.gateway = gateway;
+    ctx.db.match_config().id().update(config);
+    Ok(())
 }
 
 /// One tick's inputs for every player, as a batch of `halo_sim::wire`
@@ -318,6 +559,7 @@ pub fn remove_players(ctx: &ReducerContext, ids: Vec<u16>) {
 /// duplicate); the next [`tick`] consumes all of them.
 #[reducer]
 pub fn submit_inputs(ctx: &ReducerContext, batch: Vec<u8>) -> Result<(), String> {
+    require_gateway(ctx)?;
     if !batch.len().is_multiple_of(INPUT_SIZE) {
         return Err(format!("batch of {} bytes is not whole {INPUT_SIZE}-byte records", batch.len()));
     }
@@ -331,30 +573,35 @@ pub fn submit_inputs(ctx: &ReducerContext, batch: Vec<u8>) -> Result<(), String>
 
 /// Start ticking at 30 Hz. Does nothing if it already is.
 #[reducer]
-pub fn start(ctx: &ReducerContext) {
+pub fn start(ctx: &ReducerContext) -> Result<(), String> {
+    require_owner(ctx)?;
     if ctx.db.tick_timer().iter().next().is_none() {
         ctx.db.tick_timer().insert(TickTimer {
             scheduled_id: 0,
             scheduled_at: ScheduleAt::Interval(Duration::from_micros(TICK_INTERVAL_US).into()),
         });
     }
+    Ok(())
 }
 
 #[reducer]
-pub fn stop(ctx: &ReducerContext) {
+pub fn stop(ctx: &ReducerContext) -> Result<(), String> {
+    require_owner(ctx)?;
     let timers: Vec<u64> = ctx.db.tick_timer().iter().map(|t| t.scheduled_id).collect();
     for id in timers {
         ctx.db.tick_timer().scheduled_id().delete(id);
     }
+    Ok(())
 }
 
-/// Empty the match: no players, no pending inputs, counters back to zero. The
-/// map and the running state are kept.
+/// Empty the match: no players or seats, no pending inputs, counters back to
+/// zero. The map, the running state and the match's configuration are kept.
 #[reducer]
-pub fn reset(ctx: &ReducerContext) {
+pub fn reset(ctx: &ReducerContext) -> Result<(), String> {
+    require_owner(ctx)?;
     let ids: Vec<u16> = ctx.db.player().iter().map(|p| p.id).collect();
     for id in ids {
-        ctx.db.player().id().delete(id);
+        remove_player(ctx, id);
     }
     let batches: Vec<u64> = ctx.db.input_batch().iter().map(|b| b.id).collect();
     for id in batches {
@@ -362,6 +609,7 @@ pub fn reset(ctx: &ReducerContext) {
     }
     let blank = MatchTick { id: ONLY, tick: 0, stamped_us: 0, players: 0, inputs: 0, rejected: 0, rejected_total: 0 };
     ctx.db.match_tick().id().update(blank);
+    Ok(())
 }
 
 /// One simulation tick (scheduled; the server calls it, nobody else may).
@@ -401,6 +649,21 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
         }
     } else if !inputs.is_empty() {
         log::warn!("no map is loaded: dropped {} inputs", inputs.len());
+    }
+
+    // once a second: seats whose player has been away for the grace period go
+    if marker.tick.is_multiple_of(TICKS_PER_SECOND as u64) {
+        let grace = ctx.db.match_config().id().find(ONLY).map_or(DEFAULT_AWAY_GRACE_TICKS, |c| c.away_grace_ticks);
+        let gone: Vec<u16> = ctx
+            .db
+            .seat()
+            .iter()
+            .filter(|s| s.away_since != 0 && marker.tick >= s.away_since.saturating_add(grace))
+            .map(|s| s.player)
+            .collect();
+        for id in gone {
+            remove_player(ctx, id);
+        }
     }
 
     marker.players = ctx.db.player().count() as u32;

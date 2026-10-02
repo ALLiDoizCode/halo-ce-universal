@@ -35,6 +35,15 @@ pub trait Store {
     fn remove_player(&mut self, id: PlayerId) -> bool;
     /// The ids of all players in ascending order.
     fn player_ids(&self) -> Vec<PlayerId>;
+    /// Ticks since the player's last accepted move (at least 1; 1 for a
+    /// player who moved last tick). A move may cover that many ticks' worth of
+    /// the speed bound, up to [`crate::MAX_CATCH_UP_TICKS`], so that a player
+    /// whose input was lost or skipped is not refused at the next one. A store
+    /// that does not track time need not override it: the bound is then one
+    /// tick's.
+    fn ticks_since_move(&self, _id: PlayerId) -> u32 {
+        1
+    }
 }
 
 /// A store in memory. Iteration is in id order, so it is deterministic.

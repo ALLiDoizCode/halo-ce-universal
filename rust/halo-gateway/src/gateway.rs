@@ -8,18 +8,25 @@
 //!   it hands the module every input that arrived since the last tick as
 //!   one `submit_inputs` call, then packs the tick's states and hands the
 //!   work to the sending threads. It never sends.
-//! - One receiving thread: Hellos bind addresses to players, Inputs go onto
-//!   the board (newest wins, late ones are dropped).
+//! - One receiving thread: a Hello is answered with a Challenge, an Auth
+//!   that proves the sender holds the private key of the player's seat binds
+//!   its address to the player (and is answered with a Welcome), and Inputs
+//!   from a bound address go onto the board (newest wins, late ones are
+//!   dropped) and bring in the acknowledgements they carry.
 //! - `send_threads` sending threads, each owning the recipients whose id
 //!   is congruent to its index and each recipient's [`Planner`].
+//!
+//! A player is unbound, and no longer sent to, when their player row goes
+//! (they left, or their seat's grace period ran out) and when their address
+//! has been silent for `idle_timeout`.
 //!
 //! Inputs are submitted the moment a tick completes, so at most one batch
 //! reaches the module per tick, and an input that arrives during tick N is
 //! applied by tick N+1 or N+2.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
+use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
@@ -29,12 +36,16 @@ use halo_match_driver::module_bindings::*;
 use halo_match_driver::now_us;
 use halo_sim::wire::encode_inputs;
 use halo_sim::TICKS_PER_SECOND;
-use halo_wire::datagram::{ClientMessage, Welcome, IP_UDP_OVERHEAD, MAX_DATAGRAM};
+use halo_wire::auth::{cookie, cookie_eq, verify_challenge, CHALLENGE_LIFETIME_US};
+use halo_wire::datagram::{
+    Challenge, ClientMessage, Refused, Welcome, IP_UDP_OVERHEAD, MAX_DATAGRAM, REFUSED_BAD_PROOF, REFUSED_NO_SEAT,
+    REFUSED_STALE,
+};
 use halo_wire::planner::{Entry, Observer, Planner, PlannerConfig};
 use halo_wire::unit::{Bounds, PackedState, UnitState};
 use spacetimedb_sdk::{Compression, DbContext, Table, TableWithPrimaryKey};
 
-use crate::board::{Bound, InputBoard, Sessions};
+use crate::board::{AckBoard, Bound, InputBoard, Recipient, Sessions};
 use crate::stats::{Stats, StatsSnapshot};
 use crate::transport::Transport;
 
@@ -44,6 +55,13 @@ pub struct GatewayConfig {
     pub spacetimedb_uri: String,
     /// The match's database.
     pub database: String,
+    /// The token of the identity the match's `submit_inputs` accepts (the
+    /// match's gateway, which is its owner until the owner names another with
+    /// `set_gateway`). Without one the connection is a new anonymous
+    /// identity, which the match refuses.
+    pub token: Option<String>,
+    /// A player whose address is silent this long is unbound and no longer sent to.
+    pub idle_timeout: Duration,
     /// What a player may be sent, in bytes a second counting IP and UDP headers.
     pub budget_bytes_per_second: u32,
     /// Threads that send; the recipients are divided among them.
@@ -57,6 +75,8 @@ impl GatewayConfig {
         GatewayConfig {
             spacetimedb_uri: spacetimedb_uri.into(),
             database: database.into(),
+            token: None,
+            idle_timeout: Duration::from_secs(10),
             budget_bytes_per_second: 90_000,
             send_threads: 4,
             planner: PlannerConfig::with_budget(90_000),
@@ -68,6 +88,13 @@ impl GatewayConfig {
 struct Shared {
     sessions: RwLock<Sessions>,
     board: Mutex<InputBoard>,
+    acks: Mutex<AckBoard>,
+    /// Makes cookies: unknown to anyone else, so that a challenge cannot be forged.
+    secret: [u8; 32],
+    /// The stamp of the newest challenge made, so that every one is later than the last.
+    last_stamp: AtomicU64,
+    /// The gateway's clock for idle checks.
+    started: Instant,
     bounds: RwLock<Option<Bounds>>,
     /// Ticks handed to the sending threads and not yet finished.
     in_flight: AtomicUsize,
@@ -107,6 +134,14 @@ impl Gateway {
         let shared = Arc::new(Shared {
             sessions: RwLock::new(Sessions::default()),
             board: Mutex::new(InputBoard::default()),
+            acks: Mutex::new(AckBoard::default()),
+            secret: {
+                let mut secret = [0u8; 32];
+                getrandom::fill(&mut secret).map_err(|e| format!("no random source for the challenge secret: {e}"))?;
+                secret
+            },
+            last_stamp: AtomicU64::new(0),
+            started: Instant::now(),
             bounds: RwLock::new(None),
             in_flight: AtomicUsize::new(0),
             stop: AtomicBool::new(false),
@@ -135,6 +170,7 @@ impl Gateway {
         let conn = DbConnection::builder()
             .with_uri(config.spacetimedb_uri.as_str())
             .with_database_name(config.database.as_str())
+            .with_token(config.token.clone())
             // on loopback compression only costs CPU; and the match's ticks
             // need not wait for the database's log to reach the disk
             .with_compression(Compression::None)
@@ -146,11 +182,15 @@ impl Gateway {
             conn.db.map_info().on_insert(move |_, row| set_bounds(&on_insert, row));
             let on_update = shared.clone();
             conn.db.map_info().on_update(move |_, _, row| set_bounds(&on_update, row));
+            // a player who is gone from the match is no longer sent to
+            let on_delete = shared.clone();
+            conn.db.player().on_delete(move |_, row| unbind(&on_delete, row.id));
         }
         {
             let shared = shared.clone();
             let mut previous: HashMap<u16, ([f32; 3], u64)> = HashMap::new();
             let mut last_tick = 0u64;
+            let idle_ms = config.idle_timeout.as_millis() as u64;
             conn.db.match_tick().on_update(move |ctx, _old, marker| {
                 let started = Instant::now();
                 let tick = marker.tick;
@@ -161,6 +201,15 @@ impl Gateway {
                 }
                 last_tick = tick;
                 stats.record_arrival(now_us() - marker.stamped_us);
+
+                // once a second: players whose address has gone quiet
+                if tick % TICKS_PER_SECOND as u64 == 0 {
+                    let idle = shared.sessions.read().unwrap().idle(shared.now_ms(), idle_ms);
+                    for player in idle {
+                        stats.sessions_expired.fetch_add(1, Relaxed);
+                        unbind(&shared, player);
+                    }
+                }
 
                 // the batch first: the sooner the module has it the better
                 let inputs = shared.board.lock().unwrap().take_fresh();
@@ -226,7 +275,12 @@ impl Gateway {
                 let _ = applied_tx.send(());
             })
             .on_error(|_, err| eprintln!("gateway: subscription error: {err}"))
-            .subscribe(["SELECT * FROM match_tick", "SELECT * FROM player", "SELECT * FROM map_info"]);
+            .subscribe([
+                "SELECT * FROM match_tick",
+                "SELECT * FROM player",
+                "SELECT * FROM map_info",
+                "SELECT * FROM seat",
+            ]);
         conn.run_threaded();
         applied.recv_timeout(Duration::from_secs(30)).map_err(|_| "the subscription did not apply".to_string())?;
         let conn = Arc::new(conn);
@@ -284,6 +338,43 @@ impl Drop for Gateway {
     }
 }
 
+impl Shared {
+    fn now_ms(&self) -> u64 {
+        self.started.elapsed().as_millis() as u64
+    }
+
+    /// A stamp later than any before it: the clock's microseconds, or one more than the last.
+    fn next_stamp(&self) -> u64 {
+        let now = now_us() as u64;
+        let mut last = self.last_stamp.load(Relaxed);
+        loop {
+            let stamp = now.max(last + 1);
+            match self.last_stamp.compare_exchange(last, stamp, Relaxed, Relaxed) {
+                Ok(_) => return stamp,
+                Err(seen) => last = seen,
+            }
+        }
+    }
+}
+
+/// Stop playing a player, and forget what was kept for their session.
+fn unbind(shared: &Shared, player: u16) {
+    if shared.sessions.write().unwrap().unbind(player) {
+        shared.board.lock().unwrap().forget(player);
+        shared.acks.lock().unwrap().forget(player);
+    }
+}
+
+/// The bytes of an address, for a cookie to be bound to.
+fn addr_bytes(addr: SocketAddr) -> Vec<u8> {
+    let mut b = match addr.ip() {
+        IpAddr::V4(ip) => ip.octets().to_vec(),
+        IpAddr::V6(ip) => ip.octets().to_vec(),
+    };
+    b.extend_from_slice(&addr.port().to_le_bytes());
+    b
+}
+
 fn set_bounds(shared: &Shared, row: &MapInfo) {
     *shared.bounds.write().unwrap() = Some(Bounds::from_world([row.x_0, row.x_1, row.y_0, row.y_1, row.z_0, row.z_1]));
 }
@@ -304,23 +395,39 @@ fn recv_loop(shared: &Shared, conn: &DbConnection, transport: &dyn Transport) {
         match ClientMessage::decode(&buf[..len]) {
             Some(ClientMessage::Hello { player }) => {
                 stats.hellos.fetch_add(1, Relaxed);
-                let bounds = *shared.bounds.read().unwrap();
-                // only a player the match has, and only once the map's bounds are known
-                let (true, Some(bounds)) = (conn.db.player().id().find(&player).is_some(), bounds) else { continue };
-                let bound = shared.sessions.write().unwrap().bind(from, player);
-                if bound != Bound::Again {
-                    // a fresh session numbers its inputs from the start again
-                    shared.board.lock().unwrap().forget(player);
-                }
-                let tick = conn.db.match_tick().iter().next().map_or(0, |t| t.tick) as u32;
-                let welcome = Welcome { player, tick, bounds };
-                let _ = transport.send_to(&welcome.encode(), from);
+                let reply = if conn.db.seat().player().find(&player).is_none() {
+                    Refused { player, reason: REFUSED_NO_SEAT }.encode()
+                } else {
+                    stats.challenges.fetch_add(1, Relaxed);
+                    let stamp = shared.next_stamp();
+                    Challenge { stamp, cookie: cookie(&shared.secret, &addr_bytes(from), player, stamp) }.encode()
+                };
+                let _ = transport.send_to(&reply, from);
             }
-            Some(ClientMessage::Input { seq, input }) => {
+            Some(ClientMessage::Auth { player, stamp, cookie: given, signature }) => {
+                let reply = match authenticate(shared, conn, from, player, stamp, &given, &signature) {
+                    Ok(bounds) => {
+                        let tick = conn.db.match_tick().iter().next().map_or(0, |t| t.tick) as u32;
+                        stats.auths_accepted.fetch_add(1, Relaxed);
+                        Welcome { player, tick, bounds }.encode()
+                    }
+                    Err(reason) => {
+                        stats.auths_refused.fetch_add(1, Relaxed);
+                        Refused { player, reason }.encode()
+                    }
+                };
+                let _ = transport.send_to(&reply, from);
+            }
+            Some(ClientMessage::Input { seq, input, ack }) => {
                 stats.inputs_received.fetch_add(1, Relaxed);
                 if shared.sessions.read().unwrap().player_at(from) != Some(input.player) {
                     stats.inputs_unbound.fetch_add(1, Relaxed);
-                } else if !shared.board.lock().unwrap().offer(seq, input) {
+                    continue;
+                }
+                shared.sessions.read().unwrap().touch(input.player, shared.now_ms());
+                // what the player says it has received counts even if this input is late
+                shared.acks.lock().unwrap().merge(input.player, ack);
+                if !shared.board.lock().unwrap().offer(seq, input) {
                     stats.inputs_late.fetch_add(1, Relaxed);
                 }
             }
@@ -329,6 +436,45 @@ fn recv_loop(shared: &Shared, conn: &DbConnection, transport: &dyn Transport) {
             }
         }
     }
+}
+
+/// Check an Auth and, if it holds up, bind the address to the player. The
+/// world's bounds if it did, otherwise the `REFUSED_*` code.
+fn authenticate(
+    shared: &Shared,
+    conn: &DbConnection,
+    from: SocketAddr,
+    player: u16,
+    stamp: u64,
+    given: &[u8; 16],
+    signature: &[u8; 64],
+) -> Result<Bounds, u8> {
+    let seat = conn.db.seat().player().find(&player).ok_or(REFUSED_NO_SEAT)?;
+    let bounds = (*shared.bounds.read().unwrap()).ok_or(REFUSED_NO_SEAT)?;
+    // a challenge this gateway made for this address, not too old
+    if !cookie_eq(given, &cookie(&shared.secret, &addr_bytes(from), player, stamp)) {
+        return Err(REFUSED_BAD_PROOF);
+    }
+    let age = (now_us() as u64).saturating_sub(stamp);
+    if age > CHALLENGE_LIFETIME_US {
+        return Err(REFUSED_STALE);
+    }
+    // signed by the key the player's identity put on their seat
+    if !verify_challenge(&seat.udp_key, player, stamp, given, signature) {
+        return Err(REFUSED_BAD_PROOF);
+    }
+    let bound = shared
+        .sessions
+        .write()
+        .unwrap()
+        .bind_proven(from, player, stamp, shared.now_ms())
+        .map_err(|_| REFUSED_STALE)?;
+    if bound != Bound::Again {
+        // a fresh session numbers its inputs and Snapshots from the start again
+        shared.board.lock().unwrap().forget(player);
+        shared.acks.lock().unwrap().forget(player);
+    }
+    Ok(bounds)
 }
 
 fn send_loop(
@@ -340,22 +486,30 @@ fn send_loop(
     transport: &dyn Transport,
 ) {
     let stats = &shared.stats;
-    let mut planners: HashMap<u16, Planner> = HashMap::new();
+    // each recipient's planner, and the session generation it belongs to
+    let mut planners: HashMap<u16, (Planner, u32)> = HashMap::new();
     while let Ok(job) = jobs.recv() {
         let recipients = shared.sessions.read().unwrap().partition(index, modulus);
-        planners.retain(|id, _| recipients.iter().any(|(r, _)| r == id));
+        planners.retain(|id, _| recipients.iter().any(|r| r.player == *id));
         let work = &job.work;
         let (mut datagrams, mut bytes, mut states) = (0u64, 0u64, 0u64);
-        for (player, addr) in recipients {
+        for Recipient { player, addr, generation } in recipients {
             let Some(&at) = work.index.get(&player) else { continue };
             let me = &work.entries[at];
             let (yaw, pitch) = work.facing[at];
             let observer = Observer { player, position: me.position, yaw, pitch };
-            let plan = planners.entry(player).or_insert_with(|| Planner::new(config)).plan(
-                &observer,
-                &work.entries,
-                work.tick,
-            );
+            let (planner, _) = planners
+                .entry(player)
+                .and_modify(|(planner, was)| {
+                    // a new session (or a new address) starts from nothing
+                    if *was != generation {
+                        *planner = Planner::new(config);
+                        *was = generation;
+                    }
+                })
+                .or_insert_with(|| (Planner::new(config), generation));
+            planner.acknowledge(shared.acks.lock().unwrap().get(player));
+            let plan = planner.plan(&observer, &work.entries, work.tick);
             states += plan.states as u64;
             for datagram in &plan.datagrams {
                 match transport.send_to(datagram, addr) {

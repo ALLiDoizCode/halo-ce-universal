@@ -164,3 +164,80 @@ fn only_a_players_first_input_of_a_tick_counts() {
     assert_eq!(events, [Event::MoveAccepted { player: 7 }, rejected(RejectReason::DuplicateInput)]);
     assert_eq!(store.player(7).unwrap().position, [a, 0.0, 0.0]);
 }
+
+/// A store that says how many ticks have passed since each player's last
+/// accepted move, as the server's tables know it.
+struct Elapsed {
+    inner: MemoryStore,
+    ticks: u32,
+}
+
+impl Store for Elapsed {
+    fn player(&self, id: halo_sim::PlayerId) -> Option<Player> {
+        self.inner.player(id)
+    }
+    fn set_player(&mut self, player: Player) {
+        self.inner.set_player(player)
+    }
+    fn remove_player(&mut self, id: halo_sim::PlayerId) -> bool {
+        self.inner.remove_player(id)
+    }
+    fn player_ids(&self) -> Vec<halo_sim::PlayerId> {
+        self.inner.player_ids()
+    }
+    fn ticks_since_move(&self, _id: halo_sim::PlayerId) -> u32 {
+        self.ticks
+    }
+}
+
+fn after_ticks(ticks: u32, position: [f32; 3]) -> Event {
+    let map = flat_floor_map();
+    let mut store = Elapsed { inner: player_at([0.0, 0.0, 0.0]), ticks };
+    let input = PlayerInput { player: 7, position, yaw: 2.0, pitch: -0.25 };
+    step(&mut store, &[input], &map, &mut Rng::seeded(0))[0]
+}
+
+#[test]
+fn after_skipped_inputs_the_bound_grows_with_the_ticks_since_the_last_accepted_move() {
+    // five ticks since the last accepted move (four inputs were lost): five ticks' worth is fine
+    assert_eq!(after_ticks(5, [MAX_STEP * 4.9, 0.0, 0.0]), Event::MoveAccepted { player: 7 });
+    assert_eq!(after_ticks(5, [MAX_STEP * 5.1, 0.0, 0.0]), rejected(RejectReason::TooFast));
+    // one tick: the plain bound
+    assert_eq!(after_ticks(1, [MAX_STEP * 1.1, 0.0, 0.0]), rejected(RejectReason::TooFast));
+}
+
+#[test]
+fn a_long_silence_buys_no_more_than_the_catch_up_cap() {
+    let cap = halo_sim::MAX_CATCH_UP_TICKS as f32;
+    assert_eq!(after_ticks(10_000, [MAX_STEP * (cap - 0.1), 0.0, 0.0]), Event::MoveAccepted { player: 7 });
+    assert_eq!(after_ticks(10_000, [MAX_STEP * (cap + 0.1), 0.0, 0.0]), rejected(RejectReason::TooFast));
+}
+
+#[test]
+fn a_store_that_does_not_track_time_gets_the_one_tick_bound() {
+    let map = flat_floor_map();
+    let mut store = player_at([0.0, 0.0, 0.0]);
+    assert_eq!(report(&mut store, &map, [MAX_STEP * 1.1, 0.0, 0.0]), rejected(RejectReason::TooFast));
+}
+
+#[test]
+fn reporting_rarely_never_lets_a_player_outrun_the_bound_over_time() {
+    // a player who reports every n-th tick and always moves as far as allowed covers no more than the bound allows
+    let map = flat_floor_map();
+    for every in [1u32, 2, 5, 30, 100] {
+        let mut store = Elapsed { inner: player_at([-40.0, 0.0, 0.0]), ticks: 0 };
+        let total_ticks = 300u32;
+        for t in (every..=total_ticks).step_by(every as usize) {
+            store.ticks = every;
+            let x = store.player(7).unwrap().position[0];
+            let allowed = MAX_STEP * every.min(halo_sim::MAX_CATCH_UP_TICKS) as f32;
+            let input = PlayerInput { player: 7, position: [x + allowed * 0.999, 0.0, 0.0], yaw: 0.0, pitch: 0.0 };
+            assert_eq!(
+                step(&mut store, &[input], &map, &mut Rng::seeded(t as u64)),
+                [Event::MoveAccepted { player: 7 }]
+            );
+        }
+        let covered = store.player(7).unwrap().position[0] + 40.0;
+        assert!(covered <= MAX_STEP * total_ticks as f32, "reporting every {every} ticks covered {covered}");
+    }
+}

@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use halo_match_driver::server::{build_module, stdb_bin_dir, Server};
 use halo_match_driver::walkers::Walkers;
-use halo_match_driver::{MatchClient, SeenTick};
+use halo_match_driver::{MatchClient, PlayerClient, SeenTick};
 use halo_sim::fixtures::flat_floor_map;
 use halo_sim::{Event, MapData, PlayerInput};
 
@@ -99,7 +99,7 @@ fn drive(client: &MatchClient, walkers: &mut Walkers, ticks: usize) -> Vec<SeenT
 #[test]
 fn ticks_hold_30_hz_with_one_batch_per_tick_and_the_tables_match_a_local_copy() {
     let Some(server) = start_server("flat") else { return };
-    let client = MatchClient::connect(&server.uri(), "flat");
+    let client = server.connect("flat");
     let map = flat_floor_map();
     client.load_map(map.to_bytes()).unwrap();
     let (mut walkers, spawn) = Walkers::new(map, &[[0.0, 0.0, 0.0]], 50, 1);
@@ -132,7 +132,7 @@ fn ticks_hold_30_hz_with_one_batch_per_tick_and_the_tables_match_a_local_copy() 
 #[test]
 fn rejected_moves_are_counted_and_visible_per_player() {
     let Some(server) = start_server("rejects") else { return };
-    let client = MatchClient::connect(&server.uri(), "rejects");
+    let client = server.connect("rejects");
     let map = flat_floor_map();
     client.load_map(map.to_bytes()).unwrap();
     let spawn: Vec<PlayerInput> =
@@ -175,7 +175,7 @@ fn rejected_moves_are_counted_and_visible_per_player() {
 #[test]
 fn a_map_that_does_not_decode_is_refused_and_the_loaded_one_stays() {
     let Some(server) = start_server("badmap") else { return };
-    let client = MatchClient::connect(&server.uri(), "badmap");
+    let client = server.connect("badmap");
     let map = flat_floor_map();
     client.load_map(map.to_bytes()).unwrap();
     let mut damaged = map.to_bytes();
@@ -202,7 +202,7 @@ fn a_server_restarted_with_fresh_module_memory_reloads_the_map_from_its_row() {
     let Some(mut server) = start_server("fresh") else { return };
     let map = flat_floor_map();
     {
-        let client = MatchClient::connect(&server.uri(), "fresh");
+        let client = server.connect("fresh");
         client.load_map(map.to_bytes()).unwrap();
         client.add_players(&[PlayerInput { player: 0, position: [0.0, 0.0, 0.01], yaw: 0.0, pitch: 0.0 }]).unwrap();
         client.start();
@@ -213,7 +213,7 @@ fn a_server_restarted_with_fresh_module_memory_reloads_the_map_from_its_row() {
     std::thread::sleep(Duration::from_millis(500));
     server.restart();
 
-    let client = MatchClient::connect(&server.uri(), "fresh");
+    let client = server.connect("fresh");
     assert_eq!(client.players().len(), 1, "the match survived the restart");
     client.start();
     client.discard_ticks();
@@ -244,7 +244,7 @@ fn five_hundred_players_on_blood_gulch_stay_in_step_with_a_local_copy() {
     let Some(server) = start_server("bloodgulch") else { return };
     let anchors: Vec<[f32; 3]> = halo_map.player_starts.iter().map(|s| s.position).collect();
     let map = MapData::from(halo_map);
-    let client = MatchClient::connect(&server.uri(), "bloodgulch");
+    let client = server.connect("bloodgulch");
     client.load_map(map.to_bytes()).unwrap();
     let (mut walkers, spawn) = Walkers::new(map, &anchors, 500, 7);
     client.add_players(&spawn).unwrap();
@@ -252,4 +252,214 @@ fn five_hundred_players_on_blood_gulch_stay_in_step_with_a_local_copy() {
 
     let seen = drive(&client, &mut walkers, 60);
     assert_eq!(seen.last().unwrap().marker.players, 500);
+}
+
+// ---- who may call what, and seats ----
+
+const KEY_A: [u8; 32] = [0xa1; 32];
+const KEY_B: [u8; 32] = [0xb2; 32];
+
+fn at(id: u16, x: f32) -> PlayerInput {
+    PlayerInput { player: id, position: [x, 0.0, 0.01], yaw: 0.0, pitch: 0.0 }
+}
+
+/// A match on the flat floor with two spawn points, ticking, and the owner's connection to it.
+fn seated_match(name: &str) -> Option<(Server, MatchClient)> {
+    let server = start_server(name)?;
+    let owner = server.connect(name);
+    owner.load_map(flat_floor_map().to_bytes()).unwrap();
+    owner.set_spawn_points(&[at(0, 1.0), at(1, 2.0)]).unwrap();
+    owner.start();
+    Some((server, owner))
+}
+
+fn is_refused<T: std::fmt::Debug>(result: Result<T, String>, wanted: &str) {
+    let e = result.expect_err("should have been refused");
+    assert!(e.contains(wanted), "refused for another reason: {e}");
+}
+
+fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + WAIT;
+    while !done() {
+        assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn only_the_owner_runs_the_match_and_only_the_gateway_submits_inputs() {
+    let Some((server, owner)) = seated_match("guards") else { return };
+    let stranger = MatchClient::connect(&server.uri(), "guards");
+    let map = flat_floor_map().to_bytes();
+
+    is_refused(stranger.load_map(map), "owner");
+    is_refused(stranger.add_players(&[at(5, 0.0)]), "owner");
+    is_refused(stranger.remove_players(vec![0]), "owner");
+    is_refused(stranger.set_spawn_points(&[at(0, 9.0)]), "owner");
+    is_refused(stranger.set_capacity(1), "owner");
+    is_refused(stranger.set_away_grace(1), "owner");
+    is_refused(stranger.set_gateway(server.new_account().identity()), "owner");
+    is_refused(stranger.start_and_wait(), "owner");
+    is_refused(stranger.stop_and_wait(), "owner");
+    is_refused(stranger.reset_and_wait(), "owner");
+    is_refused(stranger.submit_and_wait(&[at(0, 0.0)]), "gateway");
+    assert_eq!(owner.players().len(), 0, "nothing the stranger tried did anything");
+    owner.discard_ticks();
+    owner.next_tick(WAIT).expect("still ticking: the stranger could not stop it");
+
+    // until a gateway is named the owner is it
+    owner.submit_and_wait(&[at(0, 0.0)]).unwrap();
+    let gateway = server.new_account();
+    owner.set_gateway(gateway.identity()).unwrap();
+    is_refused(owner.submit_and_wait(&[at(0, 0.0)]), "gateway");
+    let as_gateway = MatchClient::connect_as(&server.uri(), "guards", Some(&gateway.token));
+    as_gateway.submit_and_wait(&[at(0, 0.0)]).unwrap();
+    is_refused(as_gateway.start_and_wait(), "owner");
+}
+
+#[test]
+fn a_player_who_joins_gets_a_seat_tied_to_their_identity() {
+    let Some((server, owner)) = seated_match("seats") else { return };
+    let (a, b) = (server.new_account(), server.new_account());
+    let (pa, pb) = (
+        PlayerClient::connect(&server.uri(), "seats", &a.token),
+        PlayerClient::connect(&server.uri(), "seats", &b.token),
+    );
+
+    pa.join(KEY_A).unwrap();
+    pb.join(KEY_B).unwrap();
+    wait_until("both seats", || owner.seats().len() == 2 && owner.players().len() == 2);
+    let (seat_a, seat_b) = (pa.seat().expect("a seat"), pb.seat().expect("a seat"));
+    assert_eq!((seat_a.player, seat_b.player), (0, 1), "the lowest free ids");
+    assert_eq!((seat_a.owner, seat_b.owner), (a.identity(), b.identity()));
+    assert_eq!((seat_a.udp_key, seat_b.udp_key), (KEY_A.to_vec(), KEY_B.to_vec()));
+    // they start at the spawn points
+    let players = owner.players();
+    assert_eq!((players[&0].x, players[&1].x), (1.0, 2.0));
+
+    // joining again is the same seat, with the new key
+    pa.join([0xcc; 32]).unwrap();
+    wait_until("the new key", || pa.seat().is_some_and(|s| s.udp_key == [0xcc; 32]));
+    assert_eq!(pa.seat().unwrap().player, 0);
+    assert_eq!(owner.seats().len(), 2);
+
+    // a key that is not 32 bytes is no key
+    let c = PlayerClient::connect(&server.uri(), "seats", &server.new_account().token);
+    is_refused(c.join_with(vec![1, 2, 3]), "32 bytes");
+}
+
+#[test]
+fn a_full_match_and_a_match_without_spawn_points_turn_joiners_away() {
+    let Some(server) = start_server("full") else { return };
+    let owner = server.connect("full");
+    owner.load_map(flat_floor_map().to_bytes()).unwrap();
+    let joiner = |_: u8| PlayerClient::connect(&server.uri(), "full", &server.new_account().token);
+
+    is_refused(joiner(0).join(KEY_A), "no spawn points");
+    owner.set_spawn_points(&[at(0, 1.0)]).unwrap();
+    owner.set_capacity(2).unwrap();
+    let (x, y, z) = (joiner(1), joiner(2), joiner(3));
+    x.join(KEY_A).unwrap();
+    y.join(KEY_A).unwrap();
+    is_refused(z.join(KEY_A), "full");
+    // a seat freed is a seat to take
+    x.leave().unwrap();
+    z.join(KEY_B).unwrap();
+    wait_until("the third seat", || z.seat().is_some());
+    assert_eq!(z.seat().unwrap().player, 0, "the freed id");
+}
+
+#[test]
+fn a_player_who_leaves_is_removed_and_no_longer_listed() {
+    let Some((server, owner)) = seated_match("leave") else { return };
+    let (a, b) = (server.new_account(), server.new_account());
+    let (pa, pb) = (
+        PlayerClient::connect(&server.uri(), "leave", &a.token),
+        PlayerClient::connect(&server.uri(), "leave", &b.token),
+    );
+    pa.join(KEY_A).unwrap();
+    pb.join(KEY_B).unwrap();
+    wait_until("both seated", || owner.players().len() == 2 && owner.seats().len() == 2);
+
+    pa.leave().unwrap();
+    wait_until("player 0 gone", || !owner.players().contains_key(&0) && !owner.seats().contains_key(&0));
+    assert!(owner.players().contains_key(&1) && owner.seats().contains_key(&1), "the other player stays");
+    // leaving without a seat is not an error and changes nothing
+    pa.leave().unwrap();
+    assert_eq!(owner.players().len(), 1);
+}
+
+#[test]
+fn a_dropped_connection_holds_the_seat_and_the_same_identity_resumes_it() {
+    let Some((server, owner)) = seated_match("rejoin") else { return };
+    let a = server.new_account();
+    let first = PlayerClient::connect(&server.uri(), "rejoin", &a.token);
+    first.join(KEY_A).unwrap();
+    wait_until("the seat", || owner.seats().contains_key(&0));
+    assert_eq!(owner.seats()[&0].away_since, 0);
+    let before = owner.players()[&0].clone();
+
+    first.disconnect();
+    wait_until("the seat marked away", || owner.seats().get(&0).is_some_and(|s| s.away_since != 0));
+    assert!(owner.players().contains_key(&0), "the player is held, not removed");
+
+    // from a new connection, with a new key, the same identity is the same player
+    let again = PlayerClient::connect(&server.uri(), "rejoin", &a.token);
+    again.join(KEY_B).unwrap();
+    wait_until("back", || owner.seats().get(&0).is_some_and(|s| s.away_since == 0 && s.udp_key == KEY_B.to_vec()));
+    assert_eq!(owner.seats().len(), 1);
+    let after = owner.players()[&0].clone();
+    assert_eq!((after.x, after.y, after.z), (before.x, before.y, before.z), "they are where they were");
+
+    // the old connection's disconnection (it may arrive late) does not undo the rejoin
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(owner.seats()[&0].away_since, 0);
+}
+
+#[test]
+fn a_seat_not_come_back_to_is_freed_after_the_grace_period() {
+    let Some((server, owner)) = seated_match("grace") else { return };
+    owner.set_away_grace(45).unwrap(); // a second and a half
+    let a = server.new_account();
+    let p = PlayerClient::connect(&server.uri(), "grace", &a.token);
+    p.join(KEY_A).unwrap();
+    wait_until("the seat", || owner.seats().contains_key(&0));
+    p.disconnect();
+    wait_until("marked away", || owner.seats().get(&0).is_some_and(|s| s.away_since != 0));
+    assert!(owner.players().contains_key(&0));
+    wait_until("freed", || owner.seats().is_empty() && owner.players().is_empty());
+}
+
+#[test]
+fn a_move_after_skipped_inputs_is_judged_by_the_time_since_the_last_one() {
+    let Some((server, owner)) = seated_match("catchup") else { return };
+    let p = PlayerClient::connect(&server.uri(), "catchup", &server.new_account().token);
+    p.join(KEY_A).unwrap();
+    wait_until("the player", || owner.players().contains_key(&0));
+    let start = owner.players()[&0].updated_tick;
+    // twelve ticks pass with no input at all (as if eleven were lost)
+    let seen = owner.wait_for_tick(start + 12, WAIT);
+    let x = seen.players[&0].x;
+
+    // 1.0 unit: nine ticks' worth of the bound, more than one tick's (0.133)
+    owner.submit_and_wait(&[at(0, x + 1.0)]).unwrap();
+    let applied = loop {
+        let seen = owner.next_tick(WAIT).unwrap();
+        if seen.players[&0].x != x {
+            break seen;
+        }
+    };
+    assert_eq!(applied.players[&0].rejected_moves, 0);
+    assert_eq!(applied.players[&0].x, x + 1.0);
+
+    // and straight after, a move that size is too much again: one tick has passed
+    owner.submit_and_wait(&[at(0, x + 2.0)]).unwrap();
+    let refused = loop {
+        let seen = owner.next_tick(WAIT).unwrap();
+        if seen.players[&0].rejected_moves > 0 {
+            break seen;
+        }
+    };
+    assert_eq!(refused.players[&0].last_reject, REJECT_TOO_FAST);
+    assert_eq!(refused.players[&0].x, x + 1.0);
 }

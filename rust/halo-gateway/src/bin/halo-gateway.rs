@@ -10,10 +10,19 @@
 //!   --budget <bytes/s>       most a player is sent a second, IP and UDP headers
 //!                            included                        (default 90000)
 //!   --send-threads <n>       threads that send               (default 4)
+//!   --token <jwt>            the SpacetimeDB token of the gateway's identity: the
+//!                            one the match accepts input from (its owner, or the
+//!                            identity the owner named with `set_gateway`). Or
+//!                            set HALO_GATEWAY_TOKEN, to keep it off the command
+//!                            line. Without one the match refuses every input.
+//!   --idle-secs <n>          seconds of silence after which a player's address is
+//!                            unbound                         (default 10)
+//!   --max-stale-ticks <n>    a player not sent to someone for this many ticks is
+//!                            sent first (the staleness cap)  (default 15)
 //!   --log-secs <n>           seconds between log lines       (default 5)
 //!
 //! Prints a line every few seconds: ticks, players, bandwidth, the time to
-//! send a tick, inputs dropped.
+//! send a tick, inputs dropped, joins and refusals.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -22,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use halo_gateway::{Gateway, GatewayConfig, UdpTransport};
 
-const USAGE: &str = "halo-gateway --database <name> [--spacetimedb <uri>] [--bind <addr:port>] [--budget <bytes/s>] [--send-threads <n>] [--log-secs <n>]";
+const USAGE: &str = "halo-gateway --database <name> [--spacetimedb <uri>] [--bind <addr:port>] [--budget <bytes/s>] [--send-threads <n>] [--token <jwt>] [--idle-secs <n>] [--max-stale-ticks <n>] [--log-secs <n>]";
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -45,6 +54,11 @@ fn main() {
     let mut config = GatewayConfig::new(get("spacetimedb", "http://127.0.0.1:3000"), *database);
     config.budget_bytes_per_second = get("budget", "90000").parse().unwrap_or_else(|e| fail(&format!("--budget: {e}")));
     config.send_threads = get("send-threads", "4").parse().unwrap_or_else(|e| fail(&format!("--send-threads: {e}")));
+    config.token = args.get("token").map(|t| t.to_string()).or_else(|| std::env::var("HALO_GATEWAY_TOKEN").ok());
+    let idle_secs: u64 = get("idle-secs", "10").parse().unwrap_or_else(|e| fail(&format!("--idle-secs: {e}")));
+    config.idle_timeout = Duration::from_secs(idle_secs);
+    config.planner.max_stale_ticks =
+        get("max-stale-ticks", "15").parse().unwrap_or_else(|e| fail(&format!("--max-stale-ticks: {e}")));
     let log_secs: u64 = get("log-secs", "5").parse().unwrap_or_else(|e| fail(&format!("--log-secs: {e}")));
     if config.send_threads == 0 {
         fail("--send-threads must be at least 1");
@@ -66,7 +80,7 @@ fn main() {
         let secs = now.duration_since(last.0).as_secs_f64();
         let ticks = stats.ticks - last.1.ticks;
         eprintln!(
-            "ticks {} ({:.1}/s, {} missed)  players {}  out {:.2} MB/s  send {:.2} ms p50 {:.2} ms max  batches {}  inputs late {} unbound {}  errors {}",
+            "ticks {} ({:.1}/s, {} missed)  players {}  out {:.2} MB/s  send {:.2} ms p50 {:.2} ms max  batches {}  inputs late {} unbound {}  auths {} ok {} refused  expired {}  errors {}",
             stats.ticks,
             ticks as f64 / secs,
             stats.ticks_skipped,
@@ -77,6 +91,9 @@ fn main() {
             stats.batches_submitted,
             stats.inputs_late,
             stats.inputs_unbound,
+            stats.auths_accepted,
+            stats.auths_refused,
+            stats.sessions_expired,
             stats.send_errors
         );
         last = (now, stats);
