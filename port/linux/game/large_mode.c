@@ -321,7 +321,8 @@ static void large_mode_take_player(
 	remote->player_index = NONE;
 	large_remote_data.players--;
 	/* (no player's unit now, but still driven) */
-	unit_set_actively_controlled(remote->unit_index, TRUE);
+	if (object_try_and_get_and_verify_type(remote->unit_index, _object_mask_unit))
+		unit_set_actively_controlled(remote->unit_index, TRUE);
 }
 
 /* a player out of range, or gone from the match: the unit goes, and the engine's player with it */
@@ -449,7 +450,8 @@ static void large_mode_share_players(
 			break;
 		if (large_mode_give_player(nearest))
 			continue;
-		/* no room: the farthest has to be much farther than the nearest to be swapped for it */
+		/* no room: the farthest has to be over half as far again as the nearest (the distances
+		are squared) to be swapped for it */
 		if (!farthest || swaps >= LARGE_REBALANCE_SWAPS || nearest_distance * 2.0f > farthest_distance)
 			break;
 		large_mode_take_player(farthest);
@@ -481,9 +483,10 @@ static void large_mode_drive_remote(
 	control.weapon_index = NONE;
 	control.grenade_index = NONE;
 	control.zoom_level = NONE;
-	control.throttle.i = PIN(ahead / (ahead > 0.0f ? information->run_forward_speed : information->run_backward_speed),
-		-1.0f, 1.0f);
-	control.throttle.j = PIN(left / information->run_sideways_speed, -1.0f, 1.0f);
+	/* (the tags' speeds are never zero, but a throttle must never be not a number) */
+	control.throttle.i = PIN(ahead / MAX(ahead > 0.0f ? information->run_forward_speed : information->run_backward_speed,
+		0.001f), -1.0f, 1.0f);
+	control.throttle.j = PIN(left / MAX(information->run_sideways_speed, 0.001f), -1.0f, 1.0f);
 	control.facing_vector.i = cos_yaw;
 	control.facing_vector.j = sin_yaw;
 	control.facing_vector.k = 0.0f;

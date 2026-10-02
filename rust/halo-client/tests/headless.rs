@@ -298,6 +298,27 @@ fn the_logged_players_are_the_ones_the_server_sent() {
         drawn_players.insert(d.player);
         drawn_compared += 1;
     }
+    // and exactly where the library held the player, for the tick the unit was driven from (both
+    // are logged to four decimals)
+    let held: std::collections::HashMap<(u16, u32), [f32; 3]> =
+        logged.iter().map(|l| ((l.player, l.tick), l.position)).collect();
+    let mut matched = 0;
+    for d in &drawn {
+        if let Some(state) = held.get(&(d.player, d.tick)) {
+            for (axis, held) in state.iter().enumerate() {
+                assert!(
+                    (d.position[axis] - held).abs() <= 0.00011,
+                    "tick {}, player {}, axis {axis}: drawn at {} but the library held {}",
+                    d.tick,
+                    d.player,
+                    d.position[axis],
+                    held
+                );
+            }
+            matched += 1;
+        }
+    }
+    assert!(matched > 300, "only {matched} drawn positions had a logged state of the library to match");
     println!(
         "{} drawn lines, {drawn_compared} compared with the server, {} distinct players",
         drawn.len(),
@@ -332,6 +353,11 @@ fn the_logged_players_are_the_ones_the_server_sent() {
         })
         .collect();
     let seconds = costs.len().max(1) as f32;
+    let mean = costs.iter().map(|c| c.0).sum::<f32>() / seconds;
+    // the ticket's budget, with a full match in view
+    if others >= 500 {
+        assert!(mean < 3.0, "the adapter cost {mean} ms a tick with {others} players");
+    }
     println!(
         "the adapter cost, over {} seconds with {others} remote players: {:.3} ms a tick on average (the seconds' \
          means from {:.3} to {:.3}), {:.3} ms at worst",
