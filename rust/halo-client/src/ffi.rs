@@ -22,13 +22,18 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use halo_sim::walk::Controls;
+
 use crate::browser::{Browser, ServerEntry};
 use crate::identity::IdentityFile;
+use crate::local::Local;
 use crate::session::{Config, RefusalKind, RemoteUnit, Session};
 
 #[derive(Default)]
 struct Global {
     session: Option<Session>,
+    /// The local player's own movement, once the map is being read.
+    local: Option<Local>,
     /// What [`halo_large_frame`] froze, for [`halo_large_unit`] to read.
     frame: Vec<RemoteUnit>,
     error: String,
@@ -43,6 +48,7 @@ struct Global {
 
 static GLOBAL: Mutex<Global> = Mutex::new(Global {
     session: None,
+    local: None,
     frame: Vec::new(),
     error: String::new(),
     identity_dir: None,
@@ -101,6 +107,7 @@ pub unsafe extern "C" fn halo_large_start(
             let mut g = global();
             g.frame.clear();
             g.error.clear();
+            g.local = None;
             g.session.take()
         };
         drop(old);
@@ -125,9 +132,75 @@ pub extern "C" fn halo_large_stop() {
         let old = {
             let mut g = global();
             g.frame.clear();
+            g.local = None;
             g.session.take()
         };
         drop(old);
+    })
+}
+
+/// Read the map file at `path` (the player's own Xbox map file, which the
+/// game has loaded too) for the local player's movement: its collision data
+/// and its tags' movement values. Returns at once, the file being read on a
+/// thread of its own; [`halo_large_move`] has nothing to give until it is
+/// in. Returns 1 when the reading has begun, and 0 for a null path.
+///
+/// # Safety
+/// `path` is NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_load_map(path: *const c_char) -> u32 {
+    guard(0, || {
+        let Some(path) = (unsafe { string(path) }) else {
+            global().error = "a null path".into();
+            return 0;
+        };
+        global().local = Some(Local::load(path));
+        1
+    })
+}
+
+/// Put the local player at `x y z` (world units), at rest: where the server
+/// placed them, and every tick the library is not moving them (the map not in
+/// yet) where the engine has the unit. Does nothing without
+/// [`halo_large_load_map`].
+#[no_mangle]
+pub extern "C" fn halo_large_place(x: f32, y: f32, z: f32) {
+    guard((), || {
+        if let Some(local) = &mut global().local {
+            local.place([x, y, z]);
+        }
+    })
+}
+
+/// The local player's movement for one tick: `forward` and `strafe` are the
+/// throttle (ahead and to the left, -1 to 1), `yaw` and `pitch` where the
+/// player faces and aims, in radians. Returns 0 when the library cannot move
+/// the player yet (the map is not in, or the player not placed): the caller
+/// moves them as it did before. Otherwise it returns 1, plus 2 while the
+/// player is in the air, and `out` has seven `float`s: the position `x y z`
+/// (world units) and velocity `x y z` (world units a second) of the player
+/// after the tick, and 0. The new position and the facing are sent to the
+/// gateway as this tick's input, as [`halo_large_send_input`] would.
+///
+/// # Safety
+/// `out` points to seven writable `float`s.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_move(forward: f32, strafe: f32, yaw: f32, pitch: f32, out: *mut f32) -> u32 {
+    guard(0, || {
+        let mut g = global();
+        if out.is_null() {
+            return 0;
+        }
+        let Some(moved) = g.local.as_mut().and_then(|l| l.step(Controls { forward, strafe, yaw, pitch })) else {
+            return 0;
+        };
+        if let Some(session) = &g.session {
+            session.send_input(moved.position, yaw, pitch);
+        }
+        let [x, y, z] = moved.position;
+        let [vx, vy, vz] = moved.velocity;
+        unsafe { std::slice::from_raw_parts_mut(out, 7) }.copy_from_slice(&[x, y, z, vx, vy, vz, 0.0]);
+        1 + 2 * moved.airborne as u32
     })
 }
 
@@ -322,6 +395,9 @@ pub unsafe extern "C" fn halo_large_error(buffer: *mut c_char, size: u32) -> u32
             Some(session) => session.last_error().unwrap_or_default(),
             None => g.error.clone(),
         };
+        // (or why the map could not be read)
+        let message =
+            if message.is_empty() { g.local.as_ref().and_then(|l| l.error()).unwrap_or_default() } else { message };
         if message.is_empty() || size == 0 || buffer.is_null() {
             return 0;
         }

@@ -18,18 +18,30 @@ A session starts from the settings, without the lobby:
   connects to SpacetimeDB directly and takes a seat in the match, and joins the
   gateway over UDP as the player the seat is;
 - every tick, just before the objects are updated (large_mode_game_tick), the
-  local player's unit is put where the server has it (once), and its position
-  and facing go to the gateway as that tick's input;
+  local player's unit is put where the server has it (once), and then moved by
+  the library from the player's controls (see "the local player" below), whose
+  new position and facing go to the gateway as that tick's input;
 - when the game ends (large_mode_dispose) the library stops.
 
 What the mode switches off: the distributed netcode's tick and message handling
 (network_distributed.c, which a game of one machine would only idle through);
 the C engine does not simulate other players, whom the library
 holds from what the gateway sends. Each of them is drawn by the existing
-renderer (see "remote players" below), and the local player does not move yet:
-the game logs what the library holds, and where it has drawn each remote
-player, once a second, for the automated test to compare with what the server
-sent.
+renderer (see "remote players" below). The game logs what the library holds,
+and where it has drawn each remote player and the local one, once a second,
+for the automated test to compare with what the server sent.
+
+The local player: the engine hands the player's unit the controls of the
+tick (the throttle and where the player faces and aims) just before this
+adapter runs. The library computes the movement from them and from the map's
+collision data (the player's own copy of the map file, read on a thread of its
+own at the start: halo_large_load_map), and the adapter puts the unit where it
+says; the engine's physics is suspended for the unit, as it is for the
+remote players' (it keeps choosing and playing animations). The library's
+velocity goes into the unit after the objects are updated, which the suspended
+physics zeroes, for what reads it (the motion sensor). Until the map is in the
+engine moves the unit as it always did, and the library starts from wherever
+the unit is when it can.
 
 Remote players: the library holds the newest state of every other player the
 gateway sends. For each the adapter makes a biped, in the team's colour, with
@@ -83,11 +95,12 @@ the library) the mode is not there: large_mode_active() is FALSE.
 #include <stdlib.h>
 #include <string.h>
 
-/* the platform layer's (port/linux/src/port_config.c) */
+/* the platform layer's (port/linux/src/port_config.c, xbox_files.c) */
 const char *config_string(char const *name);
 long config_integer(char const *name);
 int config_boolean(char const *name);
 void platform_log(char const *format, ...);
+void platform_translate_path(const char *xbox_path, char *host_path, unsigned long host_path_size);
 char const *platform_save_root(void);
 
 /* network_test.c's: the next game of a server the player picked */
@@ -111,6 +124,9 @@ unsigned long halo_large_member(unsigned long player, unsigned long *team, char 
 unsigned long halo_large_local(float *out);
 unsigned long halo_large_bounds(float *out);
 void halo_large_send_input(float x, float y, float z, float yaw, float pitch);
+unsigned long halo_large_load_map(const char *path);
+void halo_large_place(float x, float y, float z);
+unsigned long halo_large_move(float forward, float strafe, float yaw, float pitch, float *out);
 unsigned long halo_large_error(char *buffer, unsigned long size);
 void halo_large_identity_dir(const char *folder);
 void halo_large_set_name(const char *name);
@@ -199,6 +215,16 @@ static struct
 	boolean placed;
 	char logged_error[256];
 	long logged_time;
+
+	/* the local player (see large_mode_move_local): the unit the library moves,
+	and with it the library's state of the last tick (position, velocity a
+	second, whether it is in the air) */
+	long local_suspended_unit;
+	long local_seen_unit;
+	boolean local_moving;
+	boolean local_airborne;
+	float local_state[7];
+	long local_logged_time;
 } large;
 
 static void large_mode_read_settings(
@@ -267,6 +293,21 @@ static void large_mode_log_error(
 
 static void large_mode_forget_remotes(void);
 static void large_mode_log_remotes(void);
+static void large_mode_local_after_objects(void);
+
+/* the player's own copy of the match's map, for the local player's movement
+(the library reads it on a thread of its own; call after a session has started,
+which ends the library's hold of an earlier map) */
+static void large_mode_load_map(
+	void)
+{
+	char xbox_path[128];
+	char path[1024];
+
+	snprintf(xbox_path, sizeof(xbox_path), "d:\\maps\\%s.map", large.map);
+	platform_translate_path(xbox_path, path, sizeof(path));
+	halo_large_load_map(path);
+}
 
 /* a game's map is loaded: connect (before anything of the map makes an
 object: nothing of the mode needs any) */
@@ -278,6 +319,9 @@ void large_mode_new_game(
 	large.placed = FALSE;
 	large.logged_error[0] = 0;
 	large.logged_time = 0;
+	large.local_suspended_unit = NONE;
+	large.local_seen_unit = NONE;
+	large.local_moving = FALSE;
 	large_mode_forget_remotes();
 	/* (with a server list the session is the player's join's, which started it) */
 	if (large.browser_mode)
@@ -285,6 +329,8 @@ void large_mode_new_game(
 	large.started = halo_large_start(large.gateway, large.spacetimedb, large.database) != 0;
 	if (!large.started)
 		large_mode_log_error();
+	else
+		large_mode_load_map();
 }
 
 /* the game is over, or another map is loading */
@@ -296,6 +342,9 @@ void large_mode_dispose(
 	halo_large_stop();
 	large.started = FALSE;
 	large.placed = FALSE;
+	large.local_suspended_unit = NONE;
+	large.local_seen_unit = NONE;
+	large.local_moving = FALSE;
 	large_mode_forget_remotes();
 	platform_log("large mode: stopped");
 }
@@ -693,7 +742,10 @@ void large_mode_game_tick_after_objects(
 	unsigned long long start = __builtin_ia32_rdtsc();
 	long id;
 
-	if (!large.started || large_remote_data.count <= 0)
+	if (!large.started)
+		return;
+	large_mode_local_after_objects();
+	if (large_remote_data.count <= 0)
 		return;
 	for (id = 0; id < LARGE_MAXIMUM_REMOTES; id++)
 	{
@@ -810,6 +862,87 @@ static void large_mode_log(
 	}
 }
 
+/* ---------- the local player */
+
+/* the local player's movement for this tick. The unit has this tick's controls
+(the player's action was handed to it just before: its throttle, and the aiming
+the facing follows); the library moves the player by them through the map's
+collision data, and the unit goes where it says, with the engine's own physics
+suspended for it so that it does not move it again. The library sends the new
+position to the gateway as the tick's input. When the library cannot yet (the
+map is still being read) the engine moves the unit, the library follows it, and
+its position goes to the gateway instead. */
+static void large_mode_move_local(
+	long unit_index,
+	struct unit_datum *unit)
+{
+	real_vector3d const *aim = &unit->unit.desired_aiming_vector;
+	float yaw = (float)atan2(aim->j, aim->i);
+	float pitch = (float)asin(PIN(aim->k, -1.0f, 1.0f));
+	real_point3d position;
+	unsigned long moved;
+
+	/* a unit that is new (the player's first, or the next after a death) is where
+	the engine has put it: the library starts from there */
+	if (large.local_seen_unit != unit_index)
+	{
+		large.local_seen_unit = unit_index;
+		halo_large_place(unit->object.position.x, unit->object.position.y, unit->object.position.z);
+	}
+	moved = halo_large_move(unit->unit.throttle.i, unit->unit.throttle.j, yaw, pitch, large.local_state);
+
+	if (!moved)
+	{
+		halo_large_place(unit->object.position.x, unit->object.position.y, unit->object.position.z);
+		halo_large_send_input(unit->object.position.x, unit->object.position.y, unit->object.position.z, yaw, pitch);
+		large.local_moving = FALSE;
+		return;
+	}
+
+	/* (a new unit, after a respawn, is the library's to move from its first tick) */
+	if (large.local_suspended_unit != unit_index)
+	{
+		unit_scripting_suspended(unit_index, TRUE);
+		large.local_suspended_unit = unit_index;
+		platform_log("large mode: the library moves the local unit from now on");
+	}
+	position.x = large.local_state[0];
+	position.y = large.local_state[1];
+	position.z = large.local_state[2];
+	object_translate(unit_index, &position, NULL);
+	large.local_airborne = (moved & 2) != 0;
+	large.local_moving = TRUE;
+}
+
+/* ... and after the objects are updated, its velocity: the engine has none for
+a unit whose physics is suspended, and the motion sensor reads it */
+static void large_mode_local_after_objects(void)
+{
+	struct object_datum *object;
+
+	if (!large.local_moving)
+		return;
+	object = (struct object_datum *)object_try_and_get_and_verify_type(large.local_suspended_unit, _object_mask_unit);
+	if (!object)
+		return;
+	/* (the engine's velocities are a tick's worth) */
+	object->object.translational_velocity.i = large.local_state[3] / TICKS_PER_SECOND;
+	object->object.translational_velocity.j = large.local_state[4] / TICKS_PER_SECOND;
+	object->object.translational_velocity.k = large.local_state[5] / TICKS_PER_SECOND;
+
+	if (game_time_get() - large.local_logged_time >= TICKS_PER_SECOND)
+	{
+		large.local_logged_time = game_time_get();
+		/* (the automated tests compare where the engine has the unit with where the library has the player) */
+		platform_log("large mode: local unit (%.4f %.4f %.4f) library (%.4f %.4f %.4f) v (%.3f %.3f %.3f) throttle "
+			"(%.2f %.2f) airborne %d",
+			object->object.position.x, object->object.position.y, object->object.position.z, large.local_state[0],
+			large.local_state[1], large.local_state[2], large.local_state[3], large.local_state[4],
+			large.local_state[5], ((struct unit_datum *)object)->unit.throttle.i,
+			((struct unit_datum *)object)->unit.throttle.j, large.local_airborne ? 1 : 0);
+	}
+}
+
 /* called from game_tick, before objects_update */
 void large_mode_game_tick(
 	void)
@@ -846,6 +979,7 @@ void large_mode_game_tick(
 				unit->object.translational_velocity.i = 0.0f;
 				unit->object.translational_velocity.j = 0.0f;
 				unit->object.translational_velocity.k = 0.0f;
+				halo_large_place(own[0], own[1], own[2]);
 				large.placed = TRUE;
 				platform_log("large mode: the local unit is where the server has the player: (%.3f %.3f %.3f)",
 					own[0], own[1], own[2]);
@@ -853,11 +987,7 @@ void large_mode_game_tick(
 		}
 		else
 		{
-			/* this tick's input */
-			real_vector3d const *aim = &unit->unit.aiming_vector;
-
-			halo_large_send_input(unit->object.position.x, unit->object.position.y, unit->object.position.z,
-				(float)atan2(aim->j, aim->i), (float)asin(PIN(aim->k, -1.0f, 1.0f)));
+			large_mode_move_local(unit_index, unit);
 		}
 	}
 
@@ -1004,6 +1134,7 @@ static void large_mode_begin_join(
 		large_mode_leave();
 		return;
 	}
+	large_mode_load_map();
 	large.phase = _large_phase_joining;
 	large.phase_seconds = 0.0f;
 	console_printf(FALSE, "joining %s: %s, %s", large.server_title, map, game_type);

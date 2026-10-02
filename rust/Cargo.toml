@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["halo-map", "halo-sim", "halo-sim-parity", "halo-wire"]
+members = ["halo-map", "halo-scenario", "halo-sim", "halo-sim-parity", "halo-wire"]
 # SpacetimeDB crates, their own workspaces: see each Cargo.toml
 exclude = ["halo-match-module", "halo-match-driver"]
 

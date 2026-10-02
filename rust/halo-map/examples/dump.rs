@@ -10,6 +10,7 @@ fn main() {
     println!("{} ({}), bsp {}", m.header.name, m.scenario_name, m.structure_bsp_name);
     println!("bounds {:?}", m.world_bounds);
     println!("starts by (team, game types): {starts:?}");
+    println!("movement {:?}", m.movement);
     println!("{} netgame flags, first: {:?}", m.netgame_flags.len(), m.netgame_flags.first());
     println!("equipment: {:?}", &m.netgame_equipment[..m.netgame_equipment.len().min(3)]);
     println!("vehicles: {:?}", &m.vehicles[..m.vehicles.len().min(3)]);

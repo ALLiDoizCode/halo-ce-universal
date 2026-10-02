@@ -65,6 +65,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "halo-scenario"
+version = "0.1.0"
+dependencies = [
+ "halo-map",
+ "halo-sim",
+]
+
+[[package]]
 name = "halo-sim"
 version = "0.1.0"
 dependencies = [

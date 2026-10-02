@@ -384,3 +384,181 @@ fn the_logged_players_are_the_ones_the_server_sent() {
     println!("the game's player had {rejected} moves rejected");
     let _ = std::fs::remove_dir_all(&work);
 }
+
+/// What one `local unit` line says: where the engine has the player's own
+/// unit, and where the library has the player.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LocalLine {
+    engine: [f32; 3],
+    library: [f32; 3],
+    airborne: bool,
+}
+
+/// `large mode: local unit (1.0 2.0 3.0) library (1.0 2.0 3.0) v (0.1 0.2 0.3) airborne 0`
+fn parse_local_line(line: &str) -> Option<LocalLine> {
+    let rest = line.split("large mode: local unit ").nth(1)?;
+    let triple = |s: &str| -> Option<[f32; 3]> {
+        let open = s.find('(')?;
+        let close = s.find(')')?;
+        let mut n = s[open + 1..close].split_whitespace().map(|n| n.parse::<f32>());
+        Some([n.next()?.ok()?, n.next()?.ok()?, n.next()?.ok()?])
+    };
+    let engine = triple(rest)?;
+    let library = triple(rest.split("library ").nth(1)?)?;
+    let airborne = rest.rsplit("airborne ").next()?.trim() == "1";
+    Some(LocalLine { engine, library, airborne })
+}
+
+/// The game's own player walking on a scripted pattern (`HALO_TEST_INPUT=walk:`:
+/// walking, strafing and turning, never jumping), moved by the library from
+/// its controls, for `HALO_HEADLESS_WALK_SECONDS` (a minute by default; 600
+/// is the ten-minute run) against a real server. The unit is where the
+/// library says (the log lines of both agree), it has gone somewhere, and the
+/// server rejected none of its moves.
+#[test]
+fn the_local_player_is_moved_by_the_library_and_the_server_accepts_every_move() {
+    let (Some(stdb), Some(maps), Some(game), Some(data)) =
+        (stdb_bin_dir(), env_path("HALO_MAP_DIR"), env_path("HALO_GAME_BIN"), env_path("HALO_DATA_ROOT"))
+    else {
+        eprintln!(
+            "HALO_STDB_BIN, HALO_MAP_DIR, HALO_GAME_BIN and HALO_DATA_ROOT are not all set: skipping, \
+             this test needs the game's own data and a game built with the library"
+        );
+        return;
+    };
+    let seconds: u32 = std::env::var("HALO_HEADLESS_WALK_SECONDS").ok().and_then(|n| n.parse().ok()).unwrap_or(60);
+    let others: u16 = 20;
+    let me = others;
+    let halo_map = halo_map::HaloMap::from_path(maps.join("bloodgulch.map")).expect("Blood Gulch");
+    let map = MapData::from(halo_map);
+    // everyone starts in the open field below the red base, which is flat for
+    // dozens of world units around: a player who walks off a ledge is in the
+    // air, and what the server makes of that is the falling work's
+    let anchors = [[77.9, -166.2, 0.32]];
+    let wasm = build_module();
+    let mut rig = Rig::start(
+        &stdb,
+        &wasm,
+        RigSetup { name: "headless-walk", map, anchors: &anchors, players: others, budget: 90_000 },
+        |_| {},
+    );
+    rig.client.set_capacity(others + 1).unwrap();
+    let crowd = Crowd::connect(rig.gateway.local_addr(), 0..others, Impairment::none(), others as usize + 1, false);
+    crowd.join_all(Duration::from_secs(20)).unwrap();
+
+    let work = std::env::temp_dir().join(format!("halo-headless-walk-{}", std::process::id()));
+    std::fs::create_dir_all(&work).unwrap();
+    let log_path = work.join("game.log");
+    let log = std::fs::File::create(&log_path).unwrap();
+    let mut game_process = Game(
+        Command::new(&game)
+            .current_dir(game.parent().unwrap())
+            .env("HALO_DATA_ROOT", &data)
+            .env("HALO_SAVE_ROOT", work.join("saves"))
+            .env("HALO_LARGE_MAP", "bloodgulch")
+            .env("HALO_LARGE_GATEWAY", rig.gateway.local_addr().to_string())
+            .env("HALO_LARGE_SPACETIMEDB", rig.server.uri())
+            .env("HALO_LARGE_DATABASE", "headless-walk")
+            .env("HALO_TEST_INPUT", "walk:3")
+            .env("HALO_NET_ONLINE", "0")
+            .env("HALO_FULLSCREEN", "0")
+            .env("HALO_NO_VSYNC", "1")
+            .env("HALO_NO_AUDIO", "1")
+            .env("HALO_HIDDEN_WINDOW", "1")
+            .env("HALO_UPDATE_ANSWER", "no")
+            .env("HALO_EXIT_AFTER", seconds.to_string())
+            .stdout(Stdio::from(log.try_clone().unwrap()))
+            .stderr(Stdio::from(log))
+            .spawn()
+            .expect("start the game"),
+    );
+
+    let until = Instant::now() + Duration::from_secs(seconds as u64 + 40);
+    let mut exit = None;
+    let mut rejected_seen = 0;
+    // (the reason and server tick of each rejection, and the first tick seen)
+    let mut rejections: Vec<(u8, u64)> = Vec::new();
+    let mut first_tick = None;
+    while exit.is_none() && Instant::now() < until {
+        let Some(seen) = rig.client.next_tick(Duration::from_secs(10)) else { panic!("no tick for 10 s") };
+        first_tick.get_or_insert(seen.marker.tick);
+        rig.walkers.sync_with_server(seen.players.values());
+        crowd.send_inputs(&rig.walkers.next_inputs());
+        if let Some(row) = seen.players.get(&me) {
+            if row.rejected_moves > rejected_seen {
+                rejected_seen = row.rejected_moves;
+                rejections.push((row.last_reject, row.last_reject_tick));
+                println!(
+                    "the game's player was rejected ({rejected_seen}): reason {} at tick {}",
+                    row.last_reject, row.last_reject_tick
+                );
+            }
+        }
+        exit = game_process.0.try_wait().unwrap();
+    }
+    let output = std::fs::read_to_string(&log_path).unwrap_or_default();
+    if let Some(keep) = env_path("HALO_HEADLESS_LOG") {
+        let _ = std::fs::write(keep, &output);
+    }
+    let tail = || output.lines().rev().take(15).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+    assert!(exit.is_some_and(|s| s.success()), "the game did not exit by itself; the end of its log:\n{}", tail());
+    assert!(output.contains("the local unit is where the server has the player"), "never placed:\n{}", tail());
+    assert!(
+        output.contains("the library moves the local unit from now on"),
+        "the library never moved the unit:\n{}",
+        tail()
+    );
+
+    // the unit is where the library says, every second of the run
+    let lines: Vec<LocalLine> = output.lines().filter_map(parse_local_line).collect();
+    assert!(lines.len() as u32 >= seconds / 2, "only {} local unit lines in {seconds} s:\n{}", lines.len(), tail());
+    for (i, l) in lines.iter().enumerate() {
+        for axis in 0..3 {
+            assert!(
+                (l.engine[axis] - l.library[axis]).abs() <= 0.00011,
+                "second {i}, axis {axis}: the engine has the unit at {} but the library has the player at {}",
+                l.engine[axis],
+                l.library[axis]
+            );
+        }
+    }
+    // and it went somewhere
+    let travelled: f32 =
+        lines.windows(2).map(|w| (0..3).map(|a| (w[1].library[a] - w[0].library[a]).powi(2)).sum::<f32>().sqrt()).sum();
+    let spread = (0..3)
+        .map(|a| {
+            let (lo, hi) =
+                lines.iter().fold((f32::MAX, f32::MIN), |(lo, hi), l| (lo.min(l.library[a]), hi.max(l.library[a])));
+            hi - lo
+        })
+        .fold(0.0, f32::max);
+    let airborne = lines.iter().filter(|l| l.airborne).count();
+    println!(
+        "{} local unit lines over {seconds} s: {travelled:.1} world units between them, {spread:.1} across, \
+         {airborne} in the air",
+        lines.len()
+    );
+    assert!(spread > 1.0, "the player stayed within {spread} world units");
+
+    let row = rig.client.players()[&me].clone();
+    println!(
+        "the game's player had {} moves rejected over {seconds} s (last reason {})",
+        row.rejected_moves, row.last_reject
+    );
+    // What counts: a move the server judged impossible (too fast, through a
+    // surface, off the ground) once the game is running steadily. Not the
+    // game's first seconds, where it runs the ticks of its loading in a rush
+    // and its moves arrive in bunches faster than the bound allows; and not a
+    // second input in one server tick, which is the timing of the two clocks
+    // and not a move.
+    let warm_up = first_tick.unwrap_or(0) + 600;
+    let impossible: Vec<_> =
+        rejections.iter().filter(|(reason, tick)| (3..=5).contains(reason) && *tick > warm_up).collect();
+    println!(
+        "{} rejections in all; {} of them impossible moves after the first 20 s",
+        rejections.len(),
+        impossible.len()
+    );
+    assert!(impossible.is_empty(), "the server rejected the game's player's moves: {impossible:?}");
+    let _ = std::fs::remove_dir_all(&work);
+}

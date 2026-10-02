@@ -1,12 +1,21 @@
-# Walking straight ahead at full throttle on flat ground (about 12 world units).
-scenario walk_flat
+# Every direction of walking on flat ground, in turn, with a pause between: ahead,
+# backwards, to the left, to the right, ahead and to the left at once, then
+# turning (the facing changes, the throttle stays ahead). The speeds of the
+# directions are the tags' own and differ.
+scenario walk_directions
 map bloodgulch
 # <name> <x> <y> <z> <yaw, radians>: a little above the ground, so that the
 # player settles on it in the first ticks
 start flat_field 77.9 -166.2 0.32 0.0
-ticks 180
-# settle, then walk
-input 30 180 forward=1.0
+# (it ends before the walk reaches a scenery object that the engine bumps
+# into and the simulation, which has the collision BSP alone, does not know)
+ticks 520
+input 30 90 forward=1.0
+input 120 180 forward=-1.0
+input 210 270 strafe=1.0
+input 300 360 strafe=-1.0
+input 390 450 forward=1.0 strafe=1.0
+input 480 520 forward=1.0 yaw=1.0
 
 # what the Rust simulation may differ from the C engine by: what walking on
 # the ground reaches (its port of the engine's movement differs only by the

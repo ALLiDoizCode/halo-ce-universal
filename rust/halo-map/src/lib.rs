@@ -32,7 +32,9 @@ mod codec;
 pub mod collision;
 mod error;
 mod map;
+mod movement;
 mod reader;
 
 pub use error::{MapError, Result};
 pub use map::{flag_type, game_type, HaloMap, MapHeader, NetgameEquipment, NetgameFlag, PlayerStart, VehiclePlacement};
+pub use movement::Movement;

@@ -541,11 +541,18 @@ pub fn join(ctx: &ReducerContext, udp_key: Vec<u8>) -> Result<(), String> {
     }
     let spawn = ctx.db.spawn_point().index().find(id as u32 % spawns).ok_or("a spawn point is missing")?;
     let tick = ctx.db.match_tick().id().find(ONLY).map_or(0, |t| t.tick);
+    // the player starts standing on the ground: a spawn point is a little above
+    // it, and a player placed there would fall for a few ticks that the server
+    // would refuse to see
+    let [x, y, z] = match current_map(ctx) {
+        Some(map) => halo_sim::walk::settled(&map, [spawn.x, spawn.y, spawn.z]),
+        None => [spawn.x, spawn.y, spawn.z],
+    };
     ctx.db.player().insert(PlayerRow {
         id,
-        x: spawn.x,
-        y: spawn.y,
-        z: spawn.z,
+        x,
+        y,
+        z,
         yaw: spawn.yaw,
         pitch: 0.0,
         updated_tick: tick,

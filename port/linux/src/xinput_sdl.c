@@ -240,7 +240,9 @@ network tests (port/linux/game/network_test.c), different for each seed:
 it walks and strafes in circles, turns, fires every few seconds, jumps now
 and then and throws a grenade every seven seconds; "look:<seed>" stands
 still, only turning and looking up and down (where remote players aim and
-whether they stand) */
+whether they stand); "walk:<seed>" only walks, strafes and turns, with no
+button pressed (the large-scale mode's movement runs, which have to stay on
+the ground) */
 static int test_input_holding_action;
 static Uint64 test_input_holding_action_since;
 
@@ -259,6 +261,7 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
 	static int checked;
 	static int seed = -1;
 	static int looking;
+	static int walking;
 	double t;
 
 	if (!checked)
@@ -274,6 +277,11 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
 		{
 			seed = atoi(setting + 5);
 			looking = 1;
+		}
+		else if (!strncmp(setting, "walk:", 5))
+		{
+			seed = atoi(setting + 5);
+			walking = 1;
 		}
 	}
 	if (seed < 0)
@@ -295,6 +303,8 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
 	pad->sThumbLY = (SHORT)(sin(t * 0.9) * 32000.0);
 	pad->sThumbLX = (SHORT)(cos(t * 0.6 + seed) * 20000.0);
 	pad->sThumbRX = (SHORT)(sin(t * 0.4) * 14000.0);
+	if (walking)
+		return;
 	if (fmod(t, 3.0) < 0.3)
 		pad->bAnalogButtons[XINPUT_GAMEPAD_RIGHT_TRIGGER] = 255;
 	if (fmod(t, 5.0) < 0.1)

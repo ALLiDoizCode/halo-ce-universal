@@ -31,17 +31,17 @@ extern crate alloc;
 
 pub mod fixtures;
 mod map;
+pub mod math;
 mod movement;
+mod pill;
 mod rng;
 mod state;
 mod step;
+pub mod walk;
 pub mod wire;
 
 pub use map::MapData;
-pub use movement::{
-    GROUND_PROBE_HEIGHT, GROUND_TOLERANCE, MAX_CATCH_UP_TICKS, MAX_MOVE_SPEED, MAX_MOVE_SPEED_SQUARED_PER_TICK,
-    TICKS_PER_SECOND,
-};
+pub use movement::{GROUND_TOLERANCE, MAX_CATCH_UP_TICKS, PENETRATION_TOLERANCE, TICKS_PER_SECOND};
 pub use rng::Rng;
 pub use state::{snapshot, MemoryStore, Player, PlayerId, Store};
 pub use step::{step, Event, PlayerInput, RejectReason};

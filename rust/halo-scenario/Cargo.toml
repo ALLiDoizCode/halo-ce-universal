@@ -1,0 +1,10 @@
+[package]
+name = "halo-scenario"
+version = "0.1.0"
+description = "Plays the comparison harness's scenarios (tools/scenarios) in the Rust simulation and writes the trace the harness compares with the C engine's"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+halo-map = { path = "../halo-map" }
+halo-sim = { path = "../halo-sim" }

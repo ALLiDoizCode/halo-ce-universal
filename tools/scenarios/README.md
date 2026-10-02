@@ -61,6 +61,25 @@ Traces of different lengths fail.
 Run the Rust simulation's trace through the same `compare`: it needs only the
 file in the format below.
 
+## Run a scenario in the Rust simulation
+
+`rust/halo-scenario` plays a scenario in the simulation's walking
+(`halo_sim::walk`, on the map's own collision data and tags) and writes the
+trace in the format below. It reads the same `.scn` files and needs the game's
+own map files (`--maps`, or `HALO_MAP_DIR`):
+
+```
+cd rust
+cargo run --release -p halo-scenario -- ../tools/scenarios/walk_flat.scn --maps <data root>/maps --out rust.tsv
+python ../tools/scenario_harness.py compare engine.tsv rust.tsv --scenario ../tools/scenarios/walk_flat.scn
+```
+
+A scenario that jumps or crouches is refused until those are simulated.
+The simulation has the map's collision BSP alone: a scenario that walks the
+engine's player into scenery or another object (a rock, a crate) does not
+match, as the engine stops there and the simulation does not, so scenarios
+keep to open ground and the walls of the map itself.
+
 ## Add a scenario
 
 Add `tools/scenarios/<name>.scn`; the file's `scenario` line must be its name.

@@ -1,12 +1,14 @@
-# Walking straight ahead at full throttle on flat ground (about 12 world units).
-scenario walk_flat
+# Walking straight into a wall: inside a base on Blood Gulch, 2 world units
+# from a flat wall, the player runs at it and has to stop against it (the
+# pill's radius, 0.2, from it) and stay there while the throttle holds.
+scenario walk_wall
 map bloodgulch
 # <name> <x> <y> <z> <yaw, radians>: a little above the ground, so that the
 # player settles on it in the first ticks
-start flat_field 77.9 -166.2 0.32 0.0
-ticks 180
-# settle, then walk
-input 30 180 forward=1.0
+start base_wall 98.49 -157.64 1.76 0.0
+ticks 150
+# settle, then run at the wall (it is at x = 100.486, facing back along -x)
+input 30 150 forward=1.0
 
 # what the Rust simulation may differ from the C engine by: what walking on
 # the ground reaches (its port of the engine's movement differs only by the
