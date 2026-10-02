@@ -194,7 +194,7 @@ the setting for one start of the game. It has priority over the file.
 | `debug.gpu_skip_vertex_shaders`, `debug.gpu_debug_expression`, `debug.gpu_debug_flat`, `debug.gpu_debug_texture0` | off | `HALO_GPU_SKIP_VS`, `HALO_GPU_DEBUG_EXPR`, `HALO_GPU_DEBUG_FLAT`, `HALO_GPU_DEBUG_T0` | Tools to find problems in the graphics: skip the draws of a vertex shader, or replace the output of all pixel shaders with a GLSL expression (for example `t0.rgb`). |
 | `debug.network_test`, `debug.network_test_start`, `debug.network_test_kill`, `debug.network_test_score`, `debug.network_test_shoot`, `debug.network_test_vehicle`, `debug.network_test_pickup`, `debug.network_test_pickup_weapon`, `debug.test_input` | off | `HALO_NETWORK_TEST`, `HALO_NETWORK_TEST_START`, `HALO_NETWORK_TEST_KILL`, `HALO_NETWORK_TEST_SCORE`, `HALO_NETWORK_TEST_SHOOT`, `HALO_NETWORK_TEST_VEHICLE`, `HALO_NETWORK_TEST_PICKUP`, `HALO_NETWORK_TEST_PICKUP_WEAPON`, `HALO_TEST_INPUT` | Automatic tests of system link (`game/network_test.c`). Refer to `NETCODE.md`. |
 | `debug.scenario`, `debug.scenario_trace` | `""` | `HALO_SCENARIO`, `HALO_SCENARIO_TRACE` | The comparison harness: plays a scenario file with the first player of a network test game, alone, and writes a trace of the player's state. `tools/scenario_harness.py` runs it. Refer to `tools/scenarios/README.md`. |
-| `large.map`, `large.gateway`, `large.spacetimedb`, `large.database`, `large.log_players` | `""`, `127.0.0.1:7777`, `http://127.0.0.1:3000`, `""`, `false` | `HALO_LARGE_MAP`, `HALO_LARGE_GATEWAY`, `HALO_LARGE_SPACETIMEDB`, `HALO_LARGE_DATABASE`, `HALO_LARGE_LOG` | The large-scale mode. Refer to "Large-scale mode". |
+| `large.map`, `large.gateway`, `large.spacetimedb`, `large.database`, `large.root`, `large.name`, `large.log_players` | `""`, `127.0.0.1:7777`, `http://127.0.0.1:3000`, `""`, `""`, `""`, `false` | `HALO_LARGE_MAP`, `HALO_LARGE_GATEWAY`, `HALO_LARGE_SPACETIMEDB`, `HALO_LARGE_DATABASE`, `HALO_LARGE_ROOT`, `HALO_LARGE_NAME`, `HALO_LARGE_LOG` | The large-scale mode. Refer to "Large-scale mode". |
 | `debug.network_latency`, `debug.network_loss` | `0` | `HALO_NETWORK_LATENCY`, `HALO_NETWORK_LOSS` | The game holds all the data that it receives for this number of milliseconds, and ignores this percentage of the datagrams. Use these settings to test the netcode as on the internet. |
 | `debug.telnet_console`, `debug.telnet_console_port` | `false`, `2323` | `HALO_TELNET_CONSOLE`, `HALO_TELNET_CONSOLE_PORT` | The game listens on 127.0.0.1, on this port, for a script console (connect with telnet). The console has no password, so only this computer can reach it. |
 
@@ -267,8 +267,78 @@ for the library and for the engine's units, with the server's. A player
 leaves the match and joins it again, to see the unit go and come back. With
 `HALO_SCREENSHOT_DIR` and `HALO_SCREENSHOT_EVERY` the game saves frames, and
 `HALO_HEADLESS_LOG` keeps its log. Without the data, it skips.
-The library's own tests (`rust/halo-client/tests/boundary.rs`) need only
-`HALO_STDB_BIN`.
+The library's own tests (`rust/halo-client/tests/boundary.rs` and
+`servers.rs`) need only `HALO_STDB_BIN`.
+
+### Pick a server from the list
+
+With `large.root` set (the name of the server list's root database, such as
+`halo-root`) and `large.map` empty, the game does not host a map of its own:
+the player picks a server. `large.spacetimedb` is the SpacetimeDB the server
+list is on (the operator tells players its address). The original game's menus
+are tags of the game's data, and the mode adds none, so the list is on the
+developer console (push \` to open it, in the main menu or in a game), which
+runs three commands here:
+
+| Command | |
+| --- | --- |
+| `servers` | Lists the servers: each one's map, game type and players (`3/200`), and who you are (your identity, which a ban names). A `*` marks the server you are on. |
+| `join <number>` | Takes a seat on that server of the list (or `join <id>`). When the server has given a seat, the game hosts a game of one machine on the server's map and the library brings the other players. Joined from a game, the game of the server you were on ends first. |
+| `leave` | Stops being on the server. |
+
+A server that is full says so, and one that has banned you says why
+(`you are banned from this server: <reason>`), on the console. A full server
+is asked again for 20 seconds. On a server the game follows its rotation:
+when the list names another match, the game ends, shows its scores and joins
+the new one, on its map, by itself.
+
+The player's identity is kept between sessions in the save root
+(`u/large_identity/`, one file for each SpacetimeDB; whoever holds the file is
+that identity). It is the same on the server list's root database and on every
+match, so it follows the player from server to server and from session to
+session, and it is what bans name. A SpacetimeDB gives and checks its own
+tokens, so another SpacetimeDB is another identity, unless the two share their
+signing keys. A token the server no longer accepts is replaced by a new
+identity.
+
+`rust/halo-client/tests/server_list.rs` runs this with the real game: a whole
+server on the real maps, the game's console (through the telnet console, which
+runs the same commands), a join, the rotation, a second server and a ban. It
+needs the same data as the headless test above.
+
+### Running a server
+
+`halo-server` (`rust/halo-server`) runs everything of a server from one
+configuration file: SpacetimeDB (started and stopped by it, or one that is
+running), the server list (a root database, `rust/halo-root-module`), and for
+each server of the list a rotation of matches, each a database of its own made
+from the match module, with a gateway in front of it. You supply the maps (your
+own copy of the game's data). Build the two modules and the program, and start
+it:
+
+```
+(cd rust/halo-root-module && cargo build --release --target wasm32-unknown-unknown)
+(cd rust/halo-match-module && cargo build --release --target wasm32-unknown-unknown)
+cd rust/halo-server && cargo build --release
+target/release/halo-server --example > server.toml     # edit it
+target/release/halo-server --config server.toml
+```
+
+`server.toml` sets the SpacetimeDB to use, the modules, the maps folder and, for
+each server, its rotation: the map, game type, variant, player cap and length of
+each match and the bytes a second each player may be sent. The example documents
+every setting. A match ends when its time is up, and the next of the rotation,
+made ready a few seconds before, takes over: the list names it and the players'
+games follow. The old match's gateway stops and its database is deleted. Each
+server's log line (every `log_secs`) says the tick time (the server's own
+metrics, whole and the module's part), the players against the cap, the
+bandwidth sent, the moves rejected, late inputs and the gateway's send time.
+
+Open the UDP ports of `bind` and the next one for each server, and run it under
+a supervisor that restarts it. `halo-server ban <identity> [reason]`,
+`unban <identity>`, `bans` and `servers` act on the running server's root
+database: a ban takes the player out of every running match and refuses them
+the next, with the reason.
 
 ## Updates
 

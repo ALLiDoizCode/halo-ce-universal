@@ -19,9 +19,12 @@
 
 use std::ffi::{c_char, CStr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
-use crate::session::{Config, RemoteUnit, Session};
+use crate::browser::{Browser, ServerEntry};
+use crate::identity::IdentityFile;
+use crate::session::{Config, RefusalKind, RemoteUnit, Session};
 
 #[derive(Default)]
 struct Global {
@@ -29,9 +32,24 @@ struct Global {
     /// What [`halo_large_frame`] froze, for [`halo_large_unit`] to read.
     frame: Vec<RemoteUnit>,
     error: String,
+    /// Where identities are kept ([`halo_large_identity_dir`]).
+    identity_dir: Option<PathBuf>,
+    /// The name the player plays under ([`halo_large_set_name`]).
+    name: String,
+    /// The server list's connection, and the list as [`halo_large_browse_list`] froze it.
+    browser: Option<Browser>,
+    servers: Vec<ServerEntry>,
 }
 
-static GLOBAL: Mutex<Global> = Mutex::new(Global { session: None, frame: Vec::new(), error: String::new() });
+static GLOBAL: Mutex<Global> = Mutex::new(Global {
+    session: None,
+    frame: Vec::new(),
+    error: String::new(),
+    identity_dir: None,
+    name: String::new(),
+    browser: None,
+    servers: Vec::new(),
+});
 
 fn global() -> std::sync::MutexGuard<'static, Global> {
     GLOBAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -86,7 +104,8 @@ pub unsafe extern "C" fn halo_large_start(
             g.session.take()
         };
         drop(old);
-        match Session::start(Config { gateway, spacetimedb, database, token: None }) {
+        let identity = IdentityFile::new(global().identity_dir.as_deref(), &spacetimedb);
+        match Session::start(Config { gateway, spacetimedb, database, token: None, identity }) {
             Ok(session) => {
                 global().session = Some(session);
                 1
@@ -313,5 +332,257 @@ pub unsafe extern "C" fn halo_large_error(buffer: *mut c_char, size: u32) -> u32
             *buffer.add(length) = 0;
         }
         length as u32
+    })
+}
+
+/// Copy `text`, NUL-terminated and cut to `size`, into `buffer`; its length
+/// (0 and `buffer` left alone for no text).
+///
+/// # Safety
+/// `buffer` points to `size` writable `char`s.
+unsafe fn copy_text(text: &str, buffer: *mut c_char, size: u32) -> u32 {
+    if text.is_empty() || size == 0 || buffer.is_null() {
+        return 0;
+    }
+    let length = text.len().min(size as usize - 1);
+    // SAFETY: `size` bytes are the caller's
+    unsafe {
+        std::ptr::copy_nonoverlapping(text.as_ptr(), buffer as *mut u8, length);
+        *buffer.add(length) = 0;
+    }
+    length as u32
+}
+
+/// Where the player's identity is kept between sessions: a folder, in which
+/// each SpacetimeDB the player has been to has a file with the token that
+/// proves who they are there. Without it every session (and the server list)
+/// is a new identity. Set it before [`halo_large_start`] and
+/// [`halo_large_browse_start`].
+///
+/// # Safety
+/// `folder` is NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_identity_dir(folder: *const c_char) {
+    guard((), || {
+        global().identity_dir = unsafe { string(folder) }.filter(|f| !f.is_empty()).map(PathBuf::from);
+    })
+}
+
+/// The name the player plays under, which the server list is told when
+/// [`halo_large_browse_start`] connects and which the matches show on their
+/// rosters (letters, digits, spaces and `_ . -`, the first 11 of them; empty for
+/// none). Set it before [`halo_large_browse_start`].
+///
+/// # Safety
+/// `name` is NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_set_name(name: *const c_char) {
+    guard((), || {
+        global().name = unsafe { string(name) }.unwrap_or_default();
+    })
+}
+
+/// Start listing the servers of the root database `database` on the
+/// SpacetimeDB at `spacetimedb` (a URI), as the player's own identity. Returns
+/// 1 when listing has started, which is not yet having the list (see
+/// [`halo_large_browse_status`]), and 0 when it could not (see
+/// [`halo_large_error`]). A list already running is stopped first.
+///
+/// # Safety
+/// The strings are NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_browse_start(spacetimedb: *const c_char, database: *const c_char) -> u32 {
+    guard(0, || {
+        let (Some(spacetimedb), Some(database)) = (unsafe { string(spacetimedb) }, unsafe { string(database) }) else {
+            global().error = "a null string".into();
+            return 0;
+        };
+        let (old, identity, name) = {
+            let mut g = global();
+            g.servers.clear();
+            g.error.clear();
+            (g.browser.take(), IdentityFile::new(g.identity_dir.as_deref(), &spacetimedb), g.name.clone())
+        };
+        drop(old);
+        match Browser::start(&spacetimedb, &database, identity, &name) {
+            Ok(browser) => {
+                global().browser = Some(browser);
+                1
+            }
+            Err(e) => {
+                global().error = e;
+                0
+            }
+        }
+    })
+}
+
+/// Stop listing servers, if it is.
+#[no_mangle]
+pub extern "C" fn halo_large_browse_stop() {
+    guard((), || {
+        let old = {
+            let mut g = global();
+            g.servers.clear();
+            g.browser.take()
+        };
+        drop(old);
+    })
+}
+
+/// Whether the list is up to date with the server (1) or not yet (0, and with
+/// no list started). `out` has two `unsigned long`s: 1 when the server list's
+/// database has refused the player as banned, and the number of servers in the
+/// list now.
+///
+/// # Safety
+/// `out` points to two writable `unsigned long`s.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_browse_status(out: *mut u32) -> u32 {
+    guard(0, || {
+        let g = global();
+        if out.is_null() {
+            return 0;
+        }
+        let out = unsafe { std::slice::from_raw_parts_mut(out, 2) };
+        out.fill(0);
+        let Some(browser) = &g.browser else { return 0 };
+        out[0] = browser.banned().is_some() as u32;
+        out[1] = browser.servers().len() as u32;
+        browser.connected() as u32
+    })
+}
+
+/// Freeze the server list for [`halo_large_browse_entry`],
+/// [`halo_large_browse_text`] and [`halo_large_browse_find`] to read, and
+/// return how many servers there are.
+#[no_mangle]
+pub extern "C" fn halo_large_browse_list() -> u32 {
+    guard(0, || {
+        let mut g = global();
+        g.servers = g.browser.as_ref().map(|b| b.servers()).unwrap_or_default();
+        g.servers.len() as u32
+    })
+}
+
+/// The numbers of one server of the frozen list, `index` below the count
+/// [`halo_large_browse_list`] returned. Returns 1, or 0 when there is no such
+/// server. `out` has five `unsigned long`s: the players in the match, the most
+/// it holds, the match's number (matches the server has run), its time limit in
+/// seconds (0: none) and 1 when there is a match to join (0: between matches).
+///
+/// # Safety
+/// `out` points to five writable `unsigned long`s.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_browse_entry(index: u32, out: *mut u32) -> u32 {
+    guard(0, || {
+        let g = global();
+        if out.is_null() {
+            return 0;
+        }
+        let Some(s) = g.servers.get(index as usize) else { return 0 };
+        unsafe { std::slice::from_raw_parts_mut(out, 5) }.copy_from_slice(&[
+            s.players,
+            s.capacity,
+            s.match_number as u32,
+            s.match_seconds,
+            !s.database.is_empty() as u32,
+        ]);
+        1
+    })
+}
+
+/// One text of one server of the frozen list: `field` 0 the server's id, 1 its
+/// title, 2 the match's map, 3 its game type, 4 its variant, 5 its database
+/// (empty between matches), 6 the gateway to send UDP to (`host:port`).
+/// Copied, NUL-terminated and cut to `size`, into `buffer`; returns its length
+/// (0: nothing to say, or no such server, and `buffer` is left alone).
+///
+/// # Safety
+/// `buffer` points to `size` writable `char`s.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_browse_text(index: u32, field: u32, buffer: *mut c_char, size: u32) -> u32 {
+    guard(0, || {
+        let g = global();
+        let Some(s) = g.servers.get(index as usize) else { return 0 };
+        let text = match field {
+            0 => &s.id,
+            1 => &s.title,
+            2 => &s.map,
+            3 => &s.game_type,
+            4 => &s.variant,
+            5 => &s.database,
+            6 => &s.gateway,
+            _ => return 0,
+        };
+        unsafe { copy_text(text, buffer, size) }
+    })
+}
+
+/// The index in the frozen list of the server with this id, plus one; 0 when
+/// the list has none.
+///
+/// # Safety
+/// `id` is NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_browse_find(id: *const c_char) -> u32 {
+    guard(0, || {
+        let Some(id) = (unsafe { string(id) }) else { return 0 };
+        let g = global();
+        g.servers.iter().position(|s| s.id == id).map_or(0, |at| at as u32 + 1)
+    })
+}
+
+/// What the server list has to say that the player should read: that its
+/// database turned them away as banned (and why), or else its latest trouble.
+/// Copied as [`halo_large_error`] copies; returns the length (0: nothing).
+///
+/// # Safety
+/// `buffer` points to `size` writable `char`s.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_browse_message(buffer: *mut c_char, size: u32) -> u32 {
+    guard(0, || {
+        let g = global();
+        let Some(browser) = &g.browser else { return 0 };
+        let text = browser.banned().map(|b| b.message).or_else(|| browser.last_error()).unwrap_or_default();
+        unsafe { copy_text(&text, buffer, size) }
+    })
+}
+
+/// The player's SpacetimeDB identity as hex (64 characters), once the server
+/// has said: the one of the running session, else the one of the server list's
+/// connection. Copied as [`halo_large_error`] copies; returns the length (0:
+/// not known yet).
+///
+/// # Safety
+/// `buffer` points to `size` writable `char`s.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_identity(buffer: *mut c_char, size: u32) -> u32 {
+    guard(0, || {
+        let g = global();
+        let identity =
+            g.session.as_ref().and_then(|s| s.identity()).or_else(|| g.browser.as_ref().and_then(|b| b.identity()));
+        unsafe { copy_text(&identity.unwrap_or_default(), buffer, size) }
+    })
+}
+
+/// Why the match has not given the player a seat, if it has not: returns 1
+/// when the player is banned, 2 when the match is full, 3 for any other
+/// reason, 0 when there is no refusal. The words to show the player are copied
+/// as [`halo_large_error`] copies.
+///
+/// # Safety
+/// `buffer` points to `size` writable `char`s.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_refusal(buffer: *mut c_char, size: u32) -> u32 {
+    guard(0, || {
+        let g = global();
+        let Some(refusal) = g.session.as_ref().and_then(|s| s.refusal()) else { return 0 };
+        unsafe { copy_text(&refusal.message, buffer, size) };
+        match refusal.kind {
+            RefusalKind::Banned => 1,
+            RefusalKind::Full => 2,
+            RefusalKind::Other => 3,
+        }
     })
 }

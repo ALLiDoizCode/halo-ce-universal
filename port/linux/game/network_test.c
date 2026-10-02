@@ -74,6 +74,7 @@ void test_input_hold_action(int hold);
 /* large_mode.c's */
 boolean large_mode_active(void);
 char const *large_mode_map(void);
+void large_mode_update(boolean main_menu_loaded, real seconds);
 
 enum
 {
@@ -110,6 +111,8 @@ static struct
 	char pickup_weapon[64];
 	long score_to_win;
 	long logged_time;
+	/* the large-scale mode ended the game: the lobby, after its scores */
+	boolean large_next;
 } network_test;
 
 /* the variant at the index of the list (copied to name), FALSE past its end */
@@ -146,7 +149,7 @@ static void network_test_read_settings(
 	/* the large-scale mode (large_mode.c) plays a game of one machine on its
 	map, started once it is set up (the map at a second, the player at two): the
 	library brings the other players */
-	if (large_mode_active())
+	if (large_mode_active() && large_mode_map()[0])
 	{
 		network_test.mode = _network_test_host;
 		snprintf(network_test.map_name, sizeof(network_test.map_name), "%s", large_mode_map());
@@ -740,6 +743,8 @@ void network_test_update(
 	boolean main_menu_loaded,
 	real seconds)
 {
+	/* (the large-scale mode's server list and join, which start games here) */
+	large_mode_update(main_menu_loaded, seconds);
 	if (!network_test.checked)
 		network_test_read_settings();
 	if (network_test.mode == _network_test_off)
@@ -882,9 +887,11 @@ void network_test_update(
 		if (game_engine_showing_postgame() && global_network_game_server_get())
 		{
 			network_test.postgame_seconds += seconds;
-			if (network_test.postgame_seconds >= 3.0f && network_test_variant(network_test.variant_index + 1, NULL, 0))
+			if (network_test.postgame_seconds >= 3.0f &&
+				(network_test.large_next || network_test_variant(network_test.variant_index + 1, NULL, 0)))
 			{
 				network_test.postgame_seconds = 0.0f;
+				network_test.large_next = FALSE;
 				network_game_server_reset_to_pregame(global_network_game_server_get());
 			}
 		}
@@ -1017,4 +1024,65 @@ void network_test_update(
 		}
 		break;
 	}
+}
+
+/* ---------- the large-scale mode's server list (large_mode.c) */
+
+/* the next game is a server's: a game of one machine on this map, from the
+lobby the last one left (as the next of a list of variants is), or from the
+main menu as the first is. The library brings the other players. */
+void network_test_large_host(
+	char const *map)
+{
+	if (!network_test.checked)
+		network_test_read_settings();
+	network_test.mode = _network_test_host;
+	snprintf(network_test.map_name, sizeof(network_test.map_name), "%s", map);
+	/* (two teams, as the mode's matches have) */
+	snprintf(network_test.variant_name, sizeof(network_test.variant_name), "team_slayer");
+	network_test.variant_index = 0;
+	network_test.start_delay = 3.0f;
+	network_test.game_over = FALSE;
+	network_test.large_next = FALSE;
+	network_test.postgame_seconds = 0.0f;
+	network_test.started = FALSE;
+	network_test.map_set = FALSE;
+	network_test.setup_seconds = 0.0f;
+	network_test.menu_seconds = 0.0f;
+	if (network_test.set_up && global_network_game_server_get())
+	{
+		/* (as picking the next game's map does: the scores' map choice holds the countdown) */
+		network_game_server_pause_countdown(global_network_game_server_get(), FALSE);
+	}
+	else
+	{
+		/* no lobby of the last game to go on from (the player left to the menu): from the start */
+		network_test.set_up = FALSE;
+		network_test.player_added = FALSE;
+	}
+	platform_log("network test: the large-scale mode hosts %s", map);
+}
+
+/* back to the lobby from a game that is running (a server's match is over):
+the game ends, its scores are shown a while, and the lobby follows, as at the
+end of any game (the postgame above takes the host there) */
+void network_test_large_leave_game(
+	void)
+{
+	if (global_network_game_server_get() && game_engine_running())
+	{
+		game_engine_end_game();
+		network_test.large_next = TRUE;
+		platform_log("network test: the large-scale mode ends the game");
+	}
+}
+
+/* the player is off the server: nothing is hosted for the mode any more */
+void network_test_large_stop(
+	void)
+{
+	if (!network_test.checked)
+		network_test_read_settings();
+	network_test.mode = _network_test_off;
+	network_test.large_next = FALSE;
 }

@@ -370,6 +370,83 @@ fn a_full_match_and_a_match_without_spawn_points_turn_joiners_away() {
 }
 
 #[test]
+fn a_banned_identity_is_turned_away_with_the_reason_and_a_ban_takes_a_seated_player_out() {
+    let Some((server, owner)) = seated_match("banned") else { return };
+    let (bad_account, good_account) = (server.new_account(), server.new_account());
+    let bad = PlayerClient::connect(&server.uri(), "banned", &bad_account.token);
+    let good = PlayerClient::connect(&server.uri(), "banned", &good_account.token);
+    bad.join(KEY_A).unwrap();
+    good.join(KEY_B).unwrap();
+    wait_until("both seats", || owner.seats().len() == 2);
+
+    // only the owner bans
+    let stranger = MatchClient::connect(&server.uri(), "banned");
+    is_refused(stranger.set_ban(bad_account.identity(), "no right"), "owner");
+
+    // a ban on a seated player takes them out of the match, and only them
+    owner.set_ban(bad_account.identity(), "cheating").unwrap();
+    wait_until("the banned player's seat to go", || owner.seats().len() == 1);
+    assert!(owner.seats().values().all(|s| s.owner == good_account.identity()));
+    assert!(!owner.players().contains_key(&0), "the player is gone with the seat");
+
+    // joining again is refused, and says why, from any connection of the identity
+    let message = bad.join(KEY_A).expect_err("a banned identity is refused");
+    assert!(message.contains("banned: cheating"), "the message was {message}");
+    let again = PlayerClient::connect_unsubscribed(&server.uri(), "banned", &bad_account.token);
+    assert!(again.join(KEY_A).unwrap_err().contains("banned: cheating"));
+    // the others are not affected
+    good.join(KEY_B).unwrap();
+
+    // lifting the ban lets them in, to the seat that is free
+    owner.clear_ban(bad_account.identity()).unwrap();
+    bad.join(KEY_A).unwrap();
+    wait_until("the seat back", || owner.seats().len() == 2);
+}
+
+#[test]
+fn the_name_an_identity_chose_is_on_the_roster_whenever_it_holds_a_seat() {
+    let Some((server, owner)) = seated_match("names") else { return };
+    let account = server.new_account();
+    let other = server.new_account();
+    let player = PlayerClient::connect(&server.uri(), "names", &account.token);
+    let stranger = MatchClient::connect(&server.uri(), "names");
+
+    // only the owner names; a name chosen before the seat is the seat's
+    is_refused(stranger.set_name(account.identity(), "Mallory"), "owner");
+    owner.set_name(account.identity(), "Alice").unwrap();
+    player.join(KEY_A).unwrap();
+    wait_until("the roster", || owner.roster().len() == 1);
+    assert_eq!(owner.roster()[&0].name, "Alice");
+
+    // a name chosen while seated replaces the placeholder at once, cleaned for the engine's field
+    owner.set_name(account.identity(), "Bob.Smith-99!! the Great").unwrap();
+    wait_until("the new name", || owner.roster()[&0].name == "Bob.Smith-9");
+    // another identity's name does not touch this seat
+    owner.set_name(other.identity(), "Carol").unwrap();
+    assert_eq!(owner.roster()[&0].name, "Bob.Smith-9");
+
+    // with none (or nothing the game can show) the player is "Player <number>" again
+    owner.set_name(account.identity(), "!!!").unwrap();
+    wait_until("the placeholder", || owner.roster()[&0].name == "Player 0");
+
+    // a seat taken later gets the name already chosen
+    let late = PlayerClient::connect(&server.uri(), "names", &other.token);
+    late.join(KEY_B).unwrap();
+    wait_until("the second player", || owner.roster().len() == 2);
+    assert_eq!(owner.roster()[&1].name, "Carol");
+}
+
+#[test]
+fn a_full_match_says_it_is_full_and_how_many_it_holds() {
+    let Some((server, owner)) = seated_match("fullmsg") else { return };
+    owner.set_capacity(1).unwrap();
+    let player = || PlayerClient::connect(&server.uri(), "fullmsg", &server.new_account().token);
+    player().join(KEY_A).unwrap();
+    let message = player().join(KEY_B).expect_err("no room");
+    assert!(message.contains("full: the match has its 1 players"), "the message was {message}");
+}
+
+#[test]
 fn a_player_who_leaves_is_removed_and_no_longer_listed() {
     let Some((server, owner)) = seated_match("leave") else { return };
     let (a, b) = (server.new_account(), server.new_account());

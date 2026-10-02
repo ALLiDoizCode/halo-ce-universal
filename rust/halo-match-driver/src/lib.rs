@@ -35,6 +35,12 @@
 #[rustfmt::skip]
 #[allow(clippy::all, dead_code, unused_imports)]
 pub mod module_bindings;
+/// The root database's bindings (`rust/halo-root-module`), generated the same
+/// way: `spacetime generate --lang rust --out-dir src/root_bindings --bin-path
+/// ../halo-root-module/target/wasm32-unknown-unknown/release/halo_root_module.wasm`
+#[rustfmt::skip]
+#[allow(clippy::all, dead_code, unused_imports)]
+pub mod root_bindings;
 pub mod server;
 pub mod walkers;
 
@@ -63,14 +69,12 @@ pub struct SeenTick {
     pub arrived_us: i64,
 }
 
-/// Run a reducer and wait for the module's answer.
-fn call_reducer(
+/// Run a reducer and wait for the module's answer. `C` is the generated
+/// bindings' `ReducerEventContext`, of whichever module the reducer is in.
+pub fn call_reducer<C>(
     what: &str,
     invoke: impl FnOnce(
-        Box<
-            dyn FnOnce(&ReducerEventContext, Result<Result<(), String>, spacetimedb_sdk::__codegen::InternalError>)
-                + Send,
-        >,
+        Box<dyn FnOnce(&C, Result<Result<(), String>, spacetimedb_sdk::__codegen::InternalError>) + Send>,
     ) -> spacetimedb_sdk::Result<()>,
 ) -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
@@ -101,6 +105,11 @@ impl MatchClient {
     /// Like [`MatchClient::connect`], as the identity of `token`: the match's
     /// owner, if it is the one that published.
     pub fn connect_as(uri: &str, database: &str, token: Option<&str>) -> MatchClient {
+        MatchClient::try_connect_as(uri, database, token).expect("connect")
+    }
+
+    /// [`MatchClient::connect_as`] that says what went wrong instead of panicking.
+    pub fn try_connect_as(uri: &str, database: &str, token: Option<&str>) -> Result<MatchClient, String> {
         let conn = DbConnection::builder()
             .with_uri(uri)
             .with_database_name(database)
@@ -108,18 +117,19 @@ impl MatchClient {
             // the gateway will run on loopback with compression off
             .with_compression(Compression::None)
             .build()
-            .expect("connect");
+            .map_err(|e| format!("connecting to {database} on {uri}: {e}"))?;
         let (tx, ticks) = mpsc::channel();
         conn.db.match_tick().on_update(move |ctx, _old, marker| {
             let players = ctx.db.player().iter().map(|p| (p.id, p)).collect();
             let _ = tx.send(SeenTick { marker: marker.clone(), players, arrived_us: now_us() });
         });
+        let database_name = database.to_string();
         let (applied_tx, applied) = mpsc::channel();
         conn.subscription_builder()
             .on_applied(move |_| {
                 let _ = applied_tx.send(());
             })
-            .on_error(|_, err| panic!("subscription failed: {err}"))
+            .on_error(move |_, err| eprintln!("subscription to {database_name} failed: {err}"))
             .subscribe([
                 "SELECT * FROM match_tick",
                 "SELECT * FROM player",
@@ -127,8 +137,10 @@ impl MatchClient {
                 "SELECT * FROM roster",
             ]);
         conn.run_threaded();
-        applied.recv_timeout(Duration::from_secs(30)).expect("the subscription applied");
-        MatchClient { conn, ticks }
+        applied
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|_| format!("the subscription to {database} on {uri} did not apply"))?;
+        Ok(MatchClient { conn, ticks })
     }
 
     pub fn load_map(&self, data: Vec<u8>) -> Result<(), String> {
@@ -157,6 +169,20 @@ impl MatchClient {
     /// How many ticks a seat is held after its connection dropped.
     pub fn set_away_grace(&self, ticks: u64) -> Result<(), String> {
         call_reducer("set_away_grace", |cb| self.conn.reducers.set_away_grace_then(ticks, cb))
+    }
+
+    /// Ban an identity from the match, with the reason its player is told.
+    pub fn set_ban(&self, identity: spacetimedb_sdk::Identity, reason: &str) -> Result<(), String> {
+        call_reducer("set_ban", |cb| self.conn.reducers.set_ban_then(identity, reason.to_string(), cb))
+    }
+
+    pub fn clear_ban(&self, identity: spacetimedb_sdk::Identity) -> Result<(), String> {
+        call_reducer("clear_ban", |cb| self.conn.reducers.clear_ban_then(identity, cb))
+    }
+
+    /// The name an identity plays under, which the roster shows for its player.
+    pub fn set_name(&self, identity: spacetimedb_sdk::Identity, name: &str) -> Result<(), String> {
+        call_reducer("set_name", |cb| self.conn.reducers.set_name_then(identity, name.to_string(), cb))
     }
 
     /// Name the identity that runs the gateway.
