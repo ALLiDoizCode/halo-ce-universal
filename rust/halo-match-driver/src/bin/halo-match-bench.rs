@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use halo_match_driver::server::{build_module, stdb_bin_dir, Server};
 use halo_match_driver::walkers::Walkers;
-use halo_match_driver::{MatchClient, SeenTick};
+use halo_match_driver::SeenTick;
 use halo_sim::MapData;
 
 fn cpu_seconds(pid: u32) -> f64 {
@@ -51,7 +51,7 @@ fn main() {
     let bin = stdb_bin_dir().expect("HALO_STDB_BIN: the SpacetimeDB 2.10.x release directory");
     let server = Server::start(&bin);
     server.publish(&build_module(), "bench");
-    let client = MatchClient::connect(&server.uri(), "bench");
+    let client = server.connect("bench");
     client.load_map(blob).expect("load_map");
     let (mut walkers, spawn) = Walkers::new(map, &anchors, players, 1);
     client.add_players(&spawn).expect("add_players");

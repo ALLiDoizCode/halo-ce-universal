@@ -10,10 +10,11 @@
 //! The crate does no I/O and reads no clock. The gateway uses all of it; the
 //! client library uses [`datagram`] and [`unit`] to read what it is sent.
 
+pub mod auth;
 pub mod datagram;
 pub mod planner;
 pub mod unit;
 
-pub use datagram::{ClientMessage, ServerMessage, Snapshot, Welcome};
-pub use planner::{Entry, Observer, Planner, PlannerConfig};
+pub use datagram::{Ack, ClientMessage, ServerMessage, Snapshot, Welcome};
+pub use planner::{Entry, Observer, Planner, PlannerConfig, STALENESS_BOUND_TICKS};
 pub use unit::{Bounds, PackedState, UnitState};

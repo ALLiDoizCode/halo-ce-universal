@@ -26,11 +26,27 @@ pub fn build_module() -> PathBuf {
     module.join("target/wasm32-unknown-unknown/release/halo_match_module.wasm")
 }
 
+/// An identity on a server, with the token that proves it: what a connection
+/// presents as `with_token`.
+#[derive(Debug, Clone)]
+pub struct Account {
+    /// Hex.
+    pub identity: String,
+    pub token: String,
+}
+
+impl Account {
+    pub fn identity(&self) -> spacetimedb_sdk::Identity {
+        spacetimedb_sdk::Identity::from_hex(&self.identity).expect("a hex identity")
+    }
+}
+
 pub struct Server {
     bin: PathBuf,
     dir: PathBuf,
     port: u16,
     child: Option<Child>,
+    owner: Option<Account>,
 }
 
 impl Server {
@@ -39,8 +55,9 @@ impl Server {
         let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let dir = std::env::temp_dir().join(format!("halo-match-{}-{port}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut server = Server { bin: bin.to_path_buf(), dir, port, child: None };
+        let mut server = Server { bin: bin.to_path_buf(), dir, port, child: None, owner: None };
         server.spawn();
+        server.owner = Some(server.new_account());
         server
     }
 
@@ -79,16 +96,37 @@ impl Server {
         self.child.as_ref().expect("running").id()
     }
 
-    /// Publish the module under `name` (a new database, or an update of it).
+    /// A new identity on this server.
+    pub fn new_account(&self) -> Account {
+        let (status, body) = http(self.port, "POST", "/v1/identity", None, &[]).expect("create an identity");
+        assert_eq!(status, 200, "creating an identity: {body}");
+        let field = |name: &str| {
+            let at = body.find(&format!("\"{name}\":\"")).unwrap_or_else(|| panic!("no {name} in {body}"));
+            let rest = &body[at + name.len() + 4..];
+            rest[..rest.find('"').unwrap()].to_string()
+        };
+        Account { identity: field("identity"), token: field("token") }
+    }
+
+    /// The identity that publishes to this server and so owns every database on it.
+    pub fn owner(&self) -> &Account {
+        self.owner.as_ref().expect("the server has an owner")
+    }
+
+    /// Connect to the database `name` as the server's owner (who published
+    /// it), subscribed to the match's public tables.
+    pub fn connect(&self, name: &str) -> crate::MatchClient {
+        crate::MatchClient::connect_as(&self.uri(), name, Some(&self.owner().token))
+    }
+
+    /// Publish the module under `name` (a new database, or an update of it) as
+    /// the server's owner, who then owns the match.
     pub fn publish(&self, wasm: &Path, name: &str) {
-        let out = Command::new(self.bin.join("spacetimedb-cli"))
-            .env("XDG_CONFIG_HOME", self.dir.join("cli-config"))
-            .args(["publish", "--server", &self.uri(), "--anonymous", "--no-config", "-y", "-b"])
-            .arg(wasm)
-            .arg(name)
-            .output()
-            .expect("run spacetimedb-cli");
-        assert!(out.status.success(), "publish failed: {}", String::from_utf8_lossy(&out.stderr));
+        let module = std::fs::read(wasm).expect("read the module");
+        let (status, body) =
+            http(self.port, "PUT", &format!("/v1/database/{name}"), Some(&self.owner().token), &module)
+                .expect("publish");
+        assert_eq!(status, 200, "publish failed: {body}");
     }
 
     /// Stop the server the way an operator would (SIGTERM, so the log is
@@ -128,6 +166,25 @@ impl Drop for Server {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
+}
+
+/// One HTTP request; the status and the body of the answer.
+fn http(port: u16, method: &str, path: &str, bearer: Option<&str>, body: &[u8]) -> Option<(u16, String)> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(60))).ok()?;
+    let auth = bearer.map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
+    write!(
+        stream,
+        "{method} {path} HTTP/1.0\r\nHost: localhost\r\n{auth}Content-Length: {}\r\nContent-Type: application/octet-stream\r\n\r\n",
+        body.len()
+    )
+    .ok()?;
+    stream.write_all(body).ok()?;
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).ok()?;
+    let status = answer.split(' ').nth(1)?.parse().ok()?;
+    let body = answer.split_once("\r\n\r\n").map_or("", |(_, b)| b).to_string();
+    Some((status, body))
 }
 
 fn http_get(port: u16, path: &str) -> Option<String> {

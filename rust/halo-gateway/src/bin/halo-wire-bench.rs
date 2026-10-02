@@ -8,21 +8,21 @@
 //! Options (each `--name value`): `--map bloodgulch` (or `flat`, which needs
 //! no game data), `--players 500`, `--secs 30`, `--warmup 5`,
 //! `--budget 90000` (bytes a second a player may be sent), `--send-threads 4`,
-//! `--loss 0` (chance a datagram is lost, each way), `--delay-ms 0` (each way).
+//! `--loss 0` (chance a datagram is lost, each way), `--delay-ms 0` (each way),
+//! `--stale-bound 40` (ticks: the most a state may be out of date, with loss).
 //!
-//! Prints the report and checks the numbers the gateway ticket asks for;
-//! exits non-zero if one is missed.
+//! Prints the report and checks the numbers the gateway tickets ask for;
+//! exits non-zero if one is missed. Without loss: the budget, every tick
+//! received, nearby players every tick, the cost of sending. With loss: no
+//! state older than the staleness bound, and (at 2% loss or less) stalls over
+//! 100 ms for players within 10 world units under 0.1% of updates.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
-use halo_gateway::harness::{analyze, run_walk, Crowd, Impairment, Truth, DEFAULT_BANDS};
-use halo_gateway::{Gateway, GatewayConfig, UdpTransport};
-use halo_match_driver::server::{build_module, stdb_bin_dir, Server};
-use halo_match_driver::walkers::Walkers;
-use halo_match_driver::MatchClient;
+use halo_gateway::harness::{analyze, run_walk, Crowd, Impairment, Rig, RigSetup, Truth, DEFAULT_BANDS};
+use halo_match_driver::server::{build_module, stdb_bin_dir};
 use halo_sim::fixtures::flat_floor_map;
 use halo_sim::MapData;
 
@@ -42,6 +42,7 @@ fn main() {
     let send_threads: usize = get("send-threads", "4").parse().unwrap();
     let loss: f32 = get("loss", "0").parse().unwrap();
     let delay_ms: u64 = get("delay-ms", "0").parse().unwrap();
+    let stale_bound: u32 = get("stale-bound", &halo_wire::planner::STALENESS_BOUND_TICKS.to_string()).parse().unwrap();
 
     let (map, anchors): (MapData, Vec<[f32; 3]>) = if map_name == "flat" {
         let side = (players as f32).sqrt().ceil() as usize;
@@ -60,26 +61,16 @@ fn main() {
     };
 
     let bin = stdb_bin_dir().expect("HALO_STDB_BIN: the SpacetimeDB 2.10.x release directory");
-    let server = Server::start(&bin);
-    server.publish(&build_module(), "bench");
-    let client = MatchClient::connect(&server.uri(), "bench");
-    client.load_map(map.to_bytes()).expect("load_map");
-    let (mut walkers, spawn) = Walkers::new(map, &anchors, players, 1);
-    client.add_players(&spawn).expect("add_players");
-    client.start();
-
-    let mut config = GatewayConfig::new(server.uri(), "bench");
-    config.budget_bytes_per_second = budget;
-    config.send_threads = send_threads;
-    let transport = Arc::new(UdpTransport::bind("127.0.0.1:0".parse().unwrap()).unwrap());
-    let gateway = Gateway::start(config, transport).expect("start the gateway");
+    let setup = RigSetup { name: "bench", map, anchors: &anchors, players, budget };
+    let mut rig = Rig::start(&bin, &build_module(), setup, |c| c.send_threads = send_threads);
+    let (client, gateway, walkers) = (&rig.client, &rig.gateway, &mut rig.walkers);
 
     let link = Impairment::loss(loss).delayed(Duration::from_millis(delay_ms));
     let crowd = Crowd::connect(gateway.local_addr(), 0..players, link, players as usize, false);
     crowd.join_all(Duration::from_secs(60)).expect("every player joins");
 
     let mut truth = Truth::new(players as usize);
-    run_walk(&client, &mut walkers, &crowd, &mut truth, Duration::from_secs(warmup + secs));
+    run_walk(client, walkers, &crowd, &mut truth, Duration::from_secs(warmup + secs));
     let warm_ticks = warmup as usize * 30;
     let report = analyze(&crowd, &truth, truth.window(warm_ticks, 3), &DEFAULT_BANDS);
     let stats = gateway.stats();
@@ -91,7 +82,7 @@ fn main() {
         stats.send_ms.p50, stats.send_ms.p99, stats.send_ms.max, stats.arrival_ms.p50, stats.arrival_ms.p99
     );
     println!(
-        "gateway: {} ticks ({} skipped), {} batches, {} inputs ({} late, {} unbound), {} datagrams, {} send errors, {} overruns",
+        "gateway: {} ticks ({} skipped), {} batches, {} inputs ({} late, {} unbound), {} datagrams, {} send errors, {} overruns, {} auths accepted, {} refused",
         stats.ticks,
         stats.ticks_skipped,
         stats.batches_submitted,
@@ -100,20 +91,33 @@ fn main() {
         stats.inputs_unbound,
         stats.datagrams_sent,
         stats.send_errors,
-        stats.send_overruns
+        stats.send_overruns,
+        stats.auths_accepted,
+        stats.auths_refused
     );
     println!("datagrams per thread    {:?}", stats.per_thread_datagrams);
 
-    if loss > 0.0 || delay_ms > 0 {
-        return;
-    }
-    let checks = [
-        ("download per player within the budget", report.max_download <= budget as f64 * 1.001),
-        ("every player receives every tick", report.missed_ticks == 0),
-        ("median tick age under 10 ms", report.tick_age_ms.p50 < 10.0),
-        ("players within 10 wu updated every tick", report.bands[0].fraction_updated >= 0.999),
-        ("sending a tick to everyone under 10 ms (p99)", stats.send_ms.p99 < 10.0),
-    ];
+    let checks: Vec<(String, bool)> = if loss > 0.0 {
+        let mut checks = vec![(
+            format!("no state older than {stale_bound} ticks ({} ms)", stale_bound * 1000 / 30),
+            report.max_age_ticks <= stale_bound,
+        )];
+        if loss <= 0.02 {
+            checks.push((
+                "stalls over 100 ms within 10 wu under 0.1% of updates".to_string(),
+                report.bands[0].stall_fraction < 0.001,
+            ));
+        }
+        checks
+    } else {
+        vec![
+            ("download per player within the budget".to_string(), report.max_download <= budget as f64 * 1.001),
+            ("every player receives every tick".to_string(), report.missed_ticks == 0),
+            ("median tick age under 10 ms".to_string(), report.tick_age_ms.p50 < 10.0 || delay_ms > 0),
+            ("players within 10 wu updated every tick".to_string(), report.bands[0].fraction_updated >= 0.999),
+            ("sending a tick to everyone under 10 ms (p99)".to_string(), stats.send_ms.p99 < 10.0),
+        ]
+    };
     let mut failed = false;
     for (what, ok) in checks {
         println!("{} {what}", if ok { "pass:" } else { "FAIL:" });

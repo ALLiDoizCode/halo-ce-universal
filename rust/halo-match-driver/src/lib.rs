@@ -47,7 +47,7 @@ use halo_sim::PlayerInput;
 use module_bindings::*;
 use spacetimedb_sdk::{Compression, DbContext, Table, TableWithPrimaryKey};
 
-pub use module_bindings::{MatchTick, PlayerRow};
+pub use module_bindings::{MatchTick, PlayerRow, Seat};
 
 pub fn now_us() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as i64
@@ -63,18 +63,48 @@ pub struct SeenTick {
     pub arrived_us: i64,
 }
 
+/// Run a reducer and wait for the module's answer.
+fn call_reducer(
+    what: &str,
+    invoke: impl FnOnce(
+        Box<
+            dyn FnOnce(&ReducerEventContext, Result<Result<(), String>, spacetimedb_sdk::__codegen::InternalError>)
+                + Send,
+        >,
+    ) -> spacetimedb_sdk::Result<()>,
+) -> Result<(), String> {
+    let (tx, rx) = mpsc::channel();
+    invoke(Box::new(move |_, result| {
+        let _ = tx.send(result);
+    }))
+    .map_err(|e| format!("{what}: {e}"))?;
+    match rx.recv_timeout(Duration::from_secs(60)) {
+        Ok(Ok(result)) => result.map_err(|e| format!("{what}: {e}")),
+        Ok(Err(e)) => Err(format!("{what}: {e}")),
+        Err(_) => Err(format!("{what}: no answer")),
+    }
+}
+
 pub struct MatchClient {
     pub conn: DbConnection,
     ticks: Receiver<SeenTick>,
 }
 
 impl MatchClient {
-    /// Connect and subscribe to `match_tick` and `player`; returns once the
-    /// subscription has applied.
+    /// Connect with a fresh identity (which owns nothing: the owner-only
+    /// reducers refuse it) and subscribe to `match_tick`, `player` and `seat`;
+    /// returns once the subscription has applied.
     pub fn connect(uri: &str, database: &str) -> MatchClient {
+        MatchClient::connect_as(uri, database, None)
+    }
+
+    /// Like [`MatchClient::connect`], as the identity of `token`: the match's
+    /// owner, if it is the one that published.
+    pub fn connect_as(uri: &str, database: &str, token: Option<&str>) -> MatchClient {
         let conn = DbConnection::builder()
             .with_uri(uri)
             .with_database_name(database)
+            .with_token(token.map(str::to_string))
             // the gateway will run on loopback with compression off
             .with_compression(Compression::None)
             .build()
@@ -90,55 +120,66 @@ impl MatchClient {
                 let _ = applied_tx.send(());
             })
             .on_error(|_, err| panic!("subscription failed: {err}"))
-            .subscribe(["SELECT * FROM match_tick", "SELECT * FROM player"]);
+            .subscribe(["SELECT * FROM match_tick", "SELECT * FROM player", "SELECT * FROM seat"]);
         conn.run_threaded();
         applied.recv_timeout(Duration::from_secs(30)).expect("the subscription applied");
         MatchClient { conn, ticks }
     }
 
-    fn call(
-        &self,
-        what: &str,
-        invoke: impl FnOnce(
-            &module_bindings::RemoteReducers,
-            Box<
-                dyn FnOnce(&ReducerEventContext, Result<Result<(), String>, spacetimedb_sdk::__codegen::InternalError>)
-                    + Send,
-            >,
-        ) -> spacetimedb_sdk::Result<()>,
-    ) -> Result<(), String> {
-        let (tx, rx) = mpsc::channel();
-        invoke(
-            &self.conn.reducers,
-            Box::new(move |_, result| {
-                let _ = tx.send(result);
-            }),
-        )
-        .map_err(|e| format!("{what}: {e}"))?;
-        match rx.recv_timeout(Duration::from_secs(60)) {
-            Ok(Ok(result)) => result.map_err(|e| format!("{what}: {e}")),
-            Ok(Err(e)) => Err(format!("{what}: {e}")),
-            Err(_) => Err(format!("{what}: no answer")),
-        }
-    }
-
     pub fn load_map(&self, data: Vec<u8>) -> Result<(), String> {
-        self.call("load_map", |r, cb| r.load_map_then(data, cb))
+        call_reducer("load_map", |cb| self.conn.reducers.load_map_then(data, cb))
     }
 
     pub fn add_players(&self, players: &[PlayerInput]) -> Result<(), String> {
         let batch = encode_inputs(players);
-        self.call("add_players", |r, cb| r.add_players_then(batch, cb))
+        call_reducer("add_players", |cb| self.conn.reducers.add_players_then(batch, cb))
     }
 
-    pub fn remove_players(&self, ids: Vec<u16>) {
-        self.conn.reducers.remove_players(ids).expect("remove_players");
+    pub fn remove_players(&self, ids: Vec<u16>) -> Result<(), String> {
+        call_reducer("remove_players", |cb| self.conn.reducers.remove_players_then(ids, cb))
+    }
+
+    /// Where players that join appear (positions and yaw of the inputs).
+    pub fn set_spawn_points(&self, points: &[PlayerInput]) -> Result<(), String> {
+        let batch = encode_inputs(points);
+        call_reducer("set_spawn_points", |cb| self.conn.reducers.set_spawn_points_then(batch, cb))
+    }
+
+    pub fn set_capacity(&self, capacity: u16) -> Result<(), String> {
+        call_reducer("set_capacity", |cb| self.conn.reducers.set_capacity_then(capacity, cb))
+    }
+
+    /// How many ticks a seat is held after its connection dropped.
+    pub fn set_away_grace(&self, ticks: u64) -> Result<(), String> {
+        call_reducer("set_away_grace", |cb| self.conn.reducers.set_away_grace_then(ticks, cb))
+    }
+
+    /// Name the identity that runs the gateway.
+    pub fn set_gateway(&self, gateway: spacetimedb_sdk::Identity) -> Result<(), String> {
+        call_reducer("set_gateway", |cb| self.conn.reducers.set_gateway_then(gateway, cb))
     }
 
     /// Submit one batch of inputs and wait for the module to accept it.
     pub fn submit_and_wait(&self, inputs: &[PlayerInput]) -> Result<(), String> {
         let batch = encode_inputs(inputs);
-        self.call("submit_inputs", |r, cb| r.submit_inputs_then(batch, cb))
+        call_reducer("submit_inputs", |cb| self.conn.reducers.submit_inputs_then(batch, cb))
+    }
+
+    pub fn start_and_wait(&self) -> Result<(), String> {
+        call_reducer("start", |cb| self.conn.reducers.start_then(cb))
+    }
+
+    pub fn stop_and_wait(&self) -> Result<(), String> {
+        call_reducer("stop", |cb| self.conn.reducers.stop_then(cb))
+    }
+
+    pub fn reset_and_wait(&self) -> Result<(), String> {
+        call_reducer("reset", |cb| self.conn.reducers.reset_then(cb))
+    }
+
+    /// The seats in the subscriber's copy of the table now, by player id.
+    pub fn seats(&self) -> BTreeMap<u16, Seat> {
+        self.conn.db.seat().iter().map(|s| (s.player, s)).collect()
     }
 
     /// Submit one batch without waiting for the answer (the per-tick path).
@@ -147,15 +188,15 @@ impl MatchClient {
     }
 
     pub fn start(&self) {
-        self.conn.reducers.start().expect("start");
+        self.start_and_wait().expect("start");
     }
 
     pub fn stop(&self) {
-        self.conn.reducers.stop().expect("stop");
+        self.stop_and_wait().expect("stop");
     }
 
     pub fn reset(&self) {
-        self.conn.reducers.reset().expect("reset");
+        self.reset_and_wait().expect("reset");
     }
 
     /// The next completed tick this subscriber sees, in order.
@@ -187,5 +228,70 @@ impl MatchClient {
 
     pub fn marker(&self) -> Option<MatchTick> {
         self.conn.db.match_tick().iter().next()
+    }
+}
+
+/// A player's own connection to the match, as their SpacetimeDB identity:
+/// what a client holds beside its UDP traffic. It takes and leaves the seat
+/// and sees the seats (the player list).
+pub struct PlayerClient {
+    pub conn: DbConnection,
+}
+
+impl PlayerClient {
+    /// Connect as the identity of `token` and subscribe to the seats; returns
+    /// once the subscription has applied.
+    pub fn connect(uri: &str, database: &str, token: &str) -> PlayerClient {
+        let client = PlayerClient::connect_unsubscribed(uri, database, token);
+        let conn = &client.conn;
+        let (applied_tx, applied) = mpsc::channel();
+        conn.subscription_builder()
+            .on_applied(move |_| {
+                let _ = applied_tx.send(());
+            })
+            .on_error(|_, err| panic!("subscription failed: {err}"))
+            .subscribe(["SELECT * FROM seat"]);
+        applied.recv_timeout(Duration::from_secs(30)).expect("the subscription applied");
+        client
+    }
+
+    /// Connect as the identity of `token` without subscribing to anything:
+    /// enough to take and leave a seat, and cheap when there are hundreds
+    /// (`seat()` then finds nothing).
+    pub fn connect_unsubscribed(uri: &str, database: &str, token: &str) -> PlayerClient {
+        let conn = DbConnection::builder()
+            .with_uri(uri)
+            .with_database_name(database)
+            .with_token(Some(token.to_string()))
+            .with_compression(Compression::None)
+            .build()
+            .expect("connect");
+        conn.run_threaded();
+        PlayerClient { conn }
+    }
+
+    /// Take a seat (or get one's own back) with the public key of the UDP key pair.
+    pub fn join(&self, udp_public_key: [u8; 32]) -> Result<(), String> {
+        self.join_with(udp_public_key.to_vec())
+    }
+
+    /// `join` with any bytes as the key (for the module to refuse).
+    pub fn join_with(&self, udp_public_key: Vec<u8>) -> Result<(), String> {
+        call_reducer("join", |cb| self.conn.reducers.join_then(udp_public_key, cb))
+    }
+
+    pub fn leave(&self) -> Result<(), String> {
+        call_reducer("leave", |cb| self.conn.reducers.leave_then(cb))
+    }
+
+    /// This player's seat in the subscriber's copy of the table, if there is one.
+    pub fn seat(&self) -> Option<Seat> {
+        let me = self.conn.identity();
+        self.conn.db.seat().iter().find(|s| s.owner == me)
+    }
+
+    /// Close the connection (as a dropped one: the seat is held, not freed).
+    pub fn disconnect(&self) {
+        let _ = self.conn.disconnect();
     }
 }

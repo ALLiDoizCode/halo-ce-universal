@@ -6,4 +6,5 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+ed25519-compact = { version = "2", default-features = false, features = ["std"] }
 halo-sim = { path = "../halo-sim" }

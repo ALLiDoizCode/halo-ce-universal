@@ -17,17 +17,43 @@
 //! players) they are sent every tick; among themselves, and among everyone
 //! else, the highest accumulated priority goes first, so nobody starves.
 //!
+//! Datagrams get lost, and a state that was sent and lost must not be treated
+//! as sent. Every Snapshot carries a number, the recipient says which numbers
+//! it has received ([`Ack`], in every Input), and the planner keeps what each
+//! recent Snapshot held: a Snapshot that a newer one was acknowledged past
+//! without it is *lost*, and its players are put back (their priority is
+//! restored and they are marked *urgent*, ranked above everyone, so they are
+//! resent in the next tick's datagrams). Independently, a player not sent to
+//! this recipient for `max_stale_ticks` becomes urgent too, so that no
+//! player's state stays unsent for longer than that while the budget can pay
+//! for it (about `players x 16 bytes / max_stale_ticks` a tick). A new
+//! recipient has been sent no one, so everyone is urgent to it at first and
+//! it is brought up to date, nearest and facing first, within its budget.
+//!
 //! The budget counts bytes on the wire: a datagram's payload plus
 //! [`IP_UDP_OVERHEAD`]. Every tick a recipient is sent at least one datagram,
 //! empty if need be, so that it can tell no tick was lost; those few bytes
 //! may overdraw the credit, which later ticks pay back.
 
+use std::collections::VecDeque;
+
 use halo_sim::TICKS_PER_SECOND;
 
 use crate::datagram::{
-    append_state, begin_snapshot, IP_UDP_OVERHEAD, MAX_DATAGRAM, MAX_STATES_PER_SNAPSHOT, SNAPSHOT_HEADER,
+    append_state, begin_snapshot, next_snapshot_seq, seq16_newer, Ack, IP_UDP_OVERHEAD, MAX_DATAGRAM,
+    MAX_STATES_PER_SNAPSHOT, SNAPSHOT_HEADER,
 };
 use crate::unit::{PackedState, UNIT_STATE_SIZE};
+
+/// The stated bound on how stale any player's state is for any recipient: 40
+/// ticks (1.33 s). Not a guarantee against every possible run of losses
+/// (no UDP design has one): with the default 15-tick cap, a state is older
+/// only after several of the same player's datagrams to that recipient are
+/// all lost, each costing about two ticks to notice and resend. Measured, 500
+/// players on Blood Gulch at 90 KB/s with 5% loss each way and 20 ms of delay
+/// each way: oldest state 20 to 21 ticks over 30 to 60 s. The wire tests and
+/// `halo-wire-bench` check runs against this number.
+pub const STALENESS_BOUND_TICKS: u32 = 40;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlannerConfig {
@@ -41,6 +67,9 @@ pub struct PlannerConfig {
     /// inside which weight is boosted.
     pub facing_degrees: f32,
     pub facing_boost: f32,
+    /// A player not sent to the recipient for this many ticks is sent before
+    /// anyone else (when the budget can pay for it).
+    pub max_stale_ticks: u32,
 }
 
 impl PlannerConfig {
@@ -51,6 +80,7 @@ impl PlannerConfig {
             far_floor: 0.06,
             facing_degrees: 60.0,
             facing_boost: 2.0,
+            max_stale_ticks: 15,
         }
     }
 }
@@ -86,14 +116,93 @@ pub struct Planner {
     credit: f32,
     /// Accumulated priority, indexed by player id.
     priority: Vec<f32>,
-    /// (near, priority, index into the world), for ranking.
-    scratch: Vec<(bool, f32, u32)>,
+    /// For ranking.
+    scratch: Vec<Ranked>,
+    /// The number of the next Snapshot.
+    next_seq: u16,
+    /// The most recent Snapshots sent and not yet known to have arrived or
+    /// been lost, oldest first.
+    in_flight: VecDeque<Sent>,
+    /// `tick + 1` of the last tick each player was sent in, by id; 0 if never.
+    last_sent: Vec<u32>,
+    /// Marked for sending first: lost, and not sent since.
+    urgent: Vec<bool>,
+    /// `tick + 1` of the last tick the player was in the world, by id.
+    present: Vec<u32>,
+}
+
+/// Snapshots remembered for loss detection: the acknowledgement's window is 32.
+const IN_FLIGHT_MAX: usize = 64;
+
+fn remember(in_flight: &mut VecDeque<Sent>, sent: Sent) {
+    if in_flight.len() == IN_FLIGHT_MAX {
+        in_flight.pop_front();
+    }
+    in_flight.push_back(sent);
+}
+
+/// One Snapshot sent: what it held, to put back if it is lost.
+#[derive(Debug, Clone)]
+struct Sent {
+    seq: u16,
+    tick: u32,
+    /// (player, the priority the player had when it was sent).
+    states: Vec<(u16, f32)>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Ranked {
+    urgent: bool,
+    near: bool,
+    priority: f32,
+    /// Index into the world.
+    index: u32,
 }
 
 impl Planner {
     pub fn new(config: PlannerConfig) -> Planner {
         let per_tick = config.budget_bytes_per_second as f32 / TICKS_PER_SECOND as f32;
-        Planner { config, per_tick, credit: per_tick, priority: Vec::new(), scratch: Vec::new() }
+        Planner {
+            config,
+            per_tick,
+            credit: per_tick,
+            priority: Vec::new(),
+            scratch: Vec::new(),
+            next_seq: 1,
+            in_flight: VecDeque::new(),
+            last_sent: Vec::new(),
+            urgent: Vec::new(),
+            present: Vec::new(),
+        }
+    }
+
+    /// Take in what the recipient says it has received. Call before `plan`
+    /// each tick with the newest [`Ack`] the recipient has sent (repeating
+    /// one is harmless). A Snapshot that the acknowledgement has gone past
+    /// without it is lost: the players in it are put back to be sent first.
+    pub fn acknowledge(&mut self, ack: Ack) {
+        if ack.newest == 0 {
+            return;
+        }
+        let mut i = 0;
+        while i < self.in_flight.len() {
+            let seq = self.in_flight[i].seq;
+            if ack.has(seq) {
+                self.in_flight.remove(i);
+            } else if seq16_newer(ack.newest, seq) {
+                let lost = self.in_flight.remove(i).expect("in range");
+                for (player, priority) in lost.states {
+                    let p = player as usize;
+                    // sent again since: that one's fate is what counts now
+                    if self.last_sent.get(p) == Some(&(lost.tick + 1)) {
+                        self.priority[p] += priority;
+                        self.urgent[p] = true;
+                    }
+                }
+            } else {
+                i += 1;
+            }
+        }
     }
 
     /// The datagrams to send the observer for `tick`, given every player's
@@ -113,6 +222,9 @@ impl Planner {
         let max_id = world.iter().map(Entry::player).max().map_or(0, |m| m as usize + 1);
         if self.priority.len() < max_id {
             self.priority.resize(max_id, 0.0);
+            self.last_sent.resize(max_id, 0);
+            self.urgent.resize(max_id, false);
+            self.present.resize(max_id, 0);
         }
         self.scratch.clear();
         for (index, other) in world.iter().enumerate() {
@@ -131,15 +243,36 @@ impl Planner {
             if d2 <= 0.0 || (ahead > 0.0 && ahead * ahead >= cone2 * d2) {
                 weight *= cfg.facing_boost;
             }
-            let p = &mut self.priority[id as usize];
+            let slot = id as usize;
+            self.present[slot] = tick + 1;
+            let overdue = self.last_sent[slot] == 0 || tick + 1 - self.last_sent[slot] >= cfg.max_stale_ticks;
+            let p = &mut self.priority[slot];
             *p += weight;
-            self.scratch.push((d2 <= near2, *p, index as u32));
+            self.scratch.push(Ranked {
+                urgent: self.urgent[slot] || overdue,
+                near: d2 <= near2,
+                priority: *p,
+                index: index as u32,
+            });
+        }
+
+        // a player who left, and whoever takes their id, starts from nothing
+        for id in 0..self.present.len() {
+            if self.present[id] != 0 && self.present[id] != tick + 1 {
+                self.present[id] = 0;
+                (self.priority[id], self.last_sent[id], self.urgent[id]) = (0.0, 0, false);
+            }
         }
 
         let take = affordable(self.credit, self.scratch.len());
-        // near players first, then by accumulated priority, then by world order
-        type Ranked = (bool, f32, u32);
-        let by_priority = |a: &Ranked, b: &Ranked| b.0.cmp(&a.0).then(b.1.total_cmp(&a.1)).then(a.2.cmp(&b.2));
+        // urgent players first, then near ones, then by accumulated priority, then by world order
+        let by_priority = |a: &Ranked, b: &Ranked| {
+            b.urgent
+                .cmp(&a.urgent)
+                .then(b.near.cmp(&a.near))
+                .then(b.priority.total_cmp(&a.priority))
+                .then(a.index.cmp(&b.index))
+        };
         if take > 0 && take < self.scratch.len() {
             self.scratch.select_nth_unstable_by(take - 1, by_priority);
         }
@@ -148,16 +281,27 @@ impl Planner {
         let mut datagrams = Vec::new();
         let mut buf = Vec::with_capacity(MAX_DATAGRAM);
         for chunk in self.scratch[..take].chunks(MAX_STATES_PER_SNAPSHOT) {
-            begin_snapshot(&mut buf, tick);
-            for &(_, _, index) in chunk {
-                let entry = &world[index as usize];
+            let seq = self.next_seq;
+            self.next_seq = next_snapshot_seq(seq);
+            begin_snapshot(&mut buf, tick, seq);
+            let mut sent = Sent { seq, tick, states: Vec::with_capacity(chunk.len()) };
+            for ranked in chunk {
+                let entry = &world[ranked.index as usize];
+                let slot = entry.player() as usize;
                 append_state(&mut buf, &entry.packed);
-                self.priority[entry.player() as usize] = 0.0;
+                sent.states.push((entry.player(), self.priority[slot]));
+                self.priority[slot] = 0.0;
+                self.urgent[slot] = false;
+                self.last_sent[slot] = tick + 1;
             }
+            remember(&mut self.in_flight, sent);
             datagrams.push(buf.clone());
         }
         if datagrams.is_empty() {
-            begin_snapshot(&mut buf, tick);
+            let seq = self.next_seq;
+            self.next_seq = next_snapshot_seq(seq);
+            begin_snapshot(&mut buf, tick, seq);
+            remember(&mut self.in_flight, Sent { seq, tick, states: Vec::new() });
             datagrams.push(buf);
         }
         let spent: usize = datagrams.iter().map(|d| d.len() + IP_UDP_OVERHEAD).sum();
@@ -369,7 +513,7 @@ mod tests {
             assert_eq!(plan.datagrams.len(), 1);
             assert_eq!(
                 ServerMessage::decode(&plan.datagrams[0]),
-                Some(ServerMessage::Snapshot(crate::Snapshot { tick, states: vec![] }))
+                Some(ServerMessage::Snapshot(crate::Snapshot { tick, seq: tick as u16 + 1, states: vec![] }))
             );
         }
     }
@@ -383,5 +527,182 @@ mod tests {
         assert_eq!(plan.states, 150);
         assert_eq!(plan.datagrams.len(), 3, "74 + 74 + 2");
         assert_eq!(states_of(&plan).len(), 150);
+    }
+
+    /// A recipient over a lossy link: what arrives is acknowledged, one tick
+    /// later (the acknowledgement rides an Input, which may itself be lost).
+    struct Link {
+        planner: Planner,
+        rng: halo_sim::Rng,
+        loss: f32,
+        /// What the recipient has received.
+        ack: Ack,
+        /// The newest acknowledgement that reached the planner.
+        heard: Ack,
+        acknowledge: bool,
+        /// Last tick each player was received in.
+        last: Vec<Option<u32>>,
+        /// The longest a received player's state has gone without an update (ticks), by player.
+        longest: Vec<u32>,
+    }
+
+    impl Link {
+        fn new(config: PlannerConfig, players: usize, loss: f32, acknowledge: bool) -> Link {
+            Link {
+                planner: Planner::new(config),
+                rng: halo_sim::Rng::seeded(99),
+                loss,
+                ack: Ack::NONE,
+                heard: Ack::NONE,
+                acknowledge,
+                last: vec![None; players],
+                longest: vec![0; players],
+            }
+        }
+
+        fn tick(&mut self, world: &[Entry], tick: u32) -> Vec<u16> {
+            if self.acknowledge {
+                self.planner.acknowledge(self.heard);
+            }
+            let plan = self.planner.plan(&observer_at_origin(), world, tick);
+            let mut arrived = Vec::new();
+            for d in &plan.datagrams {
+                if self.rng.next_f32() < self.loss {
+                    continue;
+                }
+                let Some(ServerMessage::Snapshot(s)) = ServerMessage::decode(d) else { panic!("not a snapshot") };
+                self.ack.record(s.seq);
+                arrived.extend(s.states.iter().map(|st| st.player()));
+            }
+            // the Input carrying the acknowledgement goes up now and reaches the planner for the next tick
+            if self.rng.next_f32() >= self.loss {
+                self.heard = self.ack;
+            }
+            for id in &arrived {
+                if let Some(before) = self.last[*id as usize] {
+                    self.longest[*id as usize] = self.longest[*id as usize].max(tick - before);
+                }
+                self.last[*id as usize] = Some(tick);
+            }
+            arrived
+        }
+
+        fn longest_gap(&self) -> u32 {
+            self.longest.iter().copied().max().unwrap()
+        }
+    }
+
+    #[test]
+    fn a_snapshot_the_recipient_did_not_get_is_resent_at_once_not_a_cycle_later() {
+        // 100 players far away and a budget for about 10 states a tick: a cycle is about ten ticks
+        let radii: Vec<f32> = (0..100).map(|i| 40.0 + i as f32 * 0.3).collect();
+        let world = ring(&radii);
+        let config = PlannerConfig { max_stale_ticks: 1000, ..PlannerConfig::with_budget(6_000) };
+        let mut planner = Planner::new(config);
+        let (mut ack, mut lost) = (Ack::NONE, Vec::new());
+        for tick in 0..40 {
+            planner.acknowledge(ack);
+            let plan = planner.plan(&observer_at_origin(), &world, tick);
+            let seq = match ServerMessage::decode(&plan.datagrams[0]) {
+                Some(ServerMessage::Snapshot(s)) => s.seq,
+                _ => unreachable!(),
+            };
+            if tick == 20 {
+                // this tick's datagram never arrives
+                lost = states_of(&plan);
+                assert!(lost.len() >= 5, "the budget buys a few states a tick");
+            } else {
+                ack.record(seq);
+            }
+            if tick == 22 {
+                // two ticks on, the acknowledgement has gone past the lost one: it is resent now
+                let again = states_of(&plan);
+                for id in &lost {
+                    assert!(again.contains(id), "player {id} lost at tick 20 was not resent by tick 22: {again:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn under_loss_acknowledgements_shorten_the_longest_wait() {
+        let radii: Vec<f32> = (0..300).map(|i| 30.0 + (i as f32 * 0.37) % 70.0).collect();
+        let world = ring(&radii);
+        let config = PlannerConfig { max_stale_ticks: 1000, ..PlannerConfig::with_budget(30_000) };
+        let (mut with, mut without) = (Link::new(config, 301, 0.05, true), Link::new(config, 301, 0.05, false));
+        for tick in 0..2000 {
+            with.tick(&world, tick);
+            without.tick(&world, tick);
+        }
+        println!("longest wait: {} ticks with acknowledgements, {} without", with.longest_gap(), without.longest_gap());
+        assert!(with.longest_gap() < without.longest_gap(), "{} vs {}", with.longest_gap(), without.longest_gap());
+    }
+
+    #[test]
+    fn no_player_waits_longer_than_the_cap_plus_what_loss_costs() {
+        // 500 players, the budget of the design (90 KB/s), 5% loss each way
+        let radii: Vec<f32> = (0..499).map(|i| 3.0 + (i as f32 * 0.37) % 90.0).collect();
+        let world = ring(&radii);
+        let config = PlannerConfig::with_budget(90_000);
+        let mut link = Link::new(config, 500, 0.05, true);
+        for tick in 0..3000 {
+            link.tick(&world, tick);
+        }
+        println!("500 players, 5% loss: longest wait {} ticks", link.longest_gap());
+        assert!(link.longest_gap() <= 20, "{} ticks", link.longest_gap());
+    }
+
+    #[test]
+    fn a_player_not_sent_for_the_cap_is_sent_before_nearer_ones() {
+        // 60 near players that the budget cannot all keep up with, and one far one that falls due
+        let mut radii: Vec<f32> = (0..60).map(|i| 1.0 + i as f32 * 0.1).collect();
+        radii.push(95.0);
+        let world = ring(&radii);
+        let config = PlannerConfig { max_stale_ticks: 12, ..PlannerConfig::with_budget(8_000) };
+        let mut planner = Planner::new(config);
+        let mut last_far = None;
+        for tick in 0..200 {
+            let got = states_of(&planner.plan(&observer_at_origin(), &world, tick));
+            if got.contains(&61) {
+                if let Some(before) = last_far {
+                    assert!(tick - before <= 12, "the far player waited {} ticks", tick - before);
+                }
+                last_far = Some(tick);
+            }
+        }
+        assert!(last_far.is_some());
+    }
+
+    #[test]
+    fn a_new_recipient_is_sent_everyone_nearest_first() {
+        let radii: Vec<f32> = (0..200).map(|i| 5.0 + i as f32 * 0.5).collect();
+        let world = ring(&radii);
+        let mut planner = Planner::new(PlannerConfig::with_budget(20_000));
+        let first = states_of(&planner.plan(&observer_at_origin(), &world, 500));
+        let second = states_of(&planner.plan(&observer_at_origin(), &world, 501));
+        assert!(!first.is_empty() && first.len() < 200, "the budget is a tick's worth of it");
+        let mut seen: Vec<u16> = first.iter().chain(&second).copied().collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), first.len() + second.len(), "nobody twice before everyone once");
+        // the nearest players come first (the facing bonus makes the order of the rest uneven)
+        assert!(first.iter().filter(|id| **id <= 20).count() >= 15, "{first:?}");
+    }
+
+    #[test]
+    fn a_player_who_leaves_and_an_id_that_is_reused_start_afresh() {
+        let mut world = ring(&[5.0, 6.0]);
+        let mut planner = Planner::new(PlannerConfig::with_budget(90_000));
+        for tick in 0..5 {
+            planner.plan(&observer_at_origin(), &world, tick);
+        }
+        // player 2 leaves for a while, then a new player takes the id
+        let gone = world.remove(2);
+        for tick in 5..8 {
+            assert_eq!(states_of(&planner.plan(&observer_at_origin(), &world, tick)), [1]);
+        }
+        world.push(gone);
+        let got = states_of(&planner.plan(&observer_at_origin(), &world, 8));
+        assert!(got.contains(&2), "the newcomer is sent at once");
     }
 }

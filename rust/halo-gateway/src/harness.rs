@@ -1,32 +1,38 @@
 //! The wire test harness: simulated UDP players that talk to a real gateway
 //! the way a client will, and assertions on what they send and receive.
 //!
-//! - [`SimPlayer`] is one player: a UDP socket, a thread that receives and
-//!   logs every datagram, and `send_input`. [`Impairment`] makes its link
-//!   lossy and slow, in both directions.
+//! - [`Rig`] starts a SpacetimeDB, the match module, a gateway and the
+//!   players' seats (one SpacetimeDB identity each, as [`Seats`]).
+//! - [`SimPlayer`] is one player's end of the UDP wire: a socket, a thread
+//!   that receives and logs every datagram, answers the gateway's challenge
+//!   with the key of its seat, acknowledges Snapshots, and `send_input`.
+//!   [`Impairment`] makes its link lossy and slow, in both directions.
 //! - [`Crowd`] is many of them.
 //! - [`Truth`] is what the server held at every tick, recorded from a
 //!   subscriber of the match's tables.
 //! - [`analyze`] compares the two: download per player against the budget,
-//!   ticks received, how old a tick was on arrival, and how often players at
-//!   each distance were updated.
+//!   ticks received, how old a tick was on arrival, how often players at
+//!   each distance were updated, and how stale any state got.
 //!
 //! # Writing a wire test
 //!
-//! A test starts a server (`halo_match_driver::server`), publishes the
-//! module, connects a `MatchClient`, loads a map and adds players, starts a
-//! gateway on a loopback `UdpTransport`, then:
+//! A test starts a [`Rig`] (`tests/wire.rs` has a `rig(...)` that skips the
+//! test without `HALO_STDB_BIN`), connects a [`Crowd`] to its gateway and
+//! walks it:
 //!
 //! ```ignore
-//! let crowd = Crowd::connect(gateway.local_addr(), 0..50, Impairment::none(), 64, false);
+//! let mut rig = rig("name", flat_floor_map(), &anchors, 50, 90_000).unwrap();
+//! let crowd = Crowd::connect(rig.gateway.local_addr(), 0..50, Impairment::none(), 64, false);
 //! crowd.join_all(Duration::from_secs(10))?;
 //! let mut truth = Truth::new(64);
-//! run_walk(&client, &mut walkers, &crowd, &mut truth, Duration::from_secs(5));
+//! run_walk(&rig.client, &mut rig.walkers, &crowd, &mut truth, Duration::from_secs(5));
 //! let report = analyze(&crowd, &truth, truth.window(30, 3), &DEFAULT_BANDS);
-//! assert!(report.max_download_bytes_per_second <= budget as f64);
+//! assert!(report.max_download <= budget as f64);
 //! ```
 //!
-//! `tests/wire.rs` has working ones.
+//! `tests/wire.rs` has working ones, among them the ones that try to cheat
+//! (`Raw` there speaks the protocol by hand). Take the serial lock first, and
+//! call `rig.client.discard_ticks()` before waiting on a tick.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
@@ -38,13 +44,16 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use halo_match_driver::server::{Account, Server};
 use halo_match_driver::walkers::Walkers;
-use halo_match_driver::{now_us, MatchClient, SeenTick};
+use halo_match_driver::{now_us, MatchClient, PlayerClient, SeenTick};
 use halo_sim::{PlayerInput, Rng, TICKS_PER_SECOND};
-use halo_wire::datagram::{ClientMessage, ServerMessage, Welcome, IP_UDP_OVERHEAD};
+use halo_wire::auth;
+use halo_wire::datagram::{Ack, ClientMessage, Refused, ServerMessage, Welcome, IP_UDP_OVERHEAD};
 use halo_wire::unit::PackedState;
 
 use crate::stats::Spread;
+use crate::{Gateway, GatewayConfig, UdpTransport};
 
 /// Distance bands, in world units: `[0, 10)`, `[10, 25)`, `[25, 60)`, `[60, ..)`.
 pub const DEFAULT_BANDS: [f32; 3] = [10.0, 25.0, 60.0];
@@ -163,6 +172,9 @@ impl TickReceipt {
 #[derive(Default)]
 struct Log {
     welcome: Option<Welcome>,
+    refused: Vec<Refused>,
+    /// Which Snapshots have arrived, as every Input says.
+    ack: Ack,
     ticks: BTreeMap<u32, TickReceipt>,
     /// Every state received with the tick of its datagram; kept only when asked.
     states: Vec<(u32, PackedState)>,
@@ -170,15 +182,54 @@ struct Log {
     wire_bytes: u64,
 }
 
-/// One simulated player.
-pub struct SimPlayer {
-    pub id: u16,
+/// The secret seed of a simulated player's UDP key pair (they are all
+/// different and all known, so that a test can both join and forge).
+pub fn sim_seed(id: u16) -> [u8; 32] {
+    let mut seed = [0x42u8; 32];
+    seed[..2].copy_from_slice(&id.to_le_bytes());
+    seed
+}
+
+/// The public key a simulated player's seat holds.
+pub fn sim_public_key(id: u16) -> [u8; 32] {
+    auth::public_key(&sim_seed(id))
+}
+
+/// One simulated player's end of the wire, shared with its receiving thread.
+struct Link {
     socket: Arc<UdpSocket>,
     gateway: SocketAddr,
-    seq: AtomicU32,
     impairment: Impairment,
     rng: Mutex<Rng>,
     delay_line: Option<Arc<DelayLine>>,
+}
+
+impl Link {
+    fn send(&self, bytes: Vec<u8>) {
+        if self.rng.lock().unwrap().next_f32() < self.impairment.loss {
+            return;
+        }
+        match &self.delay_line {
+            Some(line) if !self.impairment.delay.is_zero() => {
+                line.push(Instant::now() + self.impairment.delay, self.socket.clone(), self.gateway, bytes)
+            }
+            _ => {
+                let _ = self.socket.send_to(&bytes, self.gateway);
+            }
+        }
+    }
+}
+
+/// One simulated player.
+///
+/// It plays the client's part of the join: a Hello is answered, as a client
+/// does, by signing the Challenge it gets back with the player's key
+/// ([`sim_seed`]) and sending the Auth. Once welcomed it acknowledges the
+/// Snapshots it receives in every Input.
+pub struct SimPlayer {
+    pub id: u16,
+    link: Arc<Link>,
+    seq: AtomicU32,
     log: Arc<Mutex<Log>>,
     stop: Arc<AtomicBool>,
 }
@@ -195,29 +246,27 @@ impl SimPlayer {
         record_states: bool,
         delay_line: Option<Arc<DelayLine>>,
     ) -> (SimPlayer, JoinHandle<()>) {
-        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").expect("bind a player socket"));
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind a player socket");
         socket.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
-        let log = Arc::new(Mutex::new(Log::default()));
-        let stop = Arc::new(AtomicBool::new(false));
-        let player = SimPlayer {
-            id,
-            socket: socket.clone(),
+        let link = Arc::new(Link {
+            socket: Arc::new(socket),
             gateway,
-            seq: AtomicU32::new(1),
             impairment,
             rng: Mutex::new(Rng::seeded(0x5eed ^ id as u64)),
             delay_line,
-            log: log.clone(),
-            stop: stop.clone(),
-        };
+        });
+        let log = Arc::new(Mutex::new(Log::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let player = SimPlayer { id, link: link.clone(), seq: AtomicU32::new(1), log: log.clone(), stop: stop.clone() };
         let mut rng = Rng::seeded(0xfeed ^ id as u64);
+        let seed = sim_seed(id);
         let handle = std::thread::Builder::new()
             .name(format!("sim-player-{id}"))
             .spawn(move || {
                 let mut buf = vec![0u8; 2048];
                 let words = capacity.div_ceil(64);
                 while !stop.load(Relaxed) {
-                    let Ok(len) = socket.recv(&mut buf) else { continue };
+                    let Ok(len) = link.socket.recv(&mut buf) else { continue };
                     let at = now_us();
                     if rng.next_f32() < impairment.loss {
                         continue;
@@ -225,11 +274,20 @@ impl SimPlayer {
                     let at = at + impairment.delay.as_micros() as i64;
                     let wire = (len + IP_UDP_OVERHEAD) as u32;
                     match ServerMessage::decode(&buf[..len]) {
+                        Some(ServerMessage::Challenge(c)) => {
+                            let signature = auth::sign_challenge(&seed, id, c.stamp, &c.cookie);
+                            link.send(
+                                ClientMessage::Auth { player: id, stamp: c.stamp, cookie: c.cookie, signature }
+                                    .encode(),
+                            );
+                        }
                         Some(ServerMessage::Welcome(w)) => log.lock().unwrap().welcome = Some(w),
+                        Some(ServerMessage::Refused(r)) => log.lock().unwrap().refused.push(r),
                         Some(ServerMessage::Snapshot(s)) => {
                             let mut log = log.lock().unwrap();
                             log.datagrams += 1;
                             log.wire_bytes += wire as u64;
+                            log.ack.record(s.seq);
                             let receipt = log.ticks.entry(s.tick).or_insert_with(|| TickReceipt {
                                 first_at_us: at,
                                 datagrams: 0,
@@ -257,25 +315,12 @@ impl SimPlayer {
         (player, handle)
     }
 
-    fn send_raw(&self, bytes: Vec<u8>) {
-        if self.rng.lock().unwrap().next_f32() < self.impairment.loss {
-            return;
-        }
-        match &self.delay_line {
-            Some(line) if !self.impairment.delay.is_zero() => {
-                line.push(Instant::now() + self.impairment.delay, self.socket.clone(), self.gateway, bytes)
-            }
-            _ => {
-                let _ = self.socket.send_to(&bytes, self.gateway);
-            }
-        }
-    }
-
+    /// Ask the gateway for a Challenge (which the player answers by itself).
     pub fn hello(&self) {
-        self.send_raw(ClientMessage::Hello { player: self.id }.encode());
+        self.link.send(ClientMessage::Hello { player: self.id }.encode());
     }
 
-    /// Send an input with the next sequence number.
+    /// Send an input with the next sequence number, and the acknowledgement of what has been received.
     pub fn send_input(&self, input: &PlayerInput) -> u32 {
         let seq = self.seq.fetch_add(1, Relaxed);
         self.send_input_with_seq(seq, input);
@@ -284,7 +329,18 @@ impl SimPlayer {
 
     /// Send an input with a sequence number of the test's choosing.
     pub fn send_input_with_seq(&self, seq: u32, input: &PlayerInput) {
-        self.send_raw(ClientMessage::Input { seq, input: *input }.encode());
+        let ack = self.log.lock().unwrap().ack;
+        self.link.send(ClientMessage::Input { seq, input: *input, ack }.encode());
+    }
+
+    /// Forget the session: a client that starts again numbers its inputs from
+    /// 1 and has received nothing. (Its socket, and so its address, stays.)
+    pub fn restart_session(&self) {
+        self.seq.store(1, Relaxed);
+        let mut log = self.log.lock().unwrap();
+        log.welcome = None;
+        log.refused.clear();
+        log.ack = Ack::NONE;
     }
 
     /// The gateway's Welcome, if it came.
@@ -292,9 +348,14 @@ impl SimPlayer {
         self.log.lock().unwrap().welcome
     }
 
+    /// Everything the gateway refused this player.
+    pub fn refusals(&self) -> Vec<Refused> {
+        self.log.lock().unwrap().refused.clone()
+    }
+
     /// The address this player sends from.
     pub fn local_addr(&self) -> SocketAddr {
-        self.socket.local_addr().unwrap()
+        self.link.socket.local_addr().unwrap()
     }
 
     /// The ticks a datagram arrived for, ascending.
@@ -360,8 +421,9 @@ impl Crowd {
         self.players.iter().find(|p| p.id == id)
     }
 
-    /// Say hello for every player until each has been welcomed. Hellos are
-    /// resent every 200 ms (a lossy link may drop them).
+    /// Say hello for every player until each has been welcomed (the players
+    /// answer the challenges themselves). Hellos are resent every 200 ms (a
+    /// lossy link may drop them, or the answers).
     pub fn join_all(&self, timeout: Duration) -> Result<(), String> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -405,6 +467,45 @@ impl Drop for Crowd {
             line.wake.notify_all();
             let _ = handle.join();
         }
+    }
+}
+
+/// The simulated players' seats in the match: one SpacetimeDB connection per
+/// player, as their own identity, which `join`ed with the key of
+/// [`sim_seed`]. Kept alive for as long as the players play (a dropped
+/// connection puts the seat on hold).
+pub struct Seats {
+    pub accounts: Vec<Account>,
+    pub clients: Vec<PlayerClient>,
+}
+
+impl Seats {
+    /// Make `count` identities and have each take a seat, one after another,
+    /// so that player `n` gets id `n` (the match must be empty, with spawn
+    /// points set). Panics unless every seat is where it should be.
+    pub fn join(server: &Server, database: &str, owner: &MatchClient, count: u16) -> Seats {
+        Seats::join_ids(server, database, owner, 0..count)
+    }
+
+    /// Like [`Seats::join`] for the ids `ids`, which the match must hand out next in turn.
+    pub fn join_ids(server: &Server, database: &str, owner: &MatchClient, ids: Range<u16>) -> Seats {
+        let mut seats = Seats { accounts: Vec::new(), clients: Vec::new() };
+        let ids_again = ids.clone();
+        for id in ids {
+            let account = server.new_account();
+            let client = PlayerClient::connect_unsubscribed(&server.uri(), database, &account.token);
+            client.join(sim_public_key(id)).unwrap_or_else(|e| panic!("player {id} joining: {e}"));
+            seats.accounts.push(account);
+            seats.clients.push(client);
+        }
+        let held = Instant::now() + Duration::from_secs(30);
+        for (id, account) in ids_again.zip(&seats.accounts) {
+            while owner.seats().get(&id).map(|s| s.owner) != Some(account.identity()) {
+                assert!(Instant::now() < held, "player {id}'s seat did not appear as the one for their identity");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        seats
     }
 }
 
@@ -492,6 +593,9 @@ pub struct BandStats {
     pub stall_fraction: f64,
 }
 
+/// The largest age, in ticks, the report tells apart: older ones are counted as this.
+pub const MAX_AGE_TICKS: usize = 255;
+
 #[derive(Debug, Clone)]
 pub struct Report {
     pub players: usize,
@@ -506,6 +610,28 @@ pub struct Report {
     /// How old a tick was when its first datagram reached a player, ms.
     pub tick_age_ms: Spread,
     pub bands: Vec<BandStats>,
+    /// Staleness: for every (recipient, other player, tick) where the
+    /// recipient had received a state of the other player at some point, how
+    /// many ticks ago the newest one it had was sent for. `age_counts[a]` is
+    /// the number of such triples with an age of `a` ticks (the last counts
+    /// every older one).
+    pub age_counts: Vec<u64>,
+    /// The greatest age seen, in ticks (a tick is 33.3 ms).
+    pub max_age_ticks: u32,
+}
+
+impl Report {
+    /// The share of (recipient, other, tick) triples whose newest state was older than `ticks` ticks.
+    pub fn share_older_than(&self, ticks: usize) -> f64 {
+        let total: u64 = self.age_counts.iter().sum();
+        let older: u64 = self.age_counts.iter().skip(ticks + 1).sum();
+        older as f64 / total.max(1) as f64
+    }
+
+    /// How many triples were older than `ticks` ticks.
+    pub fn count_older_than(&self, ticks: usize) -> u64 {
+        self.age_counts.iter().skip(ticks + 1).sum()
+    }
 }
 
 impl fmt::Display for Report {
@@ -536,7 +662,15 @@ impl fmt::Display for Report {
                 b.pairs
             )?;
         }
-        Ok(())
+        writeln!(
+            f,
+            "state staleness       oldest {} ticks ({:.0} ms)   older than 8 ticks {:.4}%   older than 15 {:.5}%   older than 40 {:.6}%",
+            self.max_age_ticks,
+            self.max_age_ticks as f64 * 1000.0 / TICKS_PER_SECOND as f64,
+            self.share_older_than(8) * 100.0,
+            self.share_older_than(15) * 100.0,
+            self.share_older_than(40) * 100.0
+        )
     }
 }
 
@@ -553,6 +687,8 @@ pub fn analyze(crowd: &Crowd, truth: &Truth, window: Range<u32>, edges: &[f32]) 
     let mut longest = vec![0u32; bands];
     let mut stalls = vec![0u64; bands];
     let mut last_update = vec![0u32; capacity * capacity];
+    let mut age_counts = vec![0u64; MAX_AGE_TICKS + 1];
+    let mut max_age = 0u32;
 
     let mut ages = Vec::new();
     let mut bytes = vec![0u64; crowd.players.len()];
@@ -562,12 +698,13 @@ pub fn analyze(crowd: &Crowd, truth: &Truth, window: Range<u32>, edges: &[f32]) 
             let me = player.id as usize;
             let receipt = player.receipt(tick);
             expected += 1;
-            let Some(receipt) = &receipt else {
-                missed += 1;
-                continue;
-            };
-            ages.push((receipt.first_at_us - at.stamped_us) as f64 / 1e3);
-            bytes[index] += receipt.wire_bytes as u64;
+            match &receipt {
+                Some(receipt) => {
+                    ages.push((receipt.first_at_us - at.stamped_us) as f64 / 1e3);
+                    bytes[index] += receipt.wire_bytes as u64;
+                }
+                None => missed += 1,
+            }
             let Some(from) = at.positions[me] else { continue };
             for (other, position) in at.positions.iter().enumerate() {
                 let Some(position) = position else { continue };
@@ -577,9 +714,9 @@ pub fn analyze(crowd: &Crowd, truth: &Truth, window: Range<u32>, edges: &[f32]) 
                 let d = [position[0] - from[0], position[1] - from[1], position[2] - from[2]];
                 let band = band_of(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
                 pairs[band] += 1;
-                if receipt.has_state_of(other as u16) {
+                let slot = &mut last_update[me * capacity + other];
+                if receipt.as_ref().is_some_and(|r| r.has_state_of(other as u16)) {
                     updated[band] += 1;
-                    let slot = &mut last_update[me * capacity + other];
                     if *slot != 0 {
                         let gap = tick - *slot;
                         longest[band] = longest[band].max(gap);
@@ -589,6 +726,11 @@ pub fn analyze(crowd: &Crowd, truth: &Truth, window: Range<u32>, edges: &[f32]) 
                         }
                     }
                     *slot = tick;
+                }
+                if *slot != 0 {
+                    let age = tick - *slot;
+                    max_age = max_age.max(age);
+                    age_counts[(age as usize).min(MAX_AGE_TICKS)] += 1;
                 }
             }
         }
@@ -625,5 +767,72 @@ pub fn analyze(crowd: &Crowd, truth: &Truth, window: Range<u32>, edges: &[f32]) 
                 stall_fraction: stalls[i] as f64 / updated[i].max(1) as f64,
             })
             .collect(),
+        age_counts,
+        max_age_ticks: max_age,
+    }
+}
+
+/// A running match with its players seated and a gateway in front of it:
+/// everything a wire test needs short of the simulated UDP players
+/// ([`Crowd`]). Fields drop in order: the gateway and the subscriber go
+/// before the seats and the server.
+pub struct Rig {
+    pub gateway: Gateway,
+    /// The match's owner, subscribed to its tables.
+    pub client: MatchClient,
+    /// Walkers placed at the spawn points the players were seated at.
+    pub walkers: Walkers,
+    /// The players' seats: one SpacetimeDB identity each, ids `0..players`.
+    pub seats: Seats,
+    /// One more than the largest player id.
+    pub capacity: usize,
+    pub server: Server,
+    /// The identity the gateway connected as, which the match accepts input from.
+    pub gateway_account: Account,
+}
+
+/// What a [`Rig`] is to be: the match, its players, the gateway's budget.
+pub struct RigSetup<'a> {
+    /// The match's database name.
+    pub name: &'a str,
+    pub map: halo_sim::MapData,
+    /// Where the walkers are placed around (on the ground).
+    pub anchors: &'a [[f32; 3]],
+    pub players: u16,
+    /// Bytes a second a player may be sent.
+    pub budget: u32,
+}
+
+impl Rig {
+    /// Start a SpacetimeDB (the release in `bin`), publish `wasm` to it, load
+    /// the map, set a spawn point for each of the players' walkers, name a
+    /// gateway identity, start the match, seat the players (so player `n`
+    /// stands where walker `n` does) and start a gateway on loopback UDP.
+    /// `tune` may change the gateway's configuration first.
+    pub fn start(
+        bin: &std::path::Path,
+        wasm: &std::path::Path,
+        setup: RigSetup,
+        tune: impl FnOnce(&mut GatewayConfig),
+    ) -> Rig {
+        let RigSetup { name, map, anchors, players, budget } = setup;
+        let server = Server::start(bin);
+        server.publish(wasm, name);
+        let client = server.connect(name);
+        client.load_map(map.to_bytes()).unwrap();
+        let (walkers, spawn) = Walkers::new(map, anchors, players, 7);
+        client.set_spawn_points(&spawn).unwrap();
+        client.set_capacity(players.max(500)).unwrap();
+        let gateway_account = server.new_account();
+        client.set_gateway(gateway_account.identity()).unwrap();
+        client.start();
+        let seats = Seats::join(&server, name, &client, players);
+        let mut config = GatewayConfig::new(server.uri(), name);
+        config.token = Some(gateway_account.token.clone());
+        config.budget_bytes_per_second = budget;
+        tune(&mut config);
+        let transport = Arc::new(UdpTransport::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+        let gateway = Gateway::start(config, transport).expect("start the gateway");
+        Rig { gateway, client, walkers, seats, capacity: players as usize, server, gateway_account }
     }
 }
