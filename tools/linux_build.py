@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from . import rust_client
 from .embed_assets import hud_assets_build, hud_configure_inputs
 from .ninja_syntax import Writer
 
@@ -44,6 +45,33 @@ def game_defines_and_includes(config: Dict[str, Any]) -> str:
     return " ".join(
         [f"-D{define}" for define in game.get("defines", [])]
         + [f"-I{_quote(Path(directory))}" for directory in game.get("include_dirs", [])]
+    )
+
+
+def large_mode(sln: Any) -> bool:
+    """whether the build links the large-scale mode's Rust library
+    (configure.py --large-mode); without it the mode is not in the game"""
+    return bool(getattr(sln, "port_large_mode", False))
+
+
+# the unit that is the large-scale mode's adapter: it sees the library's
+# interface only in a build that has it
+LARGE_MODE_SOURCE = "large_mode.c"
+LARGE_MODE_DEFINE = "-DHALO_LARGE_MODE"
+
+
+def rust_library_rule(n: Writer) -> None:
+    """the rule that builds the library (tools/rust_client.py); ninja runs it
+    when a Rust source changed, and relinks only if the library did (the
+    Windows build, generated beside this one, asks for it too)"""
+    if getattr(n, "rust_client_rule", False):
+        return
+    n.rust_client_rule = True
+    n.rule(
+        name="rust_client",
+        command="$python tools/rust_client.py --target $target --output $out",
+        description="RUST CLIENT LIBRARY $out",
+        restat=True,
     )
 
 
@@ -286,7 +314,7 @@ def linux_configure_inputs() -> List[Path]:
     # re-runs it)
     game_folders = sorted({source.parent for source in game_sources(_load_port_config())})
     return [PORT_CONFIG, Path(__file__), PORT_DIR / "src", PORT_DIR / "game", XDK_INCLUDE, *game_folders,
-            *hud_configure_inputs()]
+            *hud_configure_inputs(), *(folder / "src" for folder in rust_client.SOURCE_FOLDERS)]
 
 
 def _quote(path: Any) -> str:
@@ -360,6 +388,15 @@ def generate_linux_build(n: Writer, sln: Any) -> None:
         pool="console",
     )
 
+    # the large-scale mode's client library (rust/halo-client), 32-bit, linked
+    # into the game with what it needs of the system
+    rust_lib: Optional[Path] = None
+    if large_mode(sln):
+        rust_library_rule(n)
+        rust_lib = build_dir / rust_client.library_name(rust_client.LINUX_TARGET)
+        n.build(outputs=rust_lib, rule="rust_client", implicit=rust_client.source_files(),
+                variables={"target": rust_client.LINUX_TARGET})
+
     # the high-res HUD's textures (port/assets/hud; port/linux/src/hud_hires.c)
     embedded_assets = hud_assets_build(n, "linux", build_dir / "generated" / "hud_hires_assets.c")
 
@@ -367,6 +404,11 @@ def generate_linux_build(n: Writer, sln: Any) -> None:
     port_include = PORT_DIR / "include"
     sdk_flags = f"-idirafter {XDK_INCLUDE}"
     libs = " ".join(f"-l{lib}" for lib in config.get("libraries", []))
+    if rust_lib:
+        # (the library goes before the C libraries it needs, and is not an
+        # input of the link check, which reads the game's own objects)
+        libs = " ".join([str(rust_lib), *(f"-l{lib}" for lib in rust_client.system_libraries(rust_client.LINUX_TARGET)),
+                         libs])
 
     def emit(obj_dir: Path, output: Path, extra_cflags: List[str], extra_ldflags: List[str],
              implicit_inputs: List[Path]) -> None:
@@ -406,7 +448,8 @@ def generate_linux_build(n: Writer, sln: Any) -> None:
         # Port-specific units that must see the game exactly as its own
         # sources do (port/linux/game).
         for source in sorted(Path(config["game_sources"]).glob("*.c")):
-            add_object(source, game_cflags)
+            add_object(source, f"{game_cflags} {LARGE_MODE_DEFINE}" if rust_lib and source.name == LARGE_MODE_SOURCE
+                       else game_cflags)
 
         platform_dir = Path(config["platform_sources"])
         platform_cflags = " ".join([
@@ -468,7 +511,7 @@ def generate_linux_build(n: Writer, sln: Any) -> None:
                 "ldflags": " ".join(["--target=i686-linux-gnu", "-m32", "-no-pie", "-g", *extra_ldflags]),
                 "libs": libs,
             },
-            implicit=[Path("tools/linux_link_check.py")],
+            implicit=[Path("tools/linux_link_check.py"), *([rust_lib] if rust_lib else [])],
         )
 
     # Profile-guided optimisation: with the committed profile, or with

@@ -36,3 +36,4 @@ dist/
 /rust/halo-match-module/target/
 /rust/halo-match-driver/target/
 /rust/halo-gateway/target/
+/rust/halo-client/target/

@@ -13,7 +13,10 @@ name: Build
 # - a newer push to the same branch cancels a run still going;
 # - pushes that only change documentation do not build;
 # - Windows, whose minutes cost twice Linux's, builds only Windows;
-# - artifacts are kept for three days.
+# - artifacts are kept for three days;
+# - the large-scale mode's Rust library (rust/halo-client, 32-bit, linked into
+#   the Linux and Windows games) is built by cargo from the same job, with the
+#   toolchain installed minimal and its downloads and build output cached.
 #
 # A successful build of main is also published as a GitHub release, the
 # newest marked latest, so that
@@ -50,7 +53,11 @@ jobs:
         run: |
           printf '\n[multilib]\nInclude = /etc/pacman.d/mirrorlist\n' >> /etc/pacman.conf
           pacman -Syu --noconfirm --needed git zstd python python-pytest ninja ccache \
-            clang lld gcc lib32-glibc lib32-gcc-libs lib32-sdl3
+            clang lld gcc lib32-glibc lib32-gcc-libs lib32-sdl3 rustup make perl
+          # the large-scale mode's library: 32-bit Rust (its OpenSSL is built
+          # from source by perl, make and gcc)
+          rustup toolchain install stable --profile minimal --target i686-unknown-linux-gnu
+          rustup default stable
 
       - uses: actions/checkout@v4
 
@@ -60,6 +67,14 @@ jobs:
           key: ccache-linux-${{ github.sha }}
           restore-keys: ccache-linux-
 
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            rust/halo-client/target
+          key: rust-client-linux-${{ hashFiles('rust/halo-client/Cargo.lock', 'rust/halo-client/Cargo.toml') }}
+          restore-keys: rust-client-linux-
+
       - name: Debug
         run: python tools/ci_build.py linux debug
 
@@ -67,7 +82,7 @@ jobs:
         run: python tools/ci_build.py linux release
 
       - name: Test
-        run: python -m pytest -q tools/test_linux_port.py tools/test_scenario_harness.py
+        run: python -m pytest -q tools/test_linux_port.py tools/test_scenario_harness.py tools/test_large_mode.py
 
       - name: Compile cache
         run: ccache --show-stats
@@ -132,7 +147,9 @@ jobs:
   rust-match:
     # The match module (rust/halo-match-module, SpacetimeDB 2.10.2, built for
     # WebAssembly), the driver that tests it (rust/halo-match-driver), and the
-    # UDP gateway with its wire tests (rust/halo-gateway). The tests start a
+    # UDP gateway with its wire tests (rust/halo-gateway), and the client
+    # library of the C game (rust/halo-client), tested through its C interface
+    # against both. The tests start a
     # real SpacetimeDB Standalone of their own on a free port, so this job
     # fetches the pinned release (a 58 MB download, checked against its SHA-256
     # and cached), and needs no game data: they run on a flat floor. The 500-player measurement on the real maps is not run here.
@@ -151,7 +168,8 @@ jobs:
             rust/halo-match-module/target
             rust/halo-match-driver/target
             rust/halo-gateway/target
-          key: rust-match-${{ hashFiles('rust/halo-match-*/Cargo.toml', 'rust/halo-match-*/Cargo.lock', 'rust/halo-gateway/Cargo.toml', 'rust/halo-gateway/Cargo.lock', 'rust/Cargo.lock') }}
+            rust/halo-client/target
+          key: rust-match-${{ hashFiles('rust/halo-match-*/Cargo.toml', 'rust/halo-match-*/Cargo.lock', 'rust/halo-gateway/Cargo.toml', 'rust/halo-gateway/Cargo.lock', 'rust/halo-client/Cargo.toml', 'rust/halo-client/Cargo.lock', 'rust/Cargo.lock') }}
           restore-keys: rust-match-
 
       - uses: actions/cache@v4
@@ -177,12 +195,13 @@ jobs:
 
       - name: Format and lints
         run: |
-          for crate in halo-match-module halo-match-driver halo-gateway; do
+          for crate in halo-match-module halo-match-driver halo-gateway halo-client; do
             (cd rust/$crate && cargo fmt --check)
           done
           (cd rust/halo-match-module && cargo clippy --target wasm32-unknown-unknown --locked -- -D warnings)
           (cd rust/halo-match-driver && cargo clippy --all-targets --locked -- -D warnings)
           (cd rust/halo-gateway && cargo clippy --all-targets --locked -- -D warnings)
+          (cd rust/halo-client && cargo clippy --all-targets --locked -- -D warnings)
 
       - name: Build the module for WebAssembly
         working-directory: rust/halo-match-module
@@ -197,6 +216,14 @@ jobs:
         # simulated UDP players against a real SpacetimeDB and the gateway;
         # one test at a time, as the tests insist on themselves
         working-directory: rust/halo-gateway
+        run: |
+          HALO_STDB_BIN="$HOME/spacetimedb" cargo test --locked --release -- --nocapture --test-threads=1
+
+      - name: Test the client library on its C interface
+        # a session of the library against a real SpacetimeDB and gateway with
+        # simulated players; the headless game's run needs the game's own
+        # data, and skips itself here
+        working-directory: rust/halo-client
         run: |
           HALO_STDB_BIN="$HOME/spacetimedb" cargo test --locked --release -- --nocapture --test-threads=1
 
@@ -303,6 +330,21 @@ jobs:
           path: .ccache
           key: ccache-windows-${{ github.sha }}
           restore-keys: ccache-windows-
+
+      # the large-scale mode's library: 32-bit Rust (the runner's own may be
+      # older than the SpacetimeDB SDK needs)
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --target i686-pc-windows-msvc
+          rustup default stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            rust/halo-client/target
+          key: rust-client-windows-${{ hashFiles('rust/halo-client/Cargo.lock', 'rust/halo-client/Cargo.toml') }}
+          restore-keys: rust-client-windows-
 
       # SDL's development package, which configure.py fetches
       - uses: actions/cache@v4

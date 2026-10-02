@@ -477,6 +477,8 @@ symbols in this file:
 void p2p_set_game_player_counts(int count, int maximum);
 /* port: the comparison harness's (port/linux/game/scenario_harness.c) */
 boolean scenario_harness_active(void);
+/* port: the large-scale mode's (port/linux/game/large_mode.c) */
+boolean large_mode_active(void);
 
 /* ---------- constants */
 
@@ -2853,9 +2855,10 @@ boolean server_has_enough_machines(
 {
 	boolean has_enough_machines;
 	/* port: the comparison harness plays alone
-	(port/linux/game/scenario_harness.c) */
+	(port/linux/game/scenario_harness.c), and so does the large-scale mode's
+	client, whose other players are the gateway's (port/linux/game/large_mode.c) */
 	long minimum_machine_count =
-		network_game_is_splitscreen_local() || scenario_harness_active() ? 1 : 2;
+		network_game_is_splitscreen_local() || scenario_harness_active() || large_mode_active() ? 1 : 2;
 	long machine_count = 0;
 	long client_machine_index;
 
@@ -3752,8 +3755,8 @@ static boolean network_game_server_setup_game_from_playlist(
 		ustrncpy(server->game.name, machine_name, NETWORK_GAME_NAME_LENGTH - 1);
 		server->game.name[NETWORK_GAME_NAME_LENGTH - 1] = L'\0';
 		server->game.map.version = 0;
-		/* (port: the comparison harness plays alone) */
-		server->game.minimum_players = scenario_harness_active() ? 1 : 2;
+		/* (port: the comparison harness and the large-scale mode play alone) */
+		server->game.minimum_players = scenario_harness_active() || large_mode_active() ? 1 : 2;
 		server->game.maximum_players = MAXIMUM_NETWORK_PLAYER_COUNT;
 
 		if (server->game.variant.universal_variant.teams)

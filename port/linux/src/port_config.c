@@ -189,6 +189,25 @@ static const struct config_setting config_settings[] =
 		"Look for a new version when the game starts, and offer to update to it;\n"
 		"false never looks (the game's \"Do not ask again\" writes false here)." },
 
+	{ "large.map", _config_string, "\"\"", "HALO_LARGE_MAP", _environment_value, _platform_desktop,
+		"The large-scale mode (port/linux/game/large_mode.c): a match of about 500\n"
+		"players on a dedicated server. Naming a map here (\"bloodgulch\") starts a\n"
+		"session on it from the settings, without the lobby; empty plays as\n"
+		"usual. It needs a build with the large-scale mode library, and a server\n"
+		"(SpacetimeDB with the match module, and the gateway) in front of it." },
+	{ "large.gateway", _config_string, "\"127.0.0.1:7777\"", "HALO_LARGE_GATEWAY", _environment_value,
+		_platform_desktop,
+		"The large-scale server's gateway, where the players' per-tick traffic\n"
+		"goes over UDP: host:port." },
+	{ "large.spacetimedb", _config_string, "\"http://127.0.0.1:3000\"", "HALO_LARGE_SPACETIMEDB", _environment_value,
+		_platform_desktop,
+		"The large-scale server's SpacetimeDB, which the player's seat and the\n"
+		"slow state come from directly: its URI." },
+	{ "large.database", _config_string, "\"\"", "HALO_LARGE_DATABASE", _environment_value, _platform_desktop,
+		"The database of the match to join (each match is its own)." },
+	{ "large.log_players", _config_boolean, "false", "HALO_LARGE_LOG", _environment_set_is_true, _platform_desktop,
+		"Log every player the gateway has sent, with their state, once a second\n"
+		"(for tests; the log has the session's own line every second anyway)." },
 	{ "debug.network_test", _config_string, "\"\"", "HALO_NETWORK_TEST", _environment_value, _platform_all,
 		"Automated system link sessions for testing (port/linux/game/network_test.c):\n"
 		"\"host:<map>\" hosts a game on that map, \"join\" joins the first game found;\n"
