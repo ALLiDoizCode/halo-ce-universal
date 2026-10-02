@@ -62,7 +62,11 @@ LARGE_MODE_DEFINE = "-DHALO_LARGE_MODE"
 
 def rust_library_rule(n: Writer) -> None:
     """the rule that builds the library (tools/rust_client.py); ninja runs it
-    when a Rust source changed, and relinks only if the library did"""
+    when a Rust source changed, and relinks only if the library did (the
+    Windows build, generated beside this one, asks for it too)"""
+    if getattr(n, "rust_client_rule", False):
+        return
+    n.rust_client_rule = True
     n.rule(
         name="rust_client",
         command="$python tools/rust_client.py --target $target --output $out",

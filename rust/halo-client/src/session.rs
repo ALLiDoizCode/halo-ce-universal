@@ -129,7 +129,11 @@ impl Inner {
 
 pub struct Session {
     inner: Arc<Inner>,
-    threads: Vec<JoinHandle<()>>,
+    network: Option<JoinHandle<()>>,
+    // never joined: it can be inside a connect to a SpacetimeDB that does not
+    // answer, and stopping a session must not wait for that (the game calls it
+    // between maps). It sees the stop flag when the connect returns and leaves.
+    _slow: JoinHandle<()>,
 }
 
 impl Session {
@@ -171,7 +175,7 @@ impl Session {
                 .spawn(move || slow_thread(&inner))
                 .map_err(|e| format!("a thread: {e}"))?
         };
-        Ok(Session { inner, threads: vec![network, slow] })
+        Ok(Session { inner, network: Some(network), _slow: slow })
     }
 
     pub fn config(&self) -> &Config {
@@ -232,8 +236,9 @@ impl Drop for Session {
         if let Some(connection) = self.inner.connection.lock().unwrap_or_else(|p| p.into_inner()).take() {
             let _ = connection.disconnect();
         }
-        for thread in self.threads.drain(..) {
-            let _ = thread.join();
+        // (the socket's read times out in POLL)
+        if let Some(network) = self.network.take() {
+            let _ = network.join();
         }
     }
 }
@@ -317,7 +322,7 @@ fn slow_thread(inner: &Arc<Inner>) {
                     let _ = connection.disconnect();
                 }
                 let _ = runner.join();
-                inner.shared().slow.connected = false;
+                inner.shared().slow = Slow::default();
             }
             Err(e) => inner.shared().error = Some(e),
         }

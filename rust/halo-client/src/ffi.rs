@@ -137,6 +137,9 @@ pub extern "C" fn halo_large_stop() {
 pub unsafe extern "C" fn halo_large_status(out: *mut u32) -> u32 {
     guard(0, || {
         let g = global();
+        if out.is_null() {
+            return 0;
+        }
         let out = unsafe { std::slice::from_raw_parts_mut(out, 8) };
         out.fill(0);
         let Some(session) = &g.session else { return 0 };
@@ -163,6 +166,9 @@ pub unsafe extern "C" fn halo_large_status(out: *mut u32) -> u32 {
 pub unsafe extern "C" fn halo_large_frame(tick: *mut u32) -> u32 {
     guard(0, || {
         let mut g = global();
+        if tick.is_null() {
+            return 0;
+        }
         let Some(session) = &g.session else {
             unsafe { *tick = 0 };
             g.frame.clear();
@@ -188,6 +194,9 @@ pub unsafe extern "C" fn halo_large_frame(tick: *mut u32) -> u32 {
 pub unsafe extern "C" fn halo_large_unit(index: u32, player: *mut u32, tick: *mut u32, out: *mut f32) -> u32 {
     guard(0, || {
         let g = global();
+        if player.is_null() || tick.is_null() || out.is_null() {
+            return 0;
+        }
         let Some(unit) = g.frame.get(index as usize) else { return 0 };
         let s = &unit.state;
         unsafe {
@@ -218,6 +227,9 @@ pub unsafe extern "C" fn halo_large_unit(index: u32, player: *mut u32, tick: *mu
 pub unsafe extern "C" fn halo_large_local(out: *mut f32) -> u32 {
     guard(0, || {
         let g = global();
+        if out.is_null() {
+            return 0;
+        }
         let Some(local) = g.session.as_ref().and_then(|s| s.slow().local) else { return 0 };
         unsafe { std::slice::from_raw_parts_mut(out, 5) }.copy_from_slice(&local);
         1
@@ -233,6 +245,9 @@ pub unsafe extern "C" fn halo_large_local(out: *mut f32) -> u32 {
 pub unsafe extern "C" fn halo_large_bounds(out: *mut f32) -> u32 {
     guard(0, || {
         let g = global();
+        if out.is_null() {
+            return 0;
+        }
         let Some(bounds) = g.session.as_ref().and_then(|s| s.slow().bounds) else { return 0 };
         unsafe { std::slice::from_raw_parts_mut(out, 6) }.copy_from_slice(&bounds.to_world());
         1
@@ -259,12 +274,12 @@ pub extern "C" fn halo_large_send_input(x: f32, y: f32, z: f32, yaw: f32, pitch:
 pub unsafe extern "C" fn halo_large_error(buffer: *mut c_char, size: u32) -> u32 {
     guard(0, || {
         let g = global();
-        let message = if g.error.is_empty() {
-            g.session.as_ref().and_then(|s| s.last_error()).unwrap_or_default()
-        } else {
-            g.error.clone()
+        // a session's own latest trouble, or why it could not start
+        let message = match &g.session {
+            Some(session) => session.last_error().unwrap_or_default(),
+            None => g.error.clone(),
         };
-        if message.is_empty() || size == 0 {
+        if message.is_empty() || size == 0 || buffer.is_null() {
             return 0;
         }
         let length = message.len().min(size as usize - 1);

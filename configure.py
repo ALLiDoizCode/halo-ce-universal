@@ -83,7 +83,8 @@ parser.add_argument(
     help="clang with the arm64_32 target for the Android guest (default: clang)",
 )
 args = parser.parse_args()
-if args.large_mode == "on" and not rust_client.available():
+rust_available = rust_client.available()
+if args.large_mode == "on" and not rust_available:
     parser.error("--large-mode=on needs a Rust toolchain (cargo), and there is none")
 
 # the settings the builds read
@@ -96,7 +97,7 @@ sln = SimpleNamespace(
     port_portable=args.portable,
     port_pgo=args.pgo,
     port_pgo_profile=args.pgo_profile,
-    port_large_mode=args.large_mode == "on" or (args.large_mode == "auto" and rust_client.available()),
+    port_large_mode=args.large_mode == "on" or (args.large_mode == "auto" and rust_available),
     android_ndk=args.android_ndk,
     android_guest_cc=args.android_guest_cc,
 )

@@ -22,9 +22,9 @@ A session starts from the settings, without the lobby:
   and facing go to the gateway as that tick's input;
 - when the game ends (large_mode_dispose) the library stops.
 
-What the mode switches off: the distributed netcode (network_distributed.c's
-new game, tick and message handling, which a game of one machine would only
-idle through); the C engine does not simulate other players, whom the library
+What the mode switches off: the distributed netcode's tick and message handling
+(network_distributed.c, which a game of one machine would only idle through);
+the C engine does not simulate other players, whom the library
 holds from what the gateway sends. In this ticket the other players are not
 drawn, and the local player does not move: the game logs what the library
 holds, once a second, for the automated test to compare with what the server
@@ -87,7 +87,7 @@ static struct
 	last logged on */
 	boolean started;
 	boolean placed;
-	boolean error_logged;
+	char logged_error[256];
 	long logged_time;
 } large;
 
@@ -130,17 +130,16 @@ char const *large_mode_map(
 	return large_mode_active() ? large.map : "";
 }
 
-/* the library's last error, once */
+/* the library's latest error, each time it is a new one */
 static void large_mode_log_error(
 	void)
 {
-	char message[256];
+	char message[sizeof(large.logged_error)];
 
-	if (halo_large_error(message, sizeof(message)) > 0)
+	if (halo_large_error(message, sizeof(message)) > 0 && strcmp(message, large.logged_error))
 	{
-		if (!large.error_logged)
-			platform_log("large mode: %s", message);
-		large.error_logged = TRUE;
+		strcpy(large.logged_error, message);
+		platform_log("large mode: %s", message);
 	}
 }
 
@@ -152,7 +151,7 @@ void large_mode_new_game(
 	if (!large_mode_active())
 		return;
 	large.placed = FALSE;
-	large.error_logged = FALSE;
+	large.logged_error[0] = 0;
 	large.logged_time = 0;
 	large.started = halo_large_start(large.gateway, large.spacetimedb, large.database,
 		(unsigned long)large.player) != 0;
@@ -192,14 +191,15 @@ static struct unit_datum *large_mode_local_unit(
 player the gateway has sent, as the library holds them (the automated test
 compares these with what the server sent) */
 static void large_mode_log(
-	boolean joined)
+	void)
 {
 	unsigned long status[8];
+	boolean joined;
 	unsigned long tick;
 	unsigned long count;
 	unsigned long index;
 
-	halo_large_status(status);
+	joined = halo_large_status(status) != 0;
 	count = halo_large_frame(&tick);
 	platform_log("large mode: tick %ld joined %d slow %lu map %lu | hellos %lu datagrams %lu bytes %lu ignored %lu "
 		"inputs %lu | gateway tick %lu, %lu players",
@@ -226,14 +226,9 @@ void large_mode_game_tick(
 {
 	long unit_index;
 	struct unit_datum *unit;
-	unsigned long status[8];
-	boolean joined;
 
 	if (!large.started || !game_engine_running())
 		return;
-	joined = halo_large_status(status) != 0;
-	if (!large.error_logged)
-		large_mode_log_error();
 
 	unit = large_mode_local_unit(&unit_index);
 	if (unit)
@@ -279,7 +274,8 @@ void large_mode_game_tick(
 	if (game_time_get() - large.logged_time >= TICKS_PER_SECOND)
 	{
 		large.logged_time = game_time_get();
-		large_mode_log(joined);
+		large_mode_log();
+		large_mode_log_error();
 	}
 }
 

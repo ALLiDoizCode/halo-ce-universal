@@ -163,3 +163,12 @@ def test_each_targets_library_is_where_cargo_leaves_it():
     assert rust_client.library_path("i686-pc-windows-msvc", Path("r")).name == "halo_client.lib"
     assert "gcc_s" in rust_client.system_libraries("i686-unknown-linux-gnu")
     assert "ws2_32" in rust_client.system_libraries("i686-pc-windows-msvc")
+
+
+def test_the_rule_is_defined_once_when_two_generators_ask_for_it():
+    # the Linux and the Windows generators both run on Windows
+    out = io.StringIO()
+    writer = ninja_syntax.Writer(out)
+    linux_build.rust_library_rule(writer)
+    linux_build.rust_library_rule(writer)
+    assert out.getvalue().count("rule rust_client") == 1
