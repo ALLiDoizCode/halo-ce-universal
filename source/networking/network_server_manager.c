@@ -2777,7 +2777,9 @@ boolean server_needs_more_teams(
 {
 	boolean needs_more_teams = FALSE;
 
-	if (server->game.variant.universal_variant.teams)
+	/* port: the large-scale mode's client has one player of its own, and the
+	other team's are the gateway's (port/linux/game/large_mode.c) */
+	if (server->game.variant.universal_variant.teams && !large_mode_active())
 	{
 		short player_count_by_team[NUMBER_OF_MULTIPLAYER_TEAMS] = { 0, 0 };
 		long player_index;

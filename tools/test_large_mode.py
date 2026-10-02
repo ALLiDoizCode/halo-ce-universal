@@ -73,7 +73,8 @@ def adapter_prototypes():
 def test_the_library_passes_only_floats_32_bit_integers_and_pointers():
     functions = library_functions()
     assert {"halo_large_start", "halo_large_stop", "halo_large_status", "halo_large_frame", "halo_large_unit",
-            "halo_large_local", "halo_large_bounds", "halo_large_send_input", "halo_large_error"} <= set(functions)
+            "halo_large_local", "halo_large_bounds", "halo_large_send_input", "halo_large_error",
+            "halo_large_member"} <= set(functions)
     for name, (parameters, result) in functions.items():
         # (rust_c_type refused anything else already) nothing comes back but a 32-bit integer
         assert result in ("void", "unsignedlong"), f"{name} returns {result}"

@@ -13,6 +13,10 @@
 //!   restart or a republish) reloads it from the row.
 //! - `map_info` (public) gives the gateway the map's world bounds, which its
 //!   position packing is relative to.
+//! - `roster` (public) says who each player is for the others to show: a
+//!   name and a team. It changes only when a player joins or leaves, so every
+//!   client subscribes to all of it, as it must not to `player`, which
+//!   changes every tick.
 //!
 //! # Who may call what
 //!
@@ -144,6 +148,23 @@ pub struct MapInfo {
     y1: f32,
     z0: f32,
     z1: f32,
+}
+
+/// Two teams, as the engine numbers them: red is 0 and blue is 1.
+pub const TEAMS: u8 = 2;
+
+/// Who a player is, for the other players' screens. One row per player in the
+/// match; public. Slow state: written when a player joins or is added, and
+/// deleted when they go.
+#[table(accessor = roster, public)]
+pub struct RosterRow {
+    #[primary_key]
+    player: u16,
+    /// 0 (red) or 1 (blue).
+    team: u8,
+    /// What the others see over the player's head (at most 11 characters:
+    /// the engine's name field).
+    name: String,
 }
 
 /// Which map the cache must hold. Private.
@@ -278,6 +299,20 @@ fn to_player(row: &PlayerRow) -> Player {
     Player { id: row.id, position: [row.x, row.y, row.z], yaw: row.yaw, pitch: row.pitch }
 }
 
+/// Put `id` on the roster, on the team with fewer players, with a name until
+/// the player has one of their own.
+fn add_to_roster(ctx: &ReducerContext, id: u16) {
+    if ctx.db.roster().player().find(id).is_some() {
+        return;
+    }
+    let mut counts = [0u32; TEAMS as usize];
+    for row in ctx.db.roster().iter() {
+        counts[(row.team % TEAMS) as usize] += 1;
+    }
+    let team = if counts[1] < counts[0] { 1 } else { 0 };
+    ctx.db.roster().insert(RosterRow { player: id, team, name: format!("Player {id}") });
+}
+
 /// `halo_sim::Store` over the `player` table. Position writes keep the
 /// rejection counters.
 struct TableStore<'a> {
@@ -398,6 +433,7 @@ pub fn add_players(ctx: &ReducerContext, batch: Vec<u8>) -> Result<(), String> {
         }
     }
     for p in players {
+        add_to_roster(ctx, p.player);
         ctx.db.player().insert(PlayerRow {
             id: p.player,
             x: p.position[0],
@@ -427,6 +463,7 @@ pub fn remove_players(ctx: &ReducerContext, ids: Vec<u16>) -> Result<(), String>
 fn remove_player(ctx: &ReducerContext, id: u16) {
     ctx.db.player().id().delete(id);
     ctx.db.seat().player().delete(id);
+    ctx.db.roster().player().delete(id);
 }
 
 /// Take a seat in the match: a player, tied to the caller's identity.
@@ -469,6 +506,7 @@ pub fn join(ctx: &ReducerContext, udp_key: Vec<u8>) -> Result<(), String> {
         last_reject: REJECT_NONE,
         last_reject_tick: 0,
     });
+    add_to_roster(ctx, id);
     ctx.db.seat().insert(Seat {
         player: id,
         owner: ctx.sender(),

@@ -14,7 +14,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use halo_client::ffi::*;
-use halo_gateway::harness::{Crowd, Impairment, Rig, RigSetup, Truth};
+use halo_gateway::harness::{sim_public_key, Crowd, Impairment, Rig, RigSetup, Truth};
 use halo_match_driver::server::{build_module, stdb_bin_dir};
 use halo_sim::fixtures::flat_floor_map;
 use halo_sim::PlayerInput;
@@ -96,6 +96,16 @@ fn frame() -> (u32, Vec<(u32, u32, [f32; 8])>) {
     (tick, units)
 }
 
+/// `halo_large_member`: the roster's (team, name) for a player, if it has them.
+fn member(player: u32) -> Option<(u32, String)> {
+    let (mut team, mut name) = (0u32, [0 as c_char; 16]);
+    if unsafe { halo_large_member(player, &mut team, name.as_mut_ptr(), name.len() as u32) } == 0 {
+        return None;
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) };
+    Some((team, name.to_string_lossy().into_owned()))
+}
+
 fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + WAIT;
     while !done() {
@@ -160,6 +170,53 @@ fn the_players_the_library_is_sent_are_the_servers_to_within_the_packing() {
     }
     assert!(checked > 1000, "only {checked} states checked");
     assert_eq!(distinct.len(), OTHERS as usize, "every other player was heard of");
+}
+
+#[test]
+fn the_roster_gives_each_player_a_name_and_a_team_over_the_direct_connection() {
+    let _serial = serial();
+    let Some(world) = world("boundary-roster") else { return };
+    halo_large_stop();
+    assert_eq!(member(0), None, "nothing without a session");
+    assert!(start(&world));
+    wait_for("the library never joined", || status().0 == 1);
+
+    // what the library says is what the match's roster holds, the library's own player included
+    wait_for("the library's roster is not the match's", || {
+        let server = world.rig.client.roster();
+        server.len() == OTHERS as usize + 1
+            && server.values().all(|row| member(row.player as u32) == Some((row.team as u32, row.name.clone())))
+    });
+    let server = world.rig.client.roster();
+    assert_eq!(member(3), Some((server[&3].team as u32, "Player 3".to_string())));
+    // two teams, shared out evenly
+    let blue = server.values().filter(|row| row.team == 1).count();
+    assert!(server.values().all(|row| row.team < 2));
+    assert!(blue.abs_diff(server.len() - blue) <= 1, "{blue} blue of {}", server.len());
+    // a player the match has not got
+    assert_eq!(member(900), None);
+    // and every player in the frame is on it
+    let (_, units) = frame();
+    assert!(units.iter().all(|(player, ..)| member(*player).is_some()));
+}
+
+#[test]
+fn a_player_who_leaves_the_match_is_gone_from_the_frame_and_is_back_when_they_join_again() {
+    let _serial = serial();
+    let Some(world) = world("boundary-leave") else { return };
+    assert!(start(&world));
+    wait_for("the library never joined", || status().0 == 1);
+    let present = |player: u32| frame().1.iter().any(|(p, ..)| *p == player);
+    wait_for("player 5 was never sent", || present(5));
+
+    world.rig.seats.clients[5].leave().unwrap();
+    wait_for("player 5 stayed in the frame after leaving", || !present(5));
+    assert_eq!(member(5), None, "and is not on the roster");
+    assert!(present(6) && present(4), "the others are still there");
+
+    // joining again takes the lowest free id, which is theirs
+    world.rig.seats.clients[5].join(sim_public_key(5)).unwrap();
+    wait_for("player 5 did not come back", || present(5) && member(5).is_some());
 }
 
 #[test]
