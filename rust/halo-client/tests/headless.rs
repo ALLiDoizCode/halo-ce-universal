@@ -552,8 +552,13 @@ fn the_local_player_is_moved_by_the_library_and_the_server_accepts_every_move() 
     // second input in one server tick, which is the timing of the two clocks
     // and not a move.
     let warm_up = first_tick.unwrap_or(0) + 600;
-    let impossible: Vec<_> = rejections.iter().filter(|(reason, tick)| (3..=5).contains(reason) && *tick > warm_up).collect();
-    println!("{} rejections in all; {} of them impossible moves after the first 20 s", rejections.len(), impossible.len());
+    let impossible: Vec<_> =
+        rejections.iter().filter(|(reason, tick)| (3..=5).contains(reason) && *tick > warm_up).collect();
+    println!(
+        "{} rejections in all; {} of them impossible moves after the first 20 s",
+        rejections.len(),
+        impossible.len()
+    );
     assert!(impossible.is_empty(), "the server rejected the game's player's moves: {impossible:?}");
     let _ = std::fs::remove_dir_all(&work);
 }

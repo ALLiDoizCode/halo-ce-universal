@@ -73,7 +73,8 @@ impl Walkers {
             let Some(p) = self.mirror.player(id) else { continue };
             let mut body = self.bodies[i];
             walk(&self.map, &mut body, &Controls { forward: 1.0, strafe: 0.0, yaw: self.headings[i], pitch: 0.0 });
-            let stride = ((body.position[0] - p.position[0]).powi(2) + (body.position[1] - p.position[1]).powi(2)
+            let stride = ((body.position[0] - p.position[0]).powi(2)
+                + (body.position[1] - p.position[1]).powi(2)
                 + (body.position[2] - p.position[2]).powi(2))
             .sqrt();
             let position = if body.airborne || stride > MAX_STRIDE {

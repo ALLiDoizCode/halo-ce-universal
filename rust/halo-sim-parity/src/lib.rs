@@ -83,7 +83,9 @@ pub fn run(seed: u64, ticks: u32) -> Vec<u8> {
     let mut rng = Rng::seeded(seed);
     for id in 0..PLAYERS {
         let (x, y) = (signed(&mut rng) * FLOOR_HALF_SIZE, signed(&mut rng) * FLOOR_HALF_SIZE);
-        store.set_player(Player { id, position: [x, y, 0.0], yaw: 0.0, pitch: 0.0 });
+        // (every fourth player is put well above the floor, in the air, where each of their moves is refused)
+        let z = if id % 4 == 0 { 2.0 } else { 0.0 };
+        store.set_player(Player { id, position: [x, y, z], yaw: 0.0, pitch: 0.0 });
     }
 
     // the walkers: two on each of the maps with a wall and a ramp, from a random
