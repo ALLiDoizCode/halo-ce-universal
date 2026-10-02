@@ -124,7 +124,9 @@ jobs:
       - name: Build for 32-bit x86 and WebAssembly
         working-directory: rust
         run: |
-          cargo build --locked --release --target i686-unknown-linux-gnu
+          # the libraries only: halo-sim-parity's cdylib is for wasm, and
+          # linking a 32-bit shared library needs 32-bit libc
+          cargo build --locked --release --target i686-unknown-linux-gnu -p halo-map -p halo-sim
           cargo build --locked --release --target wasm32-unknown-unknown
 
   android:
