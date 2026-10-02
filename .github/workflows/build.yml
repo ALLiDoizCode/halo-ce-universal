@@ -84,6 +84,46 @@ jobs:
           path: dist/halo-linux-release
           retention-days: 3
 
+  rust:
+    # The Rust libraries of the large-scale mode (rust/). They are tested on
+    # the host without any game data (tests that need the game's own maps
+    # skip themselves), and built for the other two targets they ship on: the
+    # 32-bit client and WebAssembly.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            rust/target
+          key: rust-${{ hashFiles('rust/**/Cargo.toml', 'rust/Cargo.lock') }}
+          restore-keys: rust-
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt \
+            --target i686-unknown-linux-gnu --target wasm32-unknown-unknown
+          rustup default stable
+
+      - name: Format and lints
+        working-directory: rust
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        working-directory: rust
+        run: cargo test --locked
+
+      - name: Build for 32-bit x86 and WebAssembly
+        working-directory: rust
+        run: |
+          cargo build --locked --release --target i686-unknown-linux-gnu
+          cargo build --locked --release --target wasm32-unknown-unknown
+
   android:
     # The runner image has the Android SDK and NDK, a JDK and CMake.
     runs-on: ubuntu-24.04
