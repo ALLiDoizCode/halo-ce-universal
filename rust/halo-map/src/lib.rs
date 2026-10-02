@@ -28,6 +28,7 @@
 //! `i686-unknown-linux-gnu` and for `wasm32-unknown-unknown`, and its results
 //! do not depend on the target.
 
+mod codec;
 pub mod collision;
 mod error;
 mod map;

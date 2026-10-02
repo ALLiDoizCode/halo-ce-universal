@@ -53,3 +53,18 @@ fn on_every_map_a_player_standing_at_a_start_stays_valid_and_cannot_move_into_th
         }
     }
 }
+
+#[test]
+fn on_every_map_the_stored_bytes_rebuild_the_same_collision() {
+    let Some(dir) = std::env::var_os("HALO_MAP_DIR") else {
+        eprintln!("HALO_MAP_DIR is not set: skipping, this test needs the game's own map files");
+        return;
+    };
+    for name in MAPS {
+        let path = std::path::Path::new(&dir).join(format!("{name}.map"));
+        let map = MapData::from(HaloMap::from_path(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())));
+        let back = MapData::from_bytes(&map.to_bytes()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(back.world_bounds, map.world_bounds, "{name}");
+        assert_eq!(back.collision, map.collision, "{name}");
+    }
+}

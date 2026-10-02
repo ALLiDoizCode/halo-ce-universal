@@ -1,0 +1,18 @@
+[package]
+name = "halo-match-driver"
+version = "0.1.0"
+description = "Drives the match module on a real local SpacetimeDB: integration tests and the 500-player tick-time measurement"
+edition = "2021"
+publish = false
+
+# Its own workspace and Cargo.lock, like the module (rust/Cargo.toml excludes
+# it): the SpacetimeDB client SDK is not needed by the rest of rust/.
+[workspace]
+
+[dependencies]
+spacetimedb-sdk = "=2.10.2"
+halo-sim = { path = "../halo-sim" }
+halo-map = { path = "../halo-map" }
+
+[profile.release]
+debug = 1

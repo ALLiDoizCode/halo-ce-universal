@@ -1,0 +1,21 @@
+[package]
+name = "halo-match-module"
+version = "0.1.0"
+description = "The SpacetimeDB module that holds one large-scale match: halo-sim's step, run 30 times a second"
+edition = "2021"
+publish = false
+
+# Its own workspace, with its own Cargo.lock: the module is a WebAssembly
+# cdylib that depends on the SpacetimeDB crates, which the rest of rust/ (and
+# its host-side `cargo test`) does not need. rust/Cargo.toml excludes it.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# pinned: the module and the server it runs on are the same release line
+spacetimedb = "=2.10.2"
+log = "0.4"
+halo-sim = { path = "../halo-sim" }
+halo-map = { path = "../halo-map" }

@@ -129,6 +129,68 @@ jobs:
           cargo build --locked --release --target i686-unknown-linux-gnu -p halo-map -p halo-sim
           cargo build --locked --release --target wasm32-unknown-unknown
 
+  rust-match:
+    # The match module (rust/halo-match-module, SpacetimeDB 2.10.2, built for
+    # WebAssembly) and the driver that tests it (rust/halo-match-driver). The
+    # tests start a real SpacetimeDB Standalone of their own on a free port,
+    # so this job fetches the pinned release (a 58 MB download, checked
+    # against its SHA-256 and cached), and needs no game data: they run on a
+    # flat floor. The 500-player measurement on the real maps is not run here.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      STDB_VERSION: "2.10.2"
+      STDB_SHA256: 5dbe3f27a8c9e27a1d9aa86e9101f0eb6f5cf5aebea0240b589750e424a695bd
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            rust/halo-match-module/target
+            rust/halo-match-driver/target
+          key: rust-match-${{ hashFiles('rust/halo-match-*/Cargo.toml', 'rust/halo-match-*/Cargo.lock', 'rust/Cargo.lock') }}
+          restore-keys: rust-match-
+
+      - uses: actions/cache@v4
+        id: stdb-cache
+        with:
+          path: ~/spacetimedb
+          key: spacetimedb-${{ env.STDB_VERSION }}-${{ env.STDB_SHA256 }}
+
+      - name: SpacetimeDB
+        if: steps.stdb-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL -o stdb.tar.gz \
+            "https://github.com/clockworklabs/SpacetimeDB/releases/download/v${STDB_VERSION}/spacetime-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${STDB_SHA256}  stdb.tar.gz" | sha256sum -c -
+          mkdir -p ~/spacetimedb
+          tar -xzf stdb.tar.gz -C ~/spacetimedb spacetimedb-cli spacetimedb-standalone
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt \
+            --target wasm32-unknown-unknown
+          rustup default stable
+
+      - name: Format and lints
+        run: |
+          for crate in halo-match-module halo-match-driver; do
+            (cd rust/$crate && cargo fmt --check)
+          done
+          (cd rust/halo-match-module && cargo clippy --target wasm32-unknown-unknown --locked -- -D warnings)
+          (cd rust/halo-match-driver && cargo clippy --all-targets --locked -- -D warnings)
+
+      - name: Build the module for WebAssembly
+        working-directory: rust/halo-match-module
+        run: cargo build --locked --release --target wasm32-unknown-unknown
+
+      - name: Test against a local SpacetimeDB
+        working-directory: rust/halo-match-driver
+        run: |
+          HALO_STDB_BIN="$HOME/spacetimedb" cargo test --locked --release -- --nocapture
+
   android:
     # The runner image has the Android SDK and NDK, a JDK and CMake.
     runs-on: ubuntu-24.04
