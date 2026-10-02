@@ -7,6 +7,8 @@ use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
+use halo_sim::rules::Rules;
+use halo_sim::TICKS_PER_SECOND;
 use serde::Deserialize;
 
 /// An example with every setting, and what each one does. The tests parse it,
@@ -63,20 +65,31 @@ budget = 90000                   # bytes a second each player may be sent (heade
 send_threads = 4                 # threads the gateway sends with
 log_secs = 10                    # seconds between lines of the log
 handover_secs = 5                # seconds the last match stays up after the next is announced
+end_secs = 15                    # seconds a finished match shows its final scoreboard before the next
 
 # The rotation: the server plays these in order, and from the top again.
+# A match ends when a player (a team, in team_slayer) reaches the score limit
+# or the time is up, shows its final scoreboard for end_secs, and the next
+# match begins.
 [[server.rotation]]
 map = "bloodgulch"
-game_type = "slayer"             # recorded and listed; the game's rules are not here yet
-variant = ""                     # likewise: free text, listed
-capacity = 200                   # most players on this map
-seconds = 600                    # the match ends after this long (0: never)
+game_type = "slayer"             # slayer, or team_slayer: the original rules of each
+variant = ""                     # a name for the list; the rules are the settings below
+# capacity = 300                 # most players on this map; without it, the map's own
+                                 # (bloodgulch 500, sidewinder 300, the small maps 16 to 64)
+seconds = 600                    # the time limit: the match ends after this long (0: none)
+# score_limit = 25               # the score that ends it: kills, or the team's in team_slayer
+                                 # (without it, the original's: 15 for slayer, 50 for team_slayer)
+# respawn_seconds = 5            # seconds a dead player waits (never under 3)
+# suicide_penalty_seconds = 10   # seconds more after a suicide or a death nobody caused
+# wave_seconds = 5               # when no starting location is free, players spawn in waves this far apart
 
 [[server.rotation]]
 map = "sidewinder"
-game_type = "slayer"
-capacity = 300
+game_type = "team_slayer"
+capacity = 200
 seconds = 900
+score_limit = 100
 budget = 60000                   # this map only: another per-player budget
 "#;
 
@@ -147,6 +160,10 @@ pub struct Server {
     pub log_secs: u64,
     #[serde(default = "default_handover_secs")]
     pub handover_secs: u64,
+    /// How long a finished match stays up for its players to read the final
+    /// scoreboard.
+    #[serde(default = "default_end_secs")]
+    pub end_secs: u64,
     pub rotation: Vec<Rotation>,
 }
 
@@ -168,6 +185,10 @@ fn default_log_secs() -> u64 {
 
 fn default_handover_secs() -> u64 {
     5
+}
+
+fn default_end_secs() -> u64 {
+    15
 }
 
 impl Server {
@@ -193,14 +214,23 @@ impl Server {
 #[serde(deny_unknown_fields)]
 pub struct Rotation {
     pub map: String,
+    /// `slayer` or `team_slayer`.
     #[serde(default = "default_game_type")]
     pub game_type: String,
+    /// A name the list shows; the settings below are the variant's rules.
     #[serde(default)]
     pub variant: String,
-    #[serde(default = "default_capacity")]
-    pub capacity: u16,
+    /// The most players on this map; the map's own default without it (see
+    /// [`crate::maps::default_capacity`]).
+    pub capacity: Option<u16>,
+    /// The time limit, from when the match is announced; 0 for none.
     #[serde(default = "default_seconds")]
     pub seconds: u32,
+    /// The score that ends the match; the game type's original without it.
+    pub score_limit: Option<u32>,
+    pub respawn_seconds: Option<u32>,
+    pub suicide_penalty_seconds: Option<u32>,
+    pub wave_seconds: Option<u32>,
     /// Overrides the server's `budget` for this map.
     pub budget: Option<u32>,
 }
@@ -209,12 +239,40 @@ fn default_game_type() -> String {
     "slayer".into()
 }
 
-fn default_capacity() -> u16 {
-    500
-}
-
 fn default_seconds() -> u32 {
     600
+}
+
+impl Rotation {
+    /// The rules of the game this step plays: the original variant of its
+    /// game type, with the settings it overrides.
+    pub fn rules(&self) -> Result<Rules, String> {
+        let mut rules = match self.game_type.as_str() {
+            "slayer" => Rules::slayer(),
+            "team_slayer" => Rules::team_slayer(),
+            other => {
+                return Err(format!("game_type {other:?}: only slayer and team_slayer are played so far"));
+            }
+        };
+        let ticks = |seconds: u32| seconds.saturating_mul(TICKS_PER_SECOND);
+        rules.time_limit_ticks = ticks(self.seconds);
+        if let Some(limit) = self.score_limit {
+            rules.score_limit = limit;
+        }
+        if let Some(seconds) = self.respawn_seconds {
+            rules.respawn_ticks = ticks(seconds);
+        }
+        if let Some(seconds) = self.suicide_penalty_seconds {
+            rules.suicide_penalty_ticks = ticks(seconds);
+        }
+        if let Some(seconds) = self.wave_seconds {
+            if seconds == 0 {
+                return Err("wave_seconds must be at least 1".into());
+            }
+            rules.wave_ticks = ticks(seconds);
+        }
+        Ok(rules)
+    }
 }
 
 impl Config {
@@ -281,9 +339,10 @@ impl Config {
                 if !valid_name(&step.map, 40) {
                     return Err(format!("server {id:?}: map {:?}: a-z, 0-9 and _ only", step.map));
                 }
-                if step.capacity == 0 {
+                if step.capacity == Some(0) {
                     return Err(format!("server {id:?}, map {}: capacity must be at least 1", step.map));
                 }
+                step.rules().map_err(|e| format!("server {id:?}, map {}: {e}", step.map))?;
                 if step.budget == Some(0) || server.budget == 0 {
                     return Err(format!("server {id:?}: a budget of 0 sends players nothing"));
                 }
@@ -313,7 +372,8 @@ mod tests {
         assert_eq!(config.servers.len(), 1);
         let server = &config.servers[0];
         assert_eq!(server.rotation.len(), 2);
-        assert_eq!(server.rotation[0].capacity, 200);
+        assert_eq!(server.rotation[0].capacity, None, "the map's own");
+        assert_eq!(server.rotation[1].capacity, Some(200));
         assert_eq!(server.rotation[1].budget, Some(60000));
         // relative paths are the file's folder's
         assert_eq!(config.root.module, Path::new("/etc/halo/halo_root_module.wasm"));
@@ -335,6 +395,8 @@ mod tests {
         assert!(bad("id = \"lounge\"", "id = \"The Lounge\"").contains("server id"));
         assert!(bad("map = \"bloodgulch\"", "map = \"../etc/passwd\"").contains("map"));
         assert!(bad("capacity = 200", "capacity = 0").contains("capacity"));
+        assert!(bad("game_type = \"slayer\"", "game_type = \"ctf\"").contains("only slayer and team_slayer"));
+        assert!(bad("# wave_seconds = 5 ", "wave_seconds = 0 ").contains("wave_seconds"));
         assert!(bad("send_threads = 4", "send_threadz = 4").contains("send_threadz"));
         assert!(bad("start = true", "start = false\nurl2 = 1").contains("url2"));
         assert!(bad("data_dir = \"spacetimedb-data\"", "").contains("data_dir"));

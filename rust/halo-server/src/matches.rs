@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use halo_gateway::{Gateway, GatewayConfig, StatsSnapshot, UdpTransport};
 use halo_match_driver::server::TickMetrics;
 use halo_match_driver::MatchClient;
+use halo_sim::rules::Rules;
 use spacetimedb_sdk::{DbContext, Identity};
 
 use crate::admin::Admin;
@@ -32,6 +33,8 @@ pub struct MatchSpec<'a> {
     pub database: String,
     pub map: &'a LoadedMap,
     pub capacity: u16,
+    /// The game: its rules and limits.
+    pub rules: Rules,
     pub budget: u32,
     pub send_threads: usize,
     pub bind: SocketAddr,
@@ -39,6 +42,15 @@ pub struct MatchSpec<'a> {
     pub bans: Vec<(Identity, String)>,
     /// The names players have chosen, which its roster shows.
     pub names: Vec<(Identity, String)>,
+}
+
+/// How a match ended, for the orchestration to act on and the log to say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ended {
+    /// Why: its score limit was reached, or its time is up.
+    pub reason: &'static str,
+    /// Who won.
+    pub winner: String,
 }
 
 pub struct RunningMatch {
@@ -99,8 +111,8 @@ impl RunningMatch {
     fn set_up(env: &Env, spec: &MatchSpec, database_identity: String) -> Result<RunningMatch, String> {
         let client = connect_with_retry(env, &spec.database)?;
         client.load_map(spec.map.data.to_bytes())?;
-        client.set_spawn_points(&spec.map.spawns)?;
         client.set_capacity(spec.capacity)?;
+        client.set_game(&spec.rules)?;
         for (identity, reason) in &spec.bans {
             client.set_ban(*identity, reason)?;
         }
@@ -130,6 +142,32 @@ impl RunningMatch {
             gateway: Some(gateway),
             window,
         })
+    }
+
+    /// Start the game's clock now (the time limit, the waves and the scores count
+    /// from here): called when the match is announced to players.
+    pub fn begin_game(&self) -> Result<(), String> {
+        self.client.begin_game()
+    }
+
+    /// Why the game has ended, if it has, and who won, as the match's public
+    /// `game_state` says.
+    pub fn ended(&self) -> Option<Ended> {
+        let game = self.client.game()?;
+        let reason = match game.ending {
+            0 => return None,
+            1 => "its score limit was reached",
+            _ => "its time is up",
+        };
+        let winner = match game.winner_kind {
+            1 => {
+                let name = self.client.roster().get(&game.winner).map(|r| r.name.clone());
+                format!("won by {}", name.unwrap_or_else(|| format!("player {}", game.winner)))
+            }
+            2 => format!("won by the {} team", if game.winner == 0 { "red" } else { "blue" }),
+            _ => "nobody won".to_string(),
+        };
+        Some(Ended { reason, winner })
     }
 
     /// Players in the match now (the tick marker's count).
