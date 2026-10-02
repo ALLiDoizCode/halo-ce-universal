@@ -231,6 +231,12 @@ static const struct config_setting config_settings[] =
 		"\"bot:<seed>\" plays controller 1 with a scripted pattern (automated\n"
 		"network tests); \"look:<seed>\" stands still, only turning and looking\n"
 		"up and down; empty for none." },
+	{ "debug.scenario", _config_string, "\"\"", "HALO_SCENARIO", _environment_value, _platform_all,
+		"A scenario file (tools/scenarios/): the comparison harness plays it with\n"
+		"the first player of a network test game alone, and writes the trace to\n"
+		"debug.scenario_trace (tools/scenario_harness.py runs it); empty for none." },
+	{ "debug.scenario_trace", _config_string, "\"\"", "HALO_SCENARIO_TRACE", _environment_value, _platform_all,
+		"Where debug.scenario writes the player's trace, a file." },
 	{ "debug.update_answer", _config_string, "\"\"", "HALO_UPDATE_ANSWER", _environment_value, _platform_desktop,
 		"The answer to the new version question, for automated tests: \"yes\",\n"
 		"\"no\" or \"never\" (do not ask again, confirmed); empty asks." },

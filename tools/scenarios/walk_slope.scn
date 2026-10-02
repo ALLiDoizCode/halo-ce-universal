@@ -1,0 +1,16 @@
+# Walking straight up a slope of about 16 degrees (rising 5 world units in 18).
+scenario walk_slope
+map bloodgulch
+# <name> <x> <y> <z> <yaw, radians>: a little above the ground, so that the
+# player settles on it in the first ticks
+start ramp_foot 105.9 -114.2 16.22 1.5708
+ticks 240
+input 30 240 forward=1.0
+
+# what the Rust simulation may differ from the C engine by (starting values,
+# to be tuned by the features' tickets as the comparison shows what is
+# reachable); a run of the C engine against itself allows none
+tolerance position 0.25
+tolerance velocity 0.25
+tolerance facing 0.02
+tolerance state 0
