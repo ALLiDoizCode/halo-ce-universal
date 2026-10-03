@@ -190,6 +190,10 @@ unsigned long halo_large_hits(unsigned long *out);
 unsigned long halo_large_fire(unsigned long weapon, unsigned long trigger, unsigned long reload, unsigned long loaded,
 	unsigned long reserve, unsigned long adopt, float *out);
 
+/* the engine's (the HUD's parts that the log tells of) */
+boolean motion_sensor_probe_unit(long unit_index, short local_player_index, char *blip_type);
+boolean game_engine_unit_target_name(long unit_index, wchar_t *name, long size);
+
 /* large_effects.c's (what the mode shows and plays of a fight: the engine's side of it) */
 long large_effects_give_weapon(long unit_index, long definition_index);
 void large_effects_refill_weapon(long weapon_index);
@@ -650,6 +654,48 @@ boolean large_mode_remote_player(
 		large_remote_data.player_is_remote[slot];
 }
 
+/* a remote player's name as the engine holds one (zero filled, and anything that is not
+ASCII a question mark) */
+static void large_mode_wide_name(
+	struct large_remote const *remote,
+	wchar_t *name,
+	long name_size)
+{
+	long index;
+
+	for (index = 0; index < name_size; index++)
+		name[index] = 0;
+	for (index = 0; index < LARGE_NAME_LENGTH && index < name_size - 1 && remote->name[index]; index++)
+		name[index] = (wchar_t)((byte)remote->name[index] < 0x80 ? remote->name[index] : '?');
+}
+
+/* whether the unit is a remote one that has no engine player (the engine's records hold 128:
+see large_mode_share_players), and if so, from the adapter's own record of it, its team and its name
+(for the HUD, which finds those of a unit with a player in the player's record) */
+boolean large_mode_bare_remote_unit(
+	long unit_index,
+	long *team,
+	wchar_t *name,
+	long name_size)
+{
+	long slot = DATUM_INDEX_TO_ABSOLUTE_INDEX(unit_index);
+	struct large_remote const *remote;
+
+	if (unit_index == NONE || large_remote_data.count <= 0 || slot < 0 || slot >= HALO_PORT_MAXIMUM_OBJECTS_PER_MAP ||
+		large_remote_data.remote_of_object[slot] <= 0)
+	{
+		return FALSE;
+	}
+	remote = &large_remote_data.remotes[large_remote_data.remote_of_object[slot] - 1];
+	if (!remote->present || remote->unit_index != unit_index || remote->player_index != NONE)
+		return FALSE;
+	if (team)
+		*team = remote->team;
+	if (name && name_size > 0)
+		large_mode_wide_name(remote, name, name_size);
+	return TRUE;
+}
+
 /* a remote unit's engine player: the name, the team, and the unit its own */
 static boolean large_mode_give_player(
 	struct large_remote *remote)
@@ -657,11 +703,9 @@ static boolean large_mode_give_player(
 	struct network_player network_player;
 	struct player_datum *player;
 	long player_index;
-	long index;
 
 	csmemset(&network_player, 0, sizeof(network_player));
-	for (index = 0; index < LARGE_NAME_LENGTH && remote->name[index]; index++)
-		network_player.name[index] = (wchar_t)((byte)remote->name[index] < 0x80 ? remote->name[index] : '?');
+	large_mode_wide_name(remote, network_player.name, (long)NUMBEROF(network_player.name));
 	network_player.machine_index = (char)NONE;
 	network_player.controller_index = (char)NONE;
 	network_player.team_index = (char)remote->team;
@@ -1197,6 +1241,36 @@ void large_mode_game_tick_after_objects(
 	}
 }
 
+/* what the HUD makes of a remote unit, for the automated test (large.log_players): the team and
+name it takes from the adapter when the unit has no engine player (bare 1), the name aiming at
+the unit shows, and whether and as what the motion sensor shows it, as the local player's team
+sees it */
+static void large_mode_log_hud(
+	long id,
+	struct large_remote const *remote)
+{
+	long local_player = local_player_get_player_index(0);
+	wchar_t wide[12];
+	char narrow[12];
+	long bare_team = NONE;
+	long index;
+	char blip_type = 0;
+	boolean in_range;
+	boolean named;
+
+	if (local_player == NONE || player_get(local_player)->unit_index == NONE)
+		return;
+	in_range = motion_sensor_probe_unit(remote->unit_index, 0, &blip_type);
+	named = game_engine_unit_target_name(remote->unit_index, wide, (long)NUMBEROF(wide));
+	for (index = 0; index < (long)NUMBEROF(narrow); index++)
+		narrow[index] = named && wide[index] > 0 && wide[index] < 0x80 ? (char)wide[index] : 0;
+	narrow[NUMBEROF(narrow) - 1] = 0;
+	large_mode_bare_remote_unit(remote->unit_index, &bare_team, NULL, 0);
+	platform_log("large mode: hud %ld mine %ld bare %d bare_team %ld sensor %d blip %ld named %d name %s", id,
+		(long)player_get(local_player)->team_index, remote->player_index == NONE ? 1 : 0, bare_team,
+		in_range ? 1 : 0, (long)blip_type, named ? 1 : 0, narrow);
+}
+
 /* once a second, after the objects are updated: how many remote units there
 are, and with large.log_players where the engine has each, with the tick of the
 state it was driven from (the automated test compares these with the server's) */
@@ -1253,6 +1327,7 @@ static void large_mode_log_remotes(
 			(long)((struct unit_datum *)object)->unit.animation.base_seat_index,
 			remote->saw_landing ? 1L : (long)((struct biped_datum *)object)->biped.landing);
 		remote->saw_landing = FALSE;
+		large_mode_log_hud(id, remote);
 	}
 }
 
@@ -3158,6 +3233,15 @@ boolean large_mode_damage_deals(
 
 boolean large_mode_remote_player(
 	long player_index)
+{
+	return FALSE;
+}
+
+boolean large_mode_bare_remote_unit(
+	long unit_index,
+	long *team,
+	wchar_t *name,
+	long name_size)
 {
 	return FALSE;
 }

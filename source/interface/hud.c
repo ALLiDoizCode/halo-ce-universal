@@ -897,9 +897,8 @@ void hud_autosave(
 }
 
 static void hud_draw_friendly_indicator(
-	long player_index)
+	long unit_index)
 {
-	struct player_datum const *player = player_get(player_index);
 	real_point3d head_position;
 	real_point3d view_position;
 	real_point2d screen_position;
@@ -910,7 +909,7 @@ static void hud_draw_friendly_indicator(
 	real fade;
 
 	unit_get_head_position(
-		player->unit_index,
+		unit_index,
 		&head_position);
 	head_position.z += 0.30000001f;
 	matrix4x3_transform_point(
@@ -954,6 +953,27 @@ static void hud_draw_friendly_indicator(
 	return;
 }
 
+/* port: the large-scale mode's remote units that have no engine player (its records hold 128),
+which the HUD takes the team and name of from the adapter's record of the unit */
+boolean large_mode_active(void);
+boolean large_mode_bare_remote_unit(long unit_index, long *team, wchar_t *name, long name_size);
+
+/* the next of them from an iterator over the units (name: 12 characters, as a player's) */
+static boolean hud_next_bare_remote_unit(
+	struct object_iterator *iterator,
+	long *team,
+	wchar_t *name,
+	long name_size)
+{
+	while (object_iterator_next(iterator))
+	{
+		if (large_mode_bare_remote_unit(iterator->index, team, name, name_size))
+			return TRUE;
+	}
+
+	return FALSE;
+}
+
 static void hud_draw_players(
 	void)
 {
@@ -986,7 +1006,21 @@ static void hud_draw_players(
 			teammate_index < teammate_count;
 			teammate_index++)
 		{
-			hud_draw_friendly_indicator(teammate_indices[teammate_index]);
+			hud_draw_friendly_indicator(player_get(teammate_indices[teammate_index])->unit_index);
+		}
+
+		/* port: and of the remote units that have no player */
+		if (large_mode_active())
+		{
+			struct object_iterator unit_iterator;
+			long unit_team;
+
+			object_iterator_new(&unit_iterator, _object_mask_unit, TRUE);
+			while (hud_next_bare_remote_unit(&unit_iterator, &unit_team, NULL, 0))
+			{
+				if (unit_team == team_index)
+					hud_draw_friendly_indicator(unit_iterator.index);
+			}
 		}
 	}
 
@@ -1122,18 +1156,21 @@ static real hud_player_name_enemy_range(
 	return MIN(range, MAXIMUM_ENEMY_NAME_RANGE);
 }
 
+/* the characters of a player's name (struct player_datum's) */
+#define PLAYER_NAME_LENGTH 12
+
 static void hud_draw_player_name(
-	long player_index,
+	long unit_index,
+	wchar_t const *player_name,
 	boolean ally,
 	boolean indicator,
 	real enemy_range)
 {
-	struct player_datum const *player = player_get(player_index);
 	long font_index = hud_get_font_index();
 	real_point3d head_position;
 	real_point3d view_position;
 	real_point2d screen_position;
-	wchar_t name[NUMBEROF(player->name) + 1];
+	wchar_t name[PLAYER_NAME_LENGTH + 1];
 	real_argb_color color;
 	rectangle2d bounds;
 	struct font_header *font;
@@ -1143,13 +1180,13 @@ static void hud_draw_player_name(
 
 	if (font_index == NONE)
 		return;
-	unit_get_head_position(player->unit_index, &head_position);
+	unit_get_head_position(unit_index, &head_position);
 	distance = distance3d(&render.camera.position, &head_position);
 	if (!ally && distance >= enemy_range)
 		return;
 	if (!ally &&
-		(unit_get(player->unit_index)->unit.active_camouflage > 0.5f ||
-		!hud_player_name_in_sight(player->unit_index, &head_position)))
+		(unit_get(unit_index)->unit.active_camouflage > 0.5f ||
+		!hud_player_name_in_sight(unit_index, &head_position)))
 	{
 		return;
 	}
@@ -1174,9 +1211,9 @@ static void hud_draw_player_name(
 	bounds.x1 = x + 160;
 	bounds.y1 = y;
 	bounds.y0 = y - (font->ascending_height + font->descending_height);
-	for (index = 0; index < (short)NUMBEROF(player->name); index++)
-		name[index] = player->name[index];
-	name[NUMBEROF(player->name)] = 0;
+	for (index = 0; index < PLAYER_NAME_LENGTH; index++)
+		name[index] = player_name[index];
+	name[PLAYER_NAME_LENGTH] = 0;
 	if (ally)
 	{
 		hud_get_text_color(&color);
@@ -1227,7 +1264,26 @@ static void hud_draw_player_names(
 			continue;
 		if ((ally && setting == _player_names_enemies) || (!ally && setting == _player_names_allies))
 			continue;
-		hud_draw_player_name(iterator.datum_index, ally, ally && indicators, enemy_range);
+		hud_draw_player_name(player->unit_index, player->name, ally, ally && indicators, enemy_range);
+	}
+
+	/* port: the large-scale mode's remote units that have no player, whose name and team the
+	adapter tells (and which are drawn by the same rules) */
+	if (large_mode_active())
+	{
+		struct object_iterator unit_iterator;
+		wchar_t unit_name[PLAYER_NAME_LENGTH];
+		long unit_team;
+
+		object_iterator_new(&unit_iterator, _object_mask_unit, TRUE);
+		while (hud_next_bare_remote_unit(&unit_iterator, &unit_team, unit_name, PLAYER_NAME_LENGTH))
+		{
+			boolean ally = unit_team == team_index;
+
+			if ((ally && setting == _player_names_enemies) || (!ally && setting == _player_names_allies))
+				continue;
+			hud_draw_player_name(unit_iterator.index, unit_name, ally, ally && indicators, enemy_range);
+		}
 	}
 
 	return;

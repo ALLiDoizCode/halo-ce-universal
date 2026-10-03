@@ -232,11 +232,16 @@ makes a biped in the team's colour, with the engine's physics suspended: each
 tick the engine is given the controls of a player running at the velocity the
 server gave, which makes it choose and play the running animation, and the unit
 is put where the server has the player, facing as it faces. The engine's player
-records hold 128 players in all, so only 127 of the remote units have a player
-(a name over the head, a team, a contact on the motion sensor, which reads the
-unit's velocity: the adapter writes the server's after the objects are
-updated). The units nearest the local player have them, and a few are swapped
-each second as players move; the others are units alone, drawn all the same.
+records hold 128 players in all, so only 127 of the remote units have a player.
+The units nearest the local player have them, and a few are swapped each second
+as players move; the others are units alone, drawn all the same. Anything else
+that reads the player records still sees the nearest 127. The HUD does not:
+for a unit with no player, it takes the name over the head and under the
+crosshair, the friendly marker and the team from the adapter's own record of
+the unit (the match's roster: `large_mode_bare_remote_unit`), so that it looks
+the same as one with a player, under the same rules of range and sight. The
+motion sensor already reads a unit's team and velocity (the adapter writes the
+server's after the objects are updated), so it shows both alike.
 A player the gateway has not sent a state of for 120 ticks is out of range, and
 one who has left the match is gone at once: the unit is deleted, and made
 afresh when the gateway sends the player again.
@@ -249,8 +254,12 @@ each player the gateway has sent (`large mode: player 7 tick 812 (x y z) v
 many have players, and what the adapter cost a tick over the last second).
 With `large.log_players`, a line also says where the engine has each remote
 unit (`large mode: drawn 7 tick 812 (x y z) team 1 player 3`, with the tick of
-the state it was driven from). The local player stands where the server has
-them, and tells the gateway where they are.
+the state it was driven from). Another says what the HUD makes of each (`large
+mode: hud 7 mine 0 bare 1 bare_team 1 sensor 1 blip 2 named 1 name Foo`: the
+local player's team, whether the unit has no player, whether the motion sensor
+reaches it and the type of its contact, and the name that aiming at it shows),
+which the automated test compares with the roster. The local player stands
+where the server has them, and tells the gateway where they are.
 
 ### Spawning, deaths and the score
 
