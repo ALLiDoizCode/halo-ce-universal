@@ -361,6 +361,9 @@ struct trigger_firing_effect
 
 /* ---------- prototypes */
 
+/* port/linux/game/scenario_harness.c's: a weapon's trigger fired, for the trace */
+void scenario_harness_shot(long weapon_index, short trigger_index, boolean misfired);
+
 static struct weapon_trigger *weapon_trigger_get(
 	struct weapon_datum *weapon,
 	short trigger_index);
@@ -2534,6 +2537,7 @@ static void weapon_trigger_fire(
 
 	if (fired)
 	{
+		scenario_harness_shot(weapon_index, trigger_index, misfired);
 		if (TEST_FLAG(weapon->item.flags, _item_belongs_to_player_bit) && game_engine_running())
 		{
 			long player_index= player_index_from_unit_index(owner_object_index);

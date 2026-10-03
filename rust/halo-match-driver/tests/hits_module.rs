@@ -20,7 +20,10 @@ use halo_match_driver::server::{build_module, stdb_bin_dir, Server};
 use halo_match_driver::{FighterRow, MatchClient, PlayerClient};
 use halo_sim::combat::HitReport;
 use halo_sim::damage::{Vitals, DEAD};
-use halo_sim::fixtures::{combat_fixture, flat_floor_map, start_at, with_starts, PISTOL};
+use halo_sim::fixtures::{
+    combat_fixture, flat_floor_map, plasma_rifle, shotgun, sniper_rifle, start_at, with_starts, PISTOL, PISTOL_DAMAGE,
+    PLASMA_RIFLE, PLASMA_RIFLE_DAMAGE, SHOTGUN, SHOTGUN_DAMAGE, SNIPER_RIFLE, SNIPER_RIFLE_DAMAGE,
+};
 use halo_sim::rules::Rules;
 use halo_sim::TICKS_PER_SECOND;
 
@@ -58,6 +61,20 @@ fn fight(name: &str) -> Option<Fight> {
 
 /// ... on a map that `tweak` has changed.
 fn fight_on(name: &str, tweak: impl FnOnce(&mut halo_sim::MapData)) -> Option<Fight> {
+    let starts: Vec<_> = (0..4).map(|i| start_at(i as f32 * 10.0 - 20.0, 0.0, -1)).collect();
+    fight_from(name, &starts, tweak)
+}
+
+/// ... where the two players spawn `gap` apart.
+fn fight_apart(name: &str, gap: f32, tweak: impl FnOnce(&mut halo_sim::MapData)) -> Option<Fight> {
+    fight_from(name, &[start_at(-gap / 2.0, 0.0, -1), start_at(gap / 2.0, 0.0, -1)], tweak)
+}
+
+fn fight_from(
+    name: &str,
+    starts: &[halo_sim::spawn::Start],
+    tweak: impl FnOnce(&mut halo_sim::MapData),
+) -> Option<Fight> {
     let Some(bin) = stdb_bin_dir() else {
         eprintln!("HALO_STDB_BIN is not set: skipping, this test needs a SpacetimeDB 2.10.x release");
         return None;
@@ -65,8 +82,7 @@ fn fight_on(name: &str, tweak: impl FnOnce(&mut halo_sim::MapData)) -> Option<Fi
     let server = Server::start(&bin);
     server.publish(wasm(), name);
     let owner = server.connect(name);
-    let starts: Vec<_> = (0..4).map(|i| start_at(i as f32 * 10.0 - 20.0, 0.0, -1)).collect();
-    let mut map = with_starts(flat_floor_map(), &starts);
+    let mut map = with_starts(flat_floor_map(), starts);
     tweak(&mut map);
     owner.load_map(map.to_bytes()).unwrap();
     owner.set_game(&Rules { suicide_penalty_ticks: 0, ..Rules::slayer() }).unwrap();
@@ -102,8 +118,9 @@ impl Fight {
         let at = self.position(TARGET);
         HitReport {
             target: TARGET,
-            weapon: PISTOL,
+            damage: PISTOL_DAMAGE,
             material: 1,
+            scale: 1.0,
             host_tick: self.tick() as u32,
             origin: [at[0], at[1], at[2] + 0.3],
             target_position: at,
@@ -197,7 +214,7 @@ fn a_report_that_fails_each_check_is_rejected_and_counted_and_hurts_nobody() {
         assert_eq!(f.vitals(TARGET).shield, 1.0, "{what}");
     };
     // the shooter does not own the weapon
-    reject("a weapon the shooter does not own", HitReport { weapon: 999, ..good });
+    reject("a weapon the shooter does not own", HitReport { damage: 999, ..good });
     // the target was not within reach of where the server saw it
     let mut far = good;
     far.target_position[1] += 6.0;
@@ -315,4 +332,86 @@ fn only_the_owner_may_set_a_loadout_and_a_weapon_taken_away_is_one_the_shooter_d
     f.report(&[f.hit_on_target()]);
     wait_until("the rejection", || f.rejected_hits() == 1);
     assert_eq!(f.fighter(TARGET).hurt_count, 0);
+}
+
+/// A fight where the shooter carries the weapon, and the target's body is `vitality` times the usual (the
+/// weapons of the maps beside the pistol are in the match's map).
+fn armed_fight(name: &str, weapon: u16, vitality: f32) -> Option<Fight> {
+    armed_fight_apart(name, 10.0, weapon, vitality)
+}
+
+/// ... with the players `gap` apart.
+fn armed_fight_apart(name: &str, gap: f32, weapon: u16, vitality: f32) -> Option<Fight> {
+    let f = fight_apart(name, gap, |map| {
+        map.combat.weapons.extend([shotgun(), sniper_rifle(), plasma_rifle()]);
+        map.combat.resistance.maximum_shield_vitality *= vitality;
+        map.combat.resistance.maximum_body_vitality *= vitality;
+    })?;
+    f.owner.set_loadout(SHOOTER, weapon, u16::MAX).unwrap();
+    wait_until("the weapon in hand", || f.fighter(SHOOTER).weapon_0 == weapon);
+    Some(f)
+}
+
+#[test]
+fn a_shotgun_blast_hurts_the_target_pellet_by_pellet_and_kills_it_for_its_shooter() {
+    let Some(f) = armed_fight_apart("hit-shotgun", 5.0, SHOTGUN, 1.0) else { return };
+    let pellet = HitReport { damage: SHOTGUN_DAMAGE, ..f.hit_on_target() };
+    // fifteen pellets at once, as a shot makes them: 8 to 25 each, so the 150 of the target's shield and health is gone
+    // in 6 to 19 of them, and the pellets that come after its death are refused
+    f.report(&[pellet; 15]);
+    wait_until("the death", || f.owner.standings()[&TARGET].state == STATE_DEAD);
+    assert_eq!(f.owner.standings()[&SHOOTER].score, 1, "the kill is the shooter's");
+    let hurt = f.fighter(TARGET).hurt_count as u64;
+    assert!((6..=15).contains(&hurt), "{hurt} pellets hurt it");
+    wait_until("the verdicts", || f.rejected_hits() + hurt == 15);
+}
+
+#[test]
+fn a_pellet_that_has_flown_far_deals_only_the_minimum_whatever_the_client_says() {
+    // thirty units apart: a pellet has slowed past all it does, and the server brings the report's scale down to 0
+    let Some(f) = armed_fight_apart("hit-pellets-far", 30.0, SHOTGUN, 1.0) else { return };
+    let pellet = HitReport { damage: SHOTGUN_DAMAGE, scale: 1.0, ..f.hit_on_target() };
+    f.report(&[pellet; 15]);
+    wait_until("the pellets", || f.fighter(TARGET).hurt_count == 15);
+    // 15 of the minimum, 8: a shield of 75 and 45 of the 75 of health
+    let target = f.fighter(TARGET);
+    assert_eq!(target.shield, 0.0);
+    assert!((target.body - (1.0 - 45.0 / 75.0)).abs() < 1.0e-4, "{}", target.body);
+    assert_eq!(f.rejected_hits(), 0);
+    assert_eq!(f.owner.standings()[&TARGET].state, STATE_ALIVE);
+}
+
+#[test]
+fn a_sniper_rifles_hit_takes_the_shield_and_a_quarter_of_the_health_and_the_pistols_is_no_longer_the_shooters() {
+    let Some(f) = armed_fight("hit-sniper", SNIPER_RIFLE, 1.0) else { return };
+    let bullet = HitReport { damage: SNIPER_RIFLE_DAMAGE, ..f.hit_on_target() };
+    f.report(&[bullet]);
+    wait_until("the damage", || f.fighter(TARGET).hurt_count == 1);
+    let target = f.fighter(TARGET);
+    // 101 of damage: a shield of 75, and 26 of the body's 75
+    assert_eq!(target.shield, 0.0);
+    assert!((target.body - (1.0 - 26.0 / 75.0)).abs() < 1.0e-4, "{}", target.body);
+    assert_eq!(f.rejected_hits(), 0);
+    // the pistol it no longer carries
+    f.report(&[f.hit_on_target()]);
+    wait_until("the rejection", || f.rejected_hits() == 1);
+    assert_eq!(f.fighter(TARGET).hurt_count, 1);
+}
+
+#[test]
+fn a_plasma_rifle_is_held_to_what_its_heat_lets_it_fire() {
+    // (a target that sixty hits do not kill, so that every report is judged on its rate alone)
+    let Some(f) = armed_fight("hit-plasma", PLASMA_RIFLE, 1.0e4) else { return };
+    let bolt = HitReport { damage: PLASMA_RIFLE_DAMAGE, ..f.hit_on_target() };
+    // sixty-four at once: 10 a second at most, but a gauge of heat is 12 shots and what it loses in 3 seconds
+    // is 11 more: 23.75 in 3 s, so at twice that the bucket holds 47 bolts
+    f.report(&[bolt; 64]);
+    wait_until("the verdicts", || f.rejected_hits() >= 15);
+    let rejected = f.rejected_hits();
+    assert!((16..=18).contains(&rejected), "47 of 64 pass: {rejected} were rejected");
+    assert_eq!(f.fighter(TARGET).hurt_count as u64, 64 - rejected);
+    // a bolt that has flown a few units has not slowed much: it deals most of its 12 to 14
+    let target = f.fighter(TARGET);
+    let dealt = (1.0 - target.shield) * 75.0 * 1.0e4 / f.fighter(TARGET).hurt_count as f32;
+    assert!((9.0..=14.0).contains(&dealt), "each bolt dealt {dealt} on average");
 }

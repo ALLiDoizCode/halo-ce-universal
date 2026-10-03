@@ -24,9 +24,12 @@ network test session on this machine alone (debug.network_test, normally
 A scenario of firing (it has a weapon or a target line) also puts the named
 weapon in the player's hands in place of the ones the game gave, and a target
 beside them: a unit of the multiplayer player's kind, standing still and
-taking damage as any unit does; the "fire" input holds the player's trigger.
-The trace then has the shooter's weapon (its ammunition and heat) and the
-target (its shields, health and what hit it) after each tick too.
+taking damage as any unit does; the "fire" input holds the player's trigger
+and the "melee" input the melee button. The trace then has the shooter's
+weapon (its ammunition, heat and how many times it has fired) and the target
+(its shields, health and what hit it) after each tick too, and a "# hit" line
+for every hit on the target (what hit it, where, at what scale and for how
+much), which the simulation replays: what a shot hits is the engine's.
 
 The scenario and trace formats are in tools/scenarios/README.md.
 */
@@ -39,6 +42,7 @@ The scenario and trace formats are in tools/scenarios/README.md.
 #include "game/players.h"
 #include "items/weapons.h"
 #include "items/weapon_definitions.h"
+#include "objects/damage.h"
 #include "objects/objects.h"
 #include "scenario/scenario.h"
 #include "tag_files/tag_groups.h"
@@ -83,6 +87,35 @@ struct scenario_record
 	int target_stun;
 	int target_dead;
 	int hit_part;
+	int shots;
+	float age;
+};
+
+/* a hit on the target: the trace has one "# hit" line of each, and a "# shot" line for each
+shot of the weapon */
+#define SCENARIO_MAXIMUM_HITS 8192
+#define SCENARIO_MAXIMUM_SHOTS 4096
+
+struct scenario_shot
+{
+	long tick;
+	short trigger;
+	boolean misfired;
+};
+
+struct scenario_hit
+{
+	long tick;
+	long part;
+	float scale;
+	float total;
+	/* the damage effect's tag (its index among the map's tags) and how far the hit's epicentre was from the
+	middle of the target */
+	long damage;
+	float distance;
+	float origin[3];
+	/* the target had already updated its own damage this tick (the hit came after it in the tick's order) */
+	boolean target_updated;
 };
 
 struct scenario_input
@@ -94,6 +127,7 @@ struct scenario_input
 	boolean jump;
 	boolean crouch;
 	boolean fire;
+	boolean melee;
 };
 
 static struct
@@ -115,8 +149,15 @@ static struct
 	float target_x, target_y, target_z, target_yaw;
 	long weapon_index;
 	long target_index;
-	/* the part of the target that was hit since the last record */
+	/* the game time the target's damage last updated at */
+	long target_update_time;
+	/* the part of the target that was hit since the last record (-2 for a hit on no part) */
 	long hit_part;
+	/* the shots the weapon has fired */
+	long shots;
+	struct scenario_shot shot_list[SCENARIO_MAXIMUM_SHOTS];
+	long hit_count;
+	struct scenario_hit hits[SCENARIO_MAXIMUM_HITS];
 
 	/* running: the game's tick that is the scenario's tick 0 (NONE before),
 	and the trace so far */
@@ -169,6 +210,8 @@ static void scenario_apply(
 			input->crouch = value != 0.0f;
 		else if (!strcmp(key, "fire"))
 			input->fire = value != 0.0f;
+		else if (!strcmp(key, "melee"))
+			input->melee = value != 0.0f;
 		else if (!strcmp(key, "part"))
 			;	/* (what the simulation takes the shot to hit: the engine's shot hits what it hits, which the trace says) */
 		else
@@ -300,6 +343,7 @@ static void scenario_read_settings(
 	harness.weapon_index = NONE;
 	harness.target_index = NONE;
 	harness.hit_part = NONE;
+	harness.target_update_time = NONE;
 	if (!path[0])
 		return;
 	scenario_harness_load(path);
@@ -329,14 +373,78 @@ static struct unit_datum *scenario_unit(
 	return unit_get(player->unit_index);
 }
 
-/* the part of a unit that damage hit (object_cause_damage tells us of every
-hit): the target's, for the trace of the tick */
-void scenario_harness_damage(
-	long object_index,
-	short material_index)
+/* a unit has begun its own update of its damage (object_damage_update): the target's is a mark of the
+order of the tick's hits: a hit that comes after it is dealt after the target's shield has ticked */
+void scenario_harness_damage_update(
+	long object_index)
 {
 	if (harness.active && harness.target_index != NONE && object_index == harness.target_index)
-		harness.hit_part = material_index;
+		harness.target_update_time = game_time_get();
+}
+
+/* a trigger of a weapon has fired (weapon_trigger_fire says so): the scenario's weapon's, for the "shots" of the
+trace and the "# shot" lines (whether it misfired is the engine's random choice, which the simulation takes from here) */
+void scenario_harness_shot(
+	long weapon_index,
+	short trigger_index,
+	boolean misfired)
+{
+	if (!harness.active || harness.weapon_index == NONE || weapon_index != harness.weapon_index ||
+		harness.first_game_tick == NONE)
+	{
+		return;
+	}
+	if (harness.shots < SCENARIO_MAXIMUM_SHOTS)
+	{
+		struct scenario_shot *shot = &harness.shot_list[harness.shots];
+
+		shot->tick = game_time_get() - harness.first_game_tick;
+		shot->trigger = trigger_index;
+		shot->misfired = misfired;
+	}
+	harness.shots++;
+}
+
+/* a hit on a unit (object_cause_damage tells us of every one, once it has the
+damage's total): on the target, the part of it that was hit for the trace of the
+tick, and the hit itself for the "# hit" lines */
+void scenario_harness_damage(
+	long object_index,
+	short material_index,
+	struct damage_data const *damage,
+	real total_damage)
+{
+	struct object_datum *target;
+	struct scenario_hit *hit;
+
+	if (!harness.active || harness.target_index == NONE || object_index != harness.target_index ||
+		harness.first_game_tick == NONE)
+	{
+		return;
+	}
+	harness.hit_part = material_index == NONE ? -2 : material_index;
+	if (harness.hit_count >= SCENARIO_MAXIMUM_HITS)
+		return;
+	target = (struct object_datum *)object_try_and_get_and_verify_type(object_index, _object_mask_unit);
+	if (!target)
+		return;
+	hit = &harness.hits[harness.hit_count++];
+	hit->tick = game_time_get() - harness.first_game_tick;
+	hit->part = material_index;
+	hit->scale = damage->scale;
+	hit->total = total_damage;
+	hit->damage = DATUM_INDEX_TO_ABSOLUTE_INDEX(damage->definition_index);
+	{
+		real dx = damage->epicenter.x - target->object.bounding_sphere_center.x;
+		real dy = damage->epicenter.y - target->object.bounding_sphere_center.y;
+		real dz = damage->epicenter.z - target->object.bounding_sphere_center.z;
+
+		hit->distance = (float)sqrt(dx * dx + dy * dy + dz * dz);
+	}
+	hit->origin[0] = damage->origin.x;
+	hit->origin[1] = damage->origin.y;
+	hit->origin[2] = damage->origin.z;
+	hit->target_updated = harness.target_update_time == game_time_get();
 }
 
 /* a scenario of firing: the weapon the player is given, in place of those the
@@ -432,6 +540,9 @@ void scenario_harness_control(
 	action->desired_facing.pitch = input->pitch;
 	if (input->fire)
 		SET_FLAG(action->control_flags, _unit_control_weapon_primary_trigger_bit, TRUE);
+	/* (the melee button is the engine's "use equipment" control: biped_update) */
+	if (input->melee)
+		SET_FLAG(action->control_flags, _unit_control_use_equipment_bit, TRUE);
 	action->primary_trigger = input->fire ? 1.0f : 0.0f;
 }
 
@@ -504,6 +615,7 @@ void scenario_harness_record(
 				record->rounds_loaded = weapon->weapon.magazines[0].rounds_loaded;
 				record->rounds_total = weapon->weapon.magazines[0].rounds_total;
 				record->heat = weapon->weapon.heat;
+				record->age = weapon->weapon.age;
 			}
 			else
 			{
@@ -527,6 +639,7 @@ void scenario_harness_record(
 				record->target_dead = harness.has_target ? 1 : 0;
 			}
 			record->hit_part = harness.hit_part;
+			record->shots = (int)harness.shots;
 			harness.hit_part = NONE;
 		}
 	}
@@ -535,12 +648,29 @@ void scenario_harness_record(
 	if (harness.recorded >= harness.tick_count)
 	{
 		FILE *file = fopen(harness.trace_path, "w");
+		long index;
 
 		if (!file)
 			scenario_fail("cannot write the trace", harness.trace_path);
-		fprintf(file, "# halo-trace %d\n# scenario %s\n# map %s\n# source c-engine\n"
-			"tick\tx\ty\tz\tvx\tvy\tvz\tyaw\tpitch\tstate%s\n", harness.firing ? 2 : 1, harness.name, harness.map,
-			harness.firing ? "\trounds\ttotal\theat\tshield\tbody\tstun\tdead\thit" : "");
+
+		fprintf(file, "# halo-trace %d\n# scenario %s\n# map %s\n# source c-engine\n", harness.firing ? 2 : 1,
+			harness.name, harness.map);
+		for (index = 0; index < harness.shots && index < SCENARIO_MAXIMUM_SHOTS; index++)
+		{
+			struct scenario_shot const *shot = &harness.shot_list[index];
+
+			fprintf(file, "# shot %ld %d %d\n", shot->tick, (int)shot->trigger, shot->misfired ? 1 : 0);
+		}
+		for (index = 0; index < harness.hit_count; index++)
+		{
+			struct scenario_hit const *hit = &harness.hits[index];
+
+			fprintf(file, "# hit %ld %ld %.8f %.8f %ld %.8f %.6f %.6f %.6f %d\n", hit->tick, hit->part, hit->scale,
+				hit->total, hit->damage, hit->distance, hit->origin[0], hit->origin[1], hit->origin[2],
+				hit->target_updated ? 1 : 0);
+		}
+		fprintf(file, "tick\tx\ty\tz\tvx\tvy\tvz\tyaw\tpitch\tstate%s\n",
+			harness.firing ? "\trounds\ttotal\theat\tshield\tbody\tstun\tdead\thit\tshots\tage" : "");
 		for (tick = 0; tick < harness.tick_count; tick++)
 		{
 			struct scenario_record const *record = &harness.records[tick];
@@ -551,9 +681,9 @@ void scenario_harness_record(
 				record->yaw, record->pitch, record->state);
 			if (harness.firing)
 			{
-				fprintf(file, "\t%d\t%d\t%.8f\t%.8f\t%.8f\t%d\t%d\t%d", record->rounds_loaded, record->rounds_total,
-					record->heat, record->target_shield, record->target_body, record->target_stun,
-					record->target_dead, record->hit_part);
+				fprintf(file, "\t%d\t%d\t%.8f\t%.8f\t%.8f\t%d\t%d\t%d\t%d\t%.8f", record->rounds_loaded,
+					record->rounds_total, record->heat, record->target_shield, record->target_body,
+					record->target_stun, record->target_dead, record->hit_part, record->shots, record->age);
 			}
 			fprintf(file, "\n");
 		}

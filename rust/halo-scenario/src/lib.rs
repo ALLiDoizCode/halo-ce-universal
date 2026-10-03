@@ -10,16 +10,23 @@
 //! shooter's weapon ([`halo_sim::weapon`]) and the target's shields and health
 //! ([`halo_sim::damage`]): each shot the weapon fires hits the target, `flight`
 //! ticks later, on the part of its body the `part` input names (1, the body, unless it says otherwise).
+//! Given the hits the engine saw ([`trace_with_hits`]), it deals those instead, and holds
+//! each to what the simulation knows of it: its damage is one the weapon has, its scale is what
+//! the simulation works out for it (an explosion's from how far the target was, a melee blow's from
+//! how fast the player moved) or within what the server would allow, and its total is within the
+//! bounds the damage's tag gives.
 //!
 //! ```text
 //! cargo run --release -p halo-scenario -- tools/scenarios/walk_flat.scn --maps <data root>/maps --out rust.tsv
 //! python tools/scenario_harness.py compare engine.tsv rust.tsv --scenario tools/scenarios/walk_flat.scn
 //! ```
 
-use halo_sim::damage::Vitals;
-use halo_sim::math::wrap_angle;
+use halo_map::combat::Weapon;
+use halo_sim::damage::{roll_bounds, Vitals};
+use halo_sim::math::{sin_cos, wrap_angle};
+use halo_sim::source::{self, Kind};
 use halo_sim::walk::{walk, Body, Controls};
-use halo_sim::weapon::Hands;
+use halo_sim::weapon::{Hands, Melee};
 use halo_sim::{MapData, Rng};
 
 /// One tick's inputs, as the harness expands them.
@@ -33,6 +40,8 @@ pub struct TickInput {
     pub crouch: bool,
     /// The trigger is held in.
     pub fire: bool,
+    /// The melee button is held in.
+    pub melee: bool,
     /// The part of the target (an index of its body's materials) a shot fired this tick hits.
     pub part: i16,
 }
@@ -126,6 +135,7 @@ pub fn parse(text: &str) -> Result<Scenario, String> {
             jump: false,
             crouch: false,
             fire: false,
+            melee: false,
             part: 1
         };
         ticks
@@ -144,6 +154,7 @@ pub fn parse(text: &str) -> Result<Scenario, String> {
                     "jump" => input.jump = *value != 0.0,
                     "crouch" => input.crouch = *value != 0.0,
                     "fire" => input.fire = *value != 0.0,
+                    "melee" => input.melee = *value != 0.0,
                     "part" => input.part = *value as i16,
                     other => return Err(format!("unknown input key {other:?}")),
                 }
@@ -157,6 +168,11 @@ pub fn parse(text: &str) -> Result<Scenario, String> {
 const STATE_AIRBORNE: u32 = 1;
 const STATE_CROUCHING: u32 = 2;
 
+/// How far a scale the engine dealt may be from the one the simulation works out, where it works one out.
+const SCALE_TOLERANCE: f32 = 1.0e-4;
+/// ... and how far a total the engine rolled may be, in parts, from the bounds of the damage's tag.
+const TOTAL_TOLERANCE: f32 = 1.0e-4;
+
 /// Play the scenario on `map` and write its trace (`tools/scenarios/README.md`
 /// has the format): row `k` is the state after tick `k`. Each shot is taken
 /// to hit the target `flight` ticks later, on the part the `part` input says.
@@ -164,50 +180,148 @@ pub fn trace(scenario: &Scenario, map: &MapData) -> Result<String, String> {
     trace_with_hits(scenario, map, None)
 }
 
-/// The hits a trace of the C engine saw land on its target: the tick and the
-/// part of the target, for [`trace_with_hits`].
-pub fn hits_of_trace(text: &str) -> Result<Vec<(usize, i16)>, String> {
-    let mut hit_column = None;
+/// A hit on the target that the C engine's trace says landed: a `# hit` line.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ObservedHit {
+    pub tick: usize,
+    /// The part of the target that was hit; -1 for none (an explosion's, a blow's).
+    pub part: i16,
+    /// The scale the engine dealt it at, and what it dealt (rolled, and at that scale).
+    pub scale: f32,
+    pub total: f32,
+    /// The damage effect's tag index.
+    pub damage: u16,
+    /// How far the explosion's epicentre was from the middle of the target.
+    pub distance: f32,
+    /// Where the hit was.
+    pub origin: [f32; 3],
+    /// The target had already updated its own damage (its shield's recharge and stun) this tick when the hit
+    /// came, in the engine's order of updating the objects (a projectile that is made after the target comes
+    /// after it, one that took the slot of an object deleted before it comes before it).
+    pub after_target: bool,
+}
+
+/// What a trace of the C engine saw of the firing that the simulation takes from it: what the
+/// engine's shots hit (what a shot hits is the client's to decide, and the engine's damage rolls
+/// are its own), and which of the weapon's shots misfired (the engine's random choice).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Observed {
+    pub hits: Vec<ObservedHit>,
+    /// The ticks a shot misfired on.
+    pub misfires: Vec<usize>,
+}
+
+/// What a trace of the C engine saw, for [`trace_with_hits`].
+pub fn hits_of_trace(text: &str) -> Result<Observed, String> {
+    let mut firing = false;
     let mut hits = Vec::new();
-    for line in text.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()) {
-        let words: Vec<&str> = line.split_whitespace().collect();
-        match hit_column {
-            None => {
-                hit_column = Some(
-                    words
-                        .iter()
-                        .position(|w| *w == "hit")
-                        .ok_or("the trace has no hit column (it is not of firing)")?,
-                )
+    let mut misfires = Vec::new();
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("# shot ") {
+            let w: Vec<&str> = rest.split_whitespace().collect();
+            if w.len() != 3 {
+                return Err(format!("a shot line has {} words, not 3: {line}", w.len()));
             }
-            Some(at) => {
-                let tick = words.first().and_then(|w| w.parse::<usize>().ok()).ok_or("a row with no tick")?;
-                let part = words.get(at).and_then(|w| w.parse::<i16>().ok()).ok_or("a row with no hit")?;
-                if part >= 0 {
-                    hits.push((tick, part));
-                }
+            if w[2] == "1" {
+                misfires.push(w[0].parse::<usize>().map_err(|_| format!("a shot line has no tick: {line}"))?);
             }
+        } else if let Some(rest) = line.strip_prefix("# hit ") {
+            let w: Vec<&str> = rest.split_whitespace().collect();
+            let number = |i: usize| -> Result<f32, String> {
+                w.get(i).and_then(|v| v.parse::<f32>().ok()).ok_or_else(|| format!("a hit line is unreadable: {line}"))
+            };
+            if w.len() != 10 {
+                return Err(format!("a hit line has {} words, not 10: {line}", w.len()));
+            }
+            hits.push(ObservedHit {
+                tick: w[0].parse::<usize>().map_err(|_| format!("a hit line has no tick: {line}"))?,
+                part: w[1].parse::<i16>().map_err(|_| format!("a hit line has no part: {line}"))?,
+                scale: number(2)?,
+                total: number(3)?,
+                damage: w[4].parse::<u16>().map_err(|_| format!("a hit line has no damage: {line}"))?,
+                distance: number(5)?,
+                origin: [number(6)?, number(7)?, number(8)?],
+                after_target: w[9] == "1",
+            });
+        } else if !line.starts_with('#') && line.split_whitespace().any(|w| w == "hit") {
+            firing = true;
         }
     }
-    Ok(hits)
+    if !firing {
+        return Err("the trace has no hit column (it is not of firing)".into());
+    }
+    Ok(Observed { hits, misfires })
+}
+
+/// Deal the hit the engine saw to the target, as the simulation would: refusing it if what the
+/// simulation knows of it differs.
+fn replay(
+    hit: &ObservedHit,
+    weapon: &Weapon,
+    map: &MapData,
+    body: &Body,
+    yaw: f32,
+    airborne_ticks: i16,
+    target: &mut Vitals,
+) -> Result<(), String> {
+    let at = |what: String| format!("tick {}: the engine's hit of damage #{}: {what}", hit.tick, hit.damage);
+    let source =
+        source::find(weapon, hit.damage).ok_or_else(|| at(format!("the weapon {} has no such damage", weapon.name)))?;
+    let (expected, how) = match source.kind {
+        Kind::Detonation | Kind::SuperDetonation => {
+            (Some(source::splash_scale(source.damage, hit.distance)), "explosion")
+        }
+        Kind::Melee => {
+            let (sin, cos) = sin_cos(yaw);
+            let scale =
+                source::melee_scale(body.velocity, [cos, sin, 0.0], map.movement.run_forward_speed, airborne_ticks);
+            (Some(scale), "blow")
+        }
+        Kind::Attached => (Some(1.0), "attached projectile"),
+        Kind::Impact => (None, "impact"),
+    };
+    if let Some(expected) = expected {
+        if (expected - hit.scale).abs() > SCALE_TOLERANCE {
+            return Err(at(format!(
+                "the scale of the {how} is {} in the engine and {expected} in the simulation (distance {})",
+                hit.scale, hit.distance
+            )));
+        }
+    } else if let Some(projectile) = source.projectile {
+        // (the server brings a scale down to what the shooter's distance to the impact allows)
+        let d = halo_sim::math::magnitude(&halo_sim::math::sub(&hit.origin, &body.position));
+        let most = source::impact_scale(projectile, (d - halo_sim::combat::FLIGHT_SLACK).max(0.0));
+        if hit.scale > most + SCALE_TOLERANCE {
+            return Err(at(format!(
+                "the scale of the impact is {} in the engine, over the {most} that {d} units flown allow",
+                hit.scale
+            )));
+        }
+    }
+    let (least, most) = roll_bounds(source.damage, hit.scale);
+    let slack = TOTAL_TOLERANCE * most.abs().max(1.0);
+    if hit.total < least - slack || hit.total > most + slack {
+        return Err(at(format!(
+            "it dealt {}, out of the {least} to {most} of its tag at scale {}",
+            hit.total, hit.scale
+        )));
+    }
+    target.hit(&map.combat.resistance, source.damage, hit.part, false, hit.total);
+    Ok(())
 }
 
 /// ... with the hits a client saw, instead of every shot hitting: the client
 /// decides what it hit (its engine's shot goes where its aim and the frame it
 /// is fired on put it), and the simulation takes the damage from there. The
 /// weapon's rate of fire is still the simulation's own.
-pub fn trace_with_hits(
-    scenario: &Scenario,
-    map: &MapData,
-    observed: Option<&[(usize, i16)]>,
-) -> Result<String, String> {
+pub fn trace_with_hits(scenario: &Scenario, map: &MapData, observed: Option<&Observed>) -> Result<String, String> {
     let firing = scenario.firing();
     let mut out = format!(
         "# halo-trace {}\n# scenario {}\n# map {}\n# source rust-sim\ntick\tx\ty\tz\tvx\tvy\tvz\tyaw\tpitch\tstate{}\n",
         if firing { 2 } else { 1 },
         scenario.name,
         scenario.map,
-        if firing { "\trounds\ttotal\theat\tshield\tbody\tstun\tdead\thit" } else { "" }
+        if firing { "\trounds\ttotal\theat\tshield\tbody\tstun\tdead\thit\tshots\tage" } else { "" }
     );
     let weapon = match &scenario.weapon {
         Some(name) => {
@@ -223,15 +337,14 @@ pub fn trace_with_hits(
         None => None,
     };
     let resistance = &map.combat.resistance;
-    let damage = weapon
-        .and_then(|w| w.triggers.first())
-        .and_then(|t| t.projectile.as_ref())
-        .and_then(|p| p.impact_damage.as_ref());
     let mut hands = weapon.map(Hands::new);
+    let mut melee = Melee::default();
     let mut target = Vitals::full(resistance);
     let mut rng = Rng::seeded(1);
-    // the hits on their way: (the tick they land on, how many, on what part)
-    let mut flying: Vec<(usize, u16, i16)> = Vec::new();
+    let mut shots = 0u32;
+    let mut airborne_ticks = 0i16;
+    // the hits on their way: (the tick they land on, how many, on what part, by which trigger)
+    let mut flying: Vec<(usize, u16, i16, u8)> = Vec::new();
 
     let mut body = Body::at(scenario.start);
     for (tick, input) in scenario.inputs.iter().enumerate() {
@@ -247,39 +360,91 @@ pub fn trace_with_hits(
                 crouch: input.crouch,
             },
         );
+        airborne_ticks = if body.airborne { (airborne_ticks + 1).min(127) } else { 0 };
         let mut hit = -1i32;
         if firing {
-            // the engine's order: the weapon fires, the target's shield recharges, and the shots land
+            // the engine's order: the player's blow (the unit updates), the weapon fires, the target's shield
+            // recharges, and the shots land
+            let mut blow_lands = false;
             if let (Some(hands), Some(weapon)) = (hands.as_mut(), weapon) {
-                let shot = hands.update(weapon, input.fire);
-                if shot.fired && observed.is_none() {
-                    flying.push((tick + scenario.flight, shot.projectiles.max(1), input.part));
+                blow_lands = melee.update(weapon, hands, input.melee);
+                // (the engine's own random numbers decide a misfire: with the engine's trace, it is the engine's)
+                let shot = match observed {
+                    Some(seen) => {
+                        let misfires = seen.misfires.contains(&tick);
+                        hands.update_with(weapon, input.fire, &mut || if misfires { 0.0 } else { 1.0 })
+                    }
+                    None => hands.update(weapon, input.fire),
+                };
+                if shot.fired {
+                    shots += 1;
+                    if observed.is_none() {
+                        flying.push((tick + scenario.flight, shot.projectiles.max(1), input.part, shot.trigger));
+                    }
                 }
             }
+            let deal = |hit_part: i16, hit: &mut i32, result: Result<(), String>| -> Result<(), String> {
+                result?;
+                *hit = if hit_part < 0 { -2 } else { i32::from(hit_part) };
+                Ok(())
+            };
+            let seen: Vec<&ObservedHit> =
+                observed.map_or(Vec::new(), |o| o.hits.iter().filter(|h| h.tick == tick).collect());
             if scenario.target.is_some() {
-                target.tick(resistance);
-                if let Some(damage) = damage {
-                    let mut landed = Vec::new();
-                    match observed {
-                        Some(seen) => {
-                            landed.extend(seen.iter().filter(|(at, _)| *at == tick).map(|(_, part)| (1, *part)))
+                if let Some(weapon) = weapon {
+                    // (with no hits from the engine, a blow that lands hurts the target as the weapon's melee damage does)
+                    if blow_lands && observed.is_none() {
+                        if let Some(damage) = &weapon.melee_damage {
+                            let (sin, cos) = sin_cos(input.yaw);
+                            let scale = source::melee_scale(
+                                body.velocity,
+                                [cos, sin, 0.0],
+                                map.movement.run_forward_speed,
+                                airborne_ticks,
+                            );
+                            let total = halo_sim::damage::roll(damage, scale, 1.0, &mut rng);
+                            target.hit(resistance, damage, -1, false, total);
+                            hit = -2;
                         }
-                        None => flying.retain(|(at, count, part)| {
+                    }
+                    // each hit lands where the engine's order of updating put it: before the target's own
+                    // update or after it
+                    for h in seen.iter().filter(|h| !h.after_target) {
+                        let result = replay(h, weapon, map, &body, input.yaw, airborne_ticks, &mut target);
+                        deal(h.part, &mut hit, result)?;
+                    }
+                    target.tick(resistance);
+                    for h in seen.iter().filter(|h| h.after_target) {
+                        let result = replay(h, weapon, map, &body, input.yaw, airborne_ticks, &mut target);
+                        deal(h.part, &mut hit, result)?;
+                    }
+                    if observed.is_none() {
+                        let mut landed = Vec::new();
+                        flying.retain(|(at, count, part, trigger)| {
                             if *at == tick {
-                                landed.push((*count, *part));
+                                landed.push((*count, *part, *trigger));
                                 false
                             } else {
                                 true
                             }
-                        }),
-                    }
-                    for (count, part) in landed {
-                        for _ in 0..count {
-                            let total = halo_sim::damage::roll(damage, 1.0, 1.0, &mut rng);
-                            target.hit(resistance, damage, part, false, total);
-                            hit = i32::from(part);
+                        });
+                        for (count, part, trigger) in landed {
+                            let damage = weapon
+                                .triggers
+                                .get(usize::from(trigger))
+                                .and_then(|t| t.projectile.as_ref())
+                                .and_then(|p| p.impact_damage.as_ref());
+                            if let Some(damage) = damage {
+                                for _ in 0..count {
+                                    let total = halo_sim::damage::roll(damage, 1.0, 1.0, &mut rng);
+                                    target.hit(resistance, damage, part, false, total);
+                                    hit = i32::from(part);
+                                }
+                            }
                         }
                     }
+                } else {
+                    target.tick(resistance);
                 }
             }
         }
@@ -297,7 +462,8 @@ pub fn trace_with_hits(
             input.pitch,
         ));
         if firing {
-            let (loaded, total, heat) = hands.map_or((0, 0, 0.0), |h| (h.rounds_loaded, h.rounds_total, h.heat));
+            let (loaded, total, heat, age) =
+                hands.map_or((0, 0, 0.0, 0.0), |h| (h.rounds_loaded, h.rounds_total, h.heat, h.age));
             // (a scenario with no target has none to show: nothing, as the engine's trace has)
             let shown = if scenario.target.is_some() {
                 target
@@ -305,7 +471,7 @@ pub fn trace_with_hits(
                 Vitals { shield: 0.0, body: 0.0, shield_stun_ticks: 0, flags: 0 }
             };
             out.push_str(&format!(
-                "\t{loaded}\t{total}\t{heat:.8}\t{:.8}\t{:.8}\t{}\t{}\t{hit}",
+                "\t{loaded}\t{total}\t{heat:.8}\t{:.8}\t{:.8}\t{}\t{}\t{hit}\t{shots}\t{age:.8}",
                 shown.shield,
                 shown.body,
                 shown.shield_stun_ticks,
@@ -393,10 +559,17 @@ mod tests {
         assert_eq!(s.flight, 1);
         let text = trace(&s, &halo_sim::fixtures::flat_floor_map()).unwrap();
         assert!(text.starts_with("# halo-trace 2\n"));
-        assert!(text.lines().nth(4).unwrap().ends_with("rounds\ttotal\theat\tshield\tbody\tstun\tdead\thit"));
+        assert!(text
+            .lines()
+            .nth(4)
+            .unwrap()
+            .ends_with("rounds\ttotal\theat\tshield\tbody\tstun\tdead\thit\tshots\tage"));
         // the first shot is fired on tick 10 and lands on tick 11
         assert_eq!(column(&text, 9, "rounds"), 12.0);
         assert_eq!(column(&text, 10, "rounds"), 11.0);
+        assert_eq!(column(&text, 9, "shots"), 0.0);
+        assert_eq!(column(&text, 10, "shots"), 1.0);
+        assert_eq!(column(&text, 19, "shots"), 2.0);
         assert_eq!(column(&text, 10, "shield"), 1.0);
         assert_eq!(column(&text, 11, "hit"), 1.0);
         assert!((column(&text, 11, "shield") - (1.0 - 25.0 / 75.0)).abs() < 1e-6);
@@ -408,14 +581,31 @@ mod tests {
         assert_eq!(column(&text, 40, "dead"), 0.0);
     }
 
+    /// The pistol's bullet damage's tag in the fixture.
+    const BULLET: u16 = halo_sim::fixtures::PISTOL_DAMAGE;
+
+    fn engine_hit(tick: usize, part: i16) -> ObservedHit {
+        ObservedHit {
+            tick,
+            part,
+            scale: 1.0,
+            total: 25.0,
+            damage: BULLET,
+            distance: 0.0,
+            origin: [3.0, 0.0, 0.3],
+            after_target: true,
+        }
+    }
+
     #[test]
     fn the_hits_a_trace_saw_land_are_the_ones_the_simulation_applies() {
         let s = parse(SHOOT).unwrap();
         let map = halo_sim::fixtures::flat_floor_map();
         // the engine's trace: only the first of the shots hit, on the head's part, a tick later than the scenario's flight
-        let engine = "# halo-trace 2\ntick\tx\thit\n10\t0\t-1\n12\t0\t0\n13\t0\t-1\n";
-        assert_eq!(hits_of_trace(&engine.replace("10\t0\t-1\n", "0\t0\t-1\n")).unwrap(), [(12, 0)]);
-        let text = trace_with_hits(&s, &map, Some(&[(12, 0)])).unwrap();
+        let engine = "# halo-trace 2\n# shot 10 0 0\n# shot 19 0 1\n# hit 12 0 1.00000000 25.00000000 517 0.00000000 3.0 0.0 0.3 1\ntick\tx\thit\n0\t0\t-1\n";
+        let seen = hits_of_trace(engine).unwrap();
+        assert_eq!(seen, Observed { hits: Vec::from([engine_hit(12, 0)]), misfires: Vec::from([19]) });
+        let text = trace_with_hits(&s, &map, Some(&seen)).unwrap();
         // the pistol fires on ticks 10, 19, ... and its second shot hits nothing: one hit, on the head
         assert_eq!(column(&text, 11, "hit"), -1.0);
         assert_eq!(column(&text, 12, "hit"), 0.0);
@@ -423,6 +613,21 @@ mod tests {
         assert_eq!(column(&text, 119, "dead"), 0.0, "one hit does not kill");
         assert_eq!(column(&text, 10, "rounds"), 11.0, "the simulation's own weapon fired, whatever hit");
         assert!(hits_of_trace("# halo-trace 1\ntick\tx\n0\t0\n").is_err(), "a trace of no firing has no hits");
+    }
+
+    #[test]
+    fn a_hit_the_simulation_knows_nothing_of_or_that_is_not_what_it_works_out_is_refused() {
+        let s = parse(SHOOT).unwrap();
+        let map = halo_sim::fixtures::flat_floor_map();
+        let observed = |hit: ObservedHit| Observed { hits: Vec::from([hit]), misfires: Vec::new() };
+        let refused = |hit: ObservedHit| trace_with_hits(&s, &map, Some(&observed(hit))).unwrap_err();
+        assert!(refused(ObservedHit { damage: 9, ..engine_hit(12, 1) }).contains("no such damage"));
+        // 25 is all the bullet deals, at full scale
+        assert!(refused(ObservedHit { total: 30.0, ..engine_hit(12, 1) }).contains("out of the 25 to 25"));
+        // a bullet that does not slow down does not lose scale: a scale of 0.5 is under what is allowed (and the
+        // fixture's damage has a minimum of 25 too, so it deals the same), one of 2 is over
+        assert!(trace_with_hits(&s, &map, Some(&observed(ObservedHit { scale: 0.5, ..engine_hit(12, 1) }))).is_ok());
+        assert!(refused(ObservedHit { scale: 2.0, total: 50.0, ..engine_hit(12, 1) }).contains("scale"));
     }
 
     #[test]

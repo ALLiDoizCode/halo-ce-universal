@@ -23,11 +23,26 @@ pub const MATERIAL_TYPES: usize = 40;
 /// `struct damage_definition` of a damage effect tag: what one hit deals.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Damage {
+    /// The damage effect tag's index among the map's tags: what a hit report
+    /// names the damage by (the client's engine and the server have the same map).
+    pub tag_index: u16,
     /// `_damage_side_effect_*`.
     pub side_effect: i16,
     /// `_damage_category_*`.
     pub category: i16,
     pub flags: u32,
+    /// An area-of-effect damage (an explosion): it reaches everything within
+    /// `cutoff_radius`, at full strength to `falloff_radius` and less out to the
+    /// cutoff (`area_of_effect_cause_damage_to_object`); 0 for a damage that
+    /// hits what it touches. `effect_flags` are the damage effect's own flags
+    /// ([`damage_effect_flags`]).
+    pub falloff_radius: f32,
+    pub cutoff_radius: f32,
+    pub cutoff_scale: f32,
+    pub effect_flags: u32,
+    /// An explosion reaches a unit if a ray of this much to the side of the
+    /// line from the epicentre to it is clear of the world.
+    pub core_radius: f32,
     /// What a hit with a damage scale of 0 deals (the scale is 1 for a hit
     /// from a projectile's impact).
     pub minimum: f32,
@@ -57,6 +72,18 @@ pub mod damage_flags {
     pub const CAN_CAUSE_MULTIPLAYER_HEADSHOTS: u32 = 1 << 11;
 }
 
+/// `damage_effect_definition.flags` bits the damage rules read.
+pub mod damage_effect_flags {
+    /// An explosion deals its full damage to all it reaches, however far.
+    pub const DONT_SCALE_DAMAGE_BY_DISTANCE: u32 = 1 << 0;
+}
+
+/// `projectile_definition.flags` bits the weapon rules read.
+pub mod projectile_flags {
+    /// Projectiles stuck to one thing explode as one, together (the needler's).
+    pub const SUPER_COMBINING_EXPLOSION: u32 = 1 << 3;
+}
+
 /// A projectile tag, as far as a hit on a player goes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Projectile {
@@ -68,12 +95,25 @@ pub struct Projectile {
     /// World units; 0 where the tag has none.
     pub maximum_range: f32,
     pub air_gravity_scale: f32,
+    /// How far it flies at full speed, and how far when it has slowed to its
+    /// final velocity (world units; both 0 for a projectile that does not slow down).
+    pub air_damage_range_lower: f32,
+    pub air_damage_range_upper: f32,
     /// World units a *tick* (the engine's unit for velocities), at the start
     /// and the end of the flight.
     pub initial_velocity: f32,
     pub final_velocity: f32,
     /// The damage of its impact on what it hits, if the tag has one.
     pub impact_damage: Option<Damage>,
+    /// The damage it does where it is when it detonates: an explosion, from
+    /// the damage effects of the projectile's detonation effect and of its
+    /// materials' (each once).
+    pub detonation_damage: Vec<Damage>,
+    /// The damage of the explosion many of a stuck kind make together, from the
+    /// damage effects of its super detonation effect.
+    pub super_detonation_damage: Vec<Damage>,
+    /// The damage a projectile stuck to a unit deals to it when it detonates.
+    pub attached_damage: Option<Damage>,
 }
 
 /// `struct weapon_magazine_definition`.
@@ -107,6 +147,8 @@ pub struct Trigger {
     pub minimum_rounds_loaded_per_shot: i16,
     pub charging_time: f32,
     pub charged_time: f32,
+    /// What a charge held for all of `charged_time` does: `_trigger_overcharged_*`.
+    pub overcharged_action: i16,
     pub spew_time: f32,
     pub overloading_time: f32,
     pub projectiles_per_shot: i16,
@@ -141,6 +183,14 @@ pub struct Weapon {
     /// A second's worth, as the tag has it.
     pub heat_loss_per_second: f32,
     pub age_rate_of_fire_penalty: f32,
+    /// A weapon's age (a plasma weapon's battery, 0 new to 1 spent) slows its recovery from heat
+    /// by this much at 1, and past `age_misfire_start` makes a shot misfire with a chance that
+    /// rises to `age_misfire_chance` at 1.
+    pub age_heat_recovery_penalty: f32,
+    pub age_misfire_start: f32,
+    pub age_misfire_chance: f32,
+    /// The fraction of the shots made past `heat_detonation_threshold` that blow the weapon up.
+    pub overheated_explosion_fraction: f32,
     /// How many ticks a reload takes: the frames of the weapon's first-person
     /// animation for reloading (the engine times the reload by it, not by the
     /// magazine's `reload_time`); 0 where the weapon has none.
@@ -149,6 +199,14 @@ pub struct Weapon {
     /// after each shot): the weapon starts no reload until it has played;
     /// 0 where it has none.
     pub recoil_frames: i16,
+    /// The frames of the first-person melee animation (the engine times a
+    /// player's blow by it: `player_melee_ticks`) and the frame the blow lands
+    /// on; 0 where the weapon has none.
+    pub melee_frames: i16,
+    pub melee_key_frame: i16,
+    /// The frames of a shotgun's first-person animation for starting a reload
+    /// (the first round goes in with it); 0 for the others.
+    pub shotgun_enter_frames: i16,
     pub magazines: Vec<Magazine>,
     pub triggers: Vec<Trigger>,
     /// The damage of its melee blow.
@@ -255,7 +313,7 @@ impl Default for Combat {
 
 // ---------- the byte form
 
-const MAGIC: &[u8; 4] = b"HCC1";
+const MAGIC: &[u8; 4] = b"HCC2";
 /// The most elements any list of the byte form may claim: a hostile count
 /// cannot make the decoder allocate more than the bytes could hold.
 const MAX_LIST: usize = 4096;
@@ -281,14 +339,26 @@ impl Writer {
     fn count(&mut self, n: usize) {
         self.u16(n as u16);
     }
+    fn damages(&mut self, damages: &[Damage]) {
+        self.count(damages.len());
+        for d in damages {
+            self.opt_damage(&Some(*d));
+        }
+    }
     fn opt_damage(&mut self, d: &Option<Damage>) {
         match d {
             None => self.u8(0),
             Some(d) => {
                 self.u8(1);
+                self.u16(d.tag_index);
                 self.i16(d.side_effect);
                 self.i16(d.category);
                 self.u32(d.flags);
+                for v in [d.falloff_radius, d.cutoff_radius, d.cutoff_scale] {
+                    self.f32(v);
+                }
+                self.u32(d.effect_flags);
+                self.f32(d.core_radius);
                 self.f32(d.minimum);
                 self.f32(d.lower);
                 self.f32(d.upper);
@@ -332,14 +402,30 @@ impl Reader<'_> {
         }
         Ok(n)
     }
+    fn damages(&mut self) -> Result<Vec<Damage>> {
+        let mut out = Vec::new();
+        for _ in 0..self.count()? {
+            match self.opt_damage()? {
+                Some(d) => out.push(d),
+                None => return malformed("combat data has a list of damages with one that is not there"),
+            }
+        }
+        Ok(out)
+    }
     fn opt_damage(&mut self) -> Result<Option<Damage>> {
         match self.u8()? {
             0 => Ok(None),
             1 => {
                 let mut d = Damage {
+                    tag_index: self.u16()?,
                     side_effect: self.i16()?,
                     category: self.i16()?,
                     flags: self.u32()?,
+                    falloff_radius: self.f32()?,
+                    cutoff_radius: self.f32()?,
+                    cutoff_scale: self.f32()?,
+                    effect_flags: self.u32()?,
+                    core_radius: self.f32()?,
                     minimum: self.f32()?,
                     lower: self.f32()?,
                     upper: self.f32()?,
@@ -356,7 +442,7 @@ impl Reader<'_> {
 }
 
 impl Combat {
-    /// `"HCC1"`, then the weapons (a `u16` count, each weapon field by field),
+    /// `"HCC2"`, then the weapons (a `u16` count, each weapon field by field),
     /// the resistance, and the starting equipment; little-endian, floats as
     /// their IEEE-754 bits.
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -376,11 +462,18 @@ impl Combat {
                 weapon.heat_detonation_threshold,
                 weapon.heat_loss_per_second,
                 weapon.age_rate_of_fire_penalty,
+                weapon.age_heat_recovery_penalty,
+                weapon.age_misfire_start,
+                weapon.age_misfire_chance,
+                weapon.overheated_explosion_fraction,
             ] {
                 w.f32(v);
             }
             w.i16(weapon.reload_frames);
             w.i16(weapon.recoil_frames);
+            w.i16(weapon.melee_frames);
+            w.i16(weapon.melee_key_frame);
+            w.i16(weapon.shotgun_enter_frames);
             w.count(weapon.magazines.len());
             for m in &weapon.magazines {
                 w.u32(m.flags);
@@ -410,9 +503,11 @@ impl Combat {
                 for v in [t.magazine_index, t.rounds_per_shot, t.minimum_rounds_loaded_per_shot] {
                     w.i16(v);
                 }
-                for v in [t.charging_time, t.charged_time, t.spew_time, t.overloading_time] {
-                    w.f32(v);
-                }
+                w.f32(t.charging_time);
+                w.f32(t.charged_time);
+                w.i16(t.overcharged_action);
+                w.f32(t.spew_time);
+                w.f32(t.overloading_time);
                 w.i16(t.projectiles_per_shot);
                 w.f32(t.heat_generated_per_round);
                 w.f32(t.age_generated_per_round);
@@ -428,12 +523,17 @@ impl Combat {
                             p.minimum_velocity,
                             p.maximum_range,
                             p.air_gravity_scale,
+                            p.air_damage_range_lower,
+                            p.air_damage_range_upper,
                             p.initial_velocity,
                             p.final_velocity,
                         ] {
                             w.f32(v);
                         }
                         w.opt_damage(&p.impact_damage);
+                        w.damages(&p.detonation_damage);
+                        w.damages(&p.super_detonation_damage);
+                        w.opt_damage(&p.attached_damage);
                     }
                 }
             }
@@ -510,8 +610,15 @@ impl Combat {
             let heat_detonation_threshold = r.f32()?;
             let heat_loss_per_second = r.f32()?;
             let age_rate_of_fire_penalty = r.f32()?;
+            let age_heat_recovery_penalty = r.f32()?;
+            let age_misfire_start = r.f32()?;
+            let age_misfire_chance = r.f32()?;
+            let overheated_explosion_fraction = r.f32()?;
             let reload_frames = r.i16()?;
             let recoil_frames = r.i16()?;
+            let melee_frames = r.i16()?;
+            let melee_key_frame = r.i16()?;
+            let shotgun_enter_frames = r.i16()?;
             let mut magazines = Vec::new();
             for _ in 0..r.count()? {
                 magazines.push(Magazine {
@@ -537,6 +644,7 @@ impl Combat {
                 let minimum_rounds_loaded_per_shot = r.i16()?;
                 let charging_time = r.f32()?;
                 let charged_time = r.f32()?;
+                let overcharged_action = r.i16()?;
                 let spew_time = r.f32()?;
                 let overloading_time = r.f32()?;
                 let projectiles_per_shot = r.i16()?;
@@ -552,9 +660,14 @@ impl Combat {
                         minimum_velocity: r.f32()?,
                         maximum_range: r.f32()?,
                         air_gravity_scale: r.f32()?,
+                        air_damage_range_lower: r.f32()?,
+                        air_damage_range_upper: r.f32()?,
                         initial_velocity: r.f32()?,
                         final_velocity: r.f32()?,
                         impact_damage: r.opt_damage()?,
+                        detonation_damage: r.damages()?,
+                        super_detonation_damage: r.damages()?,
+                        attached_damage: r.opt_damage()?,
                     }),
                     _ => return malformed("combat data has a projectile that is neither there nor not"),
                 };
@@ -569,6 +682,7 @@ impl Combat {
                     minimum_rounds_loaded_per_shot,
                     charging_time,
                     charged_time,
+                    overcharged_action,
                     spew_time,
                     overloading_time,
                     projectiles_per_shot,
@@ -589,8 +703,15 @@ impl Combat {
                 heat_detonation_threshold,
                 heat_loss_per_second,
                 age_rate_of_fire_penalty,
+                age_heat_recovery_penalty,
+                age_misfire_start,
+                age_misfire_chance,
+                overheated_explosion_fraction,
                 reload_frames,
                 recoil_frames,
+                melee_frames,
+                melee_key_frame,
+                shotgun_enter_frames,
                 magazines,
                 triggers,
                 melee_damage,
@@ -673,7 +794,10 @@ impl Combat {
             return malformed("combat data has a shield with a material that is not one");
         }
         let damage_ok = |d: &Option<Damage>| {
-            d.is_none_or(|d| finite(&[d.minimum, d.lower, d.upper]) && finite(&d.material_modifiers))
+            d.is_none_or(|d| {
+                finite(&[d.minimum, d.lower, d.upper, d.falloff_radius, d.cutoff_radius, d.cutoff_scale, d.core_radius])
+                    && finite(&d.material_modifiers)
+            })
         };
         for w in &self.weapons {
             if !damage_ok(&w.melee_damage) {
@@ -699,10 +823,14 @@ impl Combat {
                 }
                 if let Some(p) = &t.projectile {
                     if !damage_ok(&p.impact_damage)
+                        || !damage_ok(&p.attached_damage)
+                        || !p.detonation_damage.iter().chain(&p.super_detonation_damage).all(|d| damage_ok(&Some(*d)))
                         || !finite(&[
                             p.timer_lower_bound,
                             p.timer_upper_bound,
                             p.maximum_range,
+                            p.air_damage_range_lower,
+                            p.air_damage_range_upper,
                             p.initial_velocity,
                             p.final_velocity,
                         ])
@@ -717,6 +845,10 @@ impl Combat {
                 w.heat_detonation_threshold,
                 w.heat_loss_per_second,
                 w.age_rate_of_fire_penalty,
+                w.age_heat_recovery_penalty,
+                w.age_misfire_start,
+                w.age_misfire_chance,
+                w.overheated_explosion_fraction,
             ]) || w.magazines.iter().any(|m| !finite(&[m.reload_time, m.chamber_time]))
             {
                 return malformed("combat data has a weapon with a number that is not one");

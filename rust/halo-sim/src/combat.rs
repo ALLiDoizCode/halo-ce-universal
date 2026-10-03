@@ -16,24 +16,37 @@
 //! 1. the numbers are numbers; the shooter and the target are in the match,
 //!    alive, and not the same player (the client hides the bodies of the dead,
 //!    which the gateway still sends, so a hit on a body is a lie or a lag);
-//! 2. **the shooter owns the weapon**: it is in their [`Loadout`], or was in
-//!    the last [`RECENT_WEAPON_TICKS`] (what a shot still in flight needs);
+//! 2. **the shooter owns the weapon the damage is of**: a report names the
+//!    damage that hurt the target (the damage effect's tag, as the engine's
+//!    own damage has it: a projectile's impact, its explosion, a melee blow),
+//!    and [`crate::source::find`] says which weapon's it is: one in their
+//!    [`Loadout`], or put down in the last [`RECENT_WEAPON_TICKS`] (what a shot
+//!    still in flight needs: a rocket takes 13 seconds to fly its range);
 //! 3. **the report is recent**: made at a tick that is not ahead of the
 //!    server's and not more than [`REPORT_MAXIMUM_AGE_TICKS`] (3 seconds) behind
 //!    it, as a burst of reports held back by a lost network is not;
 //! 4. the impact is at the target: within the player's height and
-//!    [`IMPACT_TOLERANCE`] of where the shooter says they saw the target;
+//!    [`IMPACT_TOLERANCE`] of where the shooter says they saw the target (an
+//!    explosion's epicentre is anywhere within its radius of the target, and
+//!    a melee blow's "impact" is the shooter's head, [`MELEE_REACH`] ahead of
+//!    the shooter);
 //! 5. **the rate of fire is possible**: a shooter's hits draw from a bucket of
 //!    [`BURST_SECONDS`] seconds of fire that refills at a second a second, a
-//!    hit taking what one of the weapon's projectiles takes to fire at
-//!    [`RATE_MARGIN`] times the weapon's fastest rate (a shotgun's pellets
-//!    each count). It is drawn from before the history is looked through, so
-//!    that a flood of false reports costs its sender no more than the hits it
-//!    pays for;
+//!    hit taking what one hit of the damage takes at [`RATE_MARGIN`] times the
+//!    fastest the weapon can deal it ([`crate::source::hit_rate`]: a
+//!    shotgun's pellets each count, a melee blow as often as the swing, a
+//!    weapon with heat what the heat lets it fire). An explosion hurts all it
+//!    reaches at once, and what it hurts is one explosion: only the first hit
+//!    of an explosion (a shooter's, of one damage, within [`BLAST_MERGE`] of
+//!    the epicentre, in one tick) draws from the bucket. It is drawn from
+//!    before the history is looked through, so that a flood of false reports
+//!    costs its sender no more than the hits it pays for;
 //! 6. the shooter was within the weapon's reach of the impact, where the tags
-//!    bound it (the projectile's range), at a tick since the shot was fired,
-//!    by where the server saw them ([`RANGE_TOLERANCE`] and a few ticks of
-//!    their speed more);
+//!    bound it (the projectile's range, or where it has slowed to a stop), at a
+//!    tick since the shot was fired, by where the server saw them
+//!    ([`RANGE_TOLERANCE`] and a few ticks of their speed more, and for a
+//!    projectile in flight longer than the server remembers (a rocket's) as far
+//!    again as a player can move in the time it is not remembered);
 //! 7. **the target was within reach of where the server saw it recently**:
 //!    at a tick as far back as the report was made, within
 //!    [`HISTORY_TOLERANCE`] and a few ticks of its speed of where the shooter
@@ -47,9 +60,12 @@
 //! its speed to spare, as the existing netcode checks one it has no history of.
 //!
 //! A report that passes deals its damage: a number between the tags' bounds
-//! ([`crate::damage::roll`], on the match's random numbers) to the target's
-//! shield and then health ([`crate::damage::Vitals::hit`]); a death of the
-//! target is a [`Death`] with the shooter as the killer.
+//! at the report's scale ([`crate::damage::roll`], on the match's random
+//! numbers; the client's engine rolls its own, which the server does not take:
+//! it owns the damage), to the target's shield and then health
+//! ([`crate::damage::Vitals::hit`]); a death of the target is a [`Death`] with
+//! the shooter as the killer. The scale is the client's, brought down to what
+//! the server's view allows ([`crate::source::limit`]).
 //!
 //! # What a player carries
 //!
@@ -61,27 +77,32 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use halo_map::combat::{Damage, Weapon};
-
 use crate::damage::{roll, Hurt, Vitals};
 use crate::map::MapData;
 use crate::math::sqrt;
 use crate::rng::Rng;
 use crate::rules::{Death, GameStore};
-use crate::state::{PlayerId, Store};
-use crate::weapon::fastest_rate;
+use crate::source::{self, Kind, Reach, ScaleBounds, Source, MELEE_REACH};
+use crate::state::{PlayerId, Store, FLAG_AIRBORNE};
+pub use crate::weapon::BURST_SECONDS;
 use crate::TICKS_PER_SECOND;
 
 /// A reported hit is refused if the report was made more than this many ticks
 /// ago (3 seconds): a burst held back by a lost network is not honoured.
 pub const REPORT_MAXIMUM_AGE_TICKS: u64 = 3 * TICKS_PER_SECOND as u64;
-/// How long a weapon is still the shooter's after they let go of it.
-pub const RECENT_WEAPON_TICKS: u64 = 10 * TICKS_PER_SECOND as u64;
+/// How long a weapon is still the shooter's after they let go of it (15
+/// seconds: the longest a projectile of any weapon is in flight is the
+/// rocket's, 13 seconds to its range).
+pub const RECENT_WEAPON_TICKS: u64 = 15 * TICKS_PER_SECOND as u64;
 /// World units: the impact is within the target's height (the tags') and this far of where the shooter saw the target.
 pub const IMPACT_TOLERANCE: f32 = 2.0;
-/// The seconds of fire a shooter's bucket holds, and how many times the weapon's fastest rate it is read at.
-pub const BURST_SECONDS: f32 = 3.0;
+/// How many times the fastest a weapon can deal a damage a shooter's bucket is drawn at.
 pub const RATE_MARGIN: f32 = 2.0;
+/// World units: reports of one explosion are those whose epicentres are this near each other.
+pub const BLAST_MERGE: f32 = 1.0;
+/// World units a projectile's flown distance is taken to be short of the straight
+/// line from where the shooter was seen to the impact (they fire from the weapon, not their feet).
+pub const FLIGHT_SLACK: f32 = 1.5;
 /// World units: how far the shooter may have been from the impact, beyond the
 /// weapon's reach, and (with how far they move in a few ticks) the target from
 /// where the shooter says it was.
@@ -118,6 +139,20 @@ impl Loadout {
     /// One weapon in hand.
     pub fn with(weapon: u16) -> Loadout {
         Loadout { weapons: [weapon, NO_WEAPON], ..Loadout::EMPTY }
+    }
+
+    /// The weapons the player carries, and those they put down in the last [`RECENT_WEAPON_TICKS`].
+    pub fn owned(&self, tick: u64) -> impl Iterator<Item = u16> + '_ {
+        self.weapons
+            .iter()
+            .copied()
+            .chain(
+                self.dropped
+                    .iter()
+                    .filter(move |(_, at)| tick.saturating_sub(*at) <= RECENT_WEAPON_TICKS)
+                    .map(|(w, _)| *w),
+            )
+            .filter(|w| *w != NO_WEAPON)
     }
 
     /// Whether the player carries the weapon, or put it down in the last [`RECENT_WEAPON_TICKS`].
@@ -380,6 +415,26 @@ impl Trails {
     }
 }
 
+impl Trails {
+    /// The least distance from `position` the player was seen at over the
+    /// ticks from `from` to `to` (inclusive), where the server saw them at all.
+    pub fn closest(&self, id: PlayerId, position: [f32; 3], from: u64, to: u64) -> Option<f32> {
+        let mut least: Option<f32> = None;
+        let mut tick = to;
+        loop {
+            if let Some(at) = self.at(id, tick) {
+                let d = distance(at, position);
+                least = Some(least.map_or(d, |l| l.min(d)));
+            }
+            if tick <= from {
+                break;
+            }
+            tick -= 1;
+        }
+        least
+    }
+}
+
 fn distance_squared(a: [f32; 3], b: [f32; 3]) -> f32 {
     let (dx, dy, dz) = (a[0] - b[0], a[1] - b[1], a[2] - b[2]);
     dx * dx + dy * dy + dz * dz
@@ -396,11 +451,14 @@ fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HitReport {
     pub target: PlayerId,
-    /// The weapon's tag index (`halo_map::combat::Weapon::tag_index`).
-    pub weapon: u16,
+    /// The damage that hurt the target: the damage effect tag's index
+    /// (`halo_map::combat::Damage::tag_index`), which says what weapon it is of.
+    pub damage: u16,
     /// The part of the target that was hit: an index of the body's materials,
-    /// -1 for none.
+    /// -1 for none (an explosion's, a melee blow's).
     pub material: i16,
+    /// The scale the client's engine dealt the damage at (see [`crate::source`]).
+    pub scale: f32,
     /// The server's tick the client had last heard of when it made the report:
     /// where the server looks back from.
     pub host_tick: u32,
@@ -423,7 +481,7 @@ pub enum Reject {
     TargetNotAlive,
     /// The shooter hit themselves.
     SelfHit,
-    /// The shooter does not carry the weapon, nor did lately; or it is no weapon that deals a hit.
+    /// The shooter carries no weapon, nor did lately, that has the damage the report names.
     WeaponNotOwned,
     /// The report was made at a tick the server has not reached.
     FromTheFuture,
@@ -473,32 +531,33 @@ pub struct HitOutcome {
     pub events: Vec<HitEvent>,
 }
 
-/// The damage of a weapon's hit, its rate and its reach, from its tags.
-struct Dealing<'a> {
-    damage: &'a Damage,
-    /// Hits a second the shooter's bucket is drawn at.
-    rate: f32,
-    /// How far the weapon's projectile flies, and how many ticks it takes, where the tags bound them.
-    reach: Option<(f32, u64)>,
+/// A hit of an explosion that passed the checks in a call of [`resolve`]: whose,
+/// of which damage, where, and on whom.
+type Blast = (PlayerId, u16, [f32; 3], PlayerId);
+
+/// A report that passed: what it is of, and what it deals.
+struct Judged<'a> {
+    source: Source<'a>,
+    scale: f32,
 }
 
-fn dealing(weapon: &Weapon) -> Option<Dealing<'_>> {
-    let trigger = weapon.triggers.first()?;
-    let projectile = trigger.projectile.as_ref()?;
-    let damage = projectile.impact_damage.as_ref()?;
-    let rate = fastest_rate(weapon) * f32::from(trigger.projectiles_per_shot.max(1)) * RATE_MARGIN;
-    let reach = if projectile.maximum_range > 0.0 {
-        let slowest = projectile.initial_velocity.min(projectile.final_velocity);
-        let mut ticks = (TRAIL_TICKS - 1) as f32;
-        // (twice as long: a lob's arc)
-        if slowest > 0.0 && 2.0 * projectile.maximum_range / slowest < ticks {
-            ticks = 2.0 * projectile.maximum_range / slowest;
-        }
-        Some((projectile.maximum_range, ticks as u64 + 1))
-    } else {
-        None
-    };
-    Some(Dealing { damage, rate, reach })
+/// The distance, in world units, from the centre of the report's reach that
+/// the shooter's window of positions is looked through: the reach of a source, with
+/// how many ticks the look goes back for what is in flight.
+struct Window {
+    reach: Reach,
+    /// How far the shooter may be from the impact, beyond the range.
+    tolerance: f32,
+}
+
+/// How far a source can be from where its shooter was: `None` where nothing
+/// bounds it.
+fn window_of(source: &Source<'_>, map: &MapData) -> Option<Window> {
+    if source.kind == Kind::Melee {
+        let range = MELEE_REACH + map.movement.collision_height_standing;
+        return Some(Window { reach: Reach { range, flight_ticks: 0 }, tolerance: IMPACT_TOLERANCE });
+    }
+    source::reach(source).map(|reach| Window { reach, tolerance: RANGE_TOLERANCE })
 }
 
 /// Validate the tick's hit reports (`tick` is the tick being run: the
@@ -518,9 +577,10 @@ pub fn resolve(
 ) -> HitOutcome {
     let mut outcome = HitOutcome::default();
     let teams = game.game().rules.teams;
+    let mut blasts: Vec<Blast> = Vec::new();
     for (shooter_id, report) in reports {
         let shooter_id = *shooter_id;
-        let verdict = judge(store, game, combat, trails, map, tick, shooter_id, report);
+        let verdict = judge(store, game, combat, trails, map, tick, shooter_id, report, &mut blasts);
         let mut record = combat.shooter(shooter_id);
         match verdict {
             Err(reason) => {
@@ -531,10 +591,9 @@ pub fn resolve(
                 combat.set_shooter(record);
                 continue;
             }
-            Ok(weapon) => {
+            Ok(Judged { source, scale }) => {
                 record.accepted += 1;
                 combat.set_shooter(record);
-                let Some(dealing) = dealing(weapon) else { continue };
                 let (Some(mut target), Some(victim)) = (combat.fighter(report.target), game.contestant(report.target))
                 else {
                     continue;
@@ -543,8 +602,8 @@ pub fn resolve(
                 let resistance = &map.combat.resistance;
                 target.vitals.advance(resistance, tick.saturating_sub(target.tick));
                 target.tick = tick;
-                let total = roll(dealing.damage, 1.0, 1.0, rng);
-                if let Some(hurt) = target.vitals.hit(resistance, dealing.damage, report.material, friendly, total) {
+                let total = roll(source.damage, scale, 1.0, rng);
+                if let Some(hurt) = target.vitals.hit(resistance, source.damage, report.material, friendly, total) {
                     target.hurt_tick = tick;
                     target.hurt_by = shooter_id;
                     target.hurt_count += 1;
@@ -560,7 +619,7 @@ pub fn resolve(
     outcome
 }
 
-/// Whether the report passes the checks, and the weapon it is of if it does.
+/// Whether the report passes the checks, and what it is of and deals if it does.
 #[allow(clippy::too_many_arguments)]
 fn judge<'a>(
     store: &impl Store,
@@ -571,8 +630,9 @@ fn judge<'a>(
     tick: u64,
     shooter_id: PlayerId,
     report: &HitReport,
-) -> Result<&'a Weapon, Reject> {
-    if !report.origin.iter().chain(&report.target_position).all(|v| v.is_finite()) {
+    blasts: &mut Vec<Blast>,
+) -> Result<Judged<'a>, Reject> {
+    if !report.origin.iter().chain(&report.target_position).chain([&report.scale]).all(|v| v.is_finite()) {
         return Err(Reject::NotFinite);
     }
     let (Some(shooter), Some(target)) = (game.contestant(shooter_id), game.contestant(report.target)) else {
@@ -591,13 +651,12 @@ fn judge<'a>(
     if shooter_id == report.target {
         return Err(Reject::SelfHit);
     }
-    let weapon = shooter_fighter
+    let source = shooter_fighter
         .loadout
-        .owns(report.weapon, tick)
-        .then(|| map.combat.weapon(report.weapon))
-        .flatten()
+        .owned(tick)
+        .filter_map(|w| map.combat.weapon(w))
+        .find_map(|w| source::find(w, report.damage))
         .ok_or(Reject::WeaponNotOwned)?;
-    let dealing = dealing(weapon).ok_or(Reject::WeaponNotOwned)?;
 
     let host_tick = u64::from(report.host_tick);
     if host_tick > tick {
@@ -607,31 +666,57 @@ fn judge<'a>(
         return Err(Reject::TooOld);
     }
 
-    let reach = map.movement.collision_height_standing + IMPACT_TOLERANCE;
+    let height = map.movement.collision_height_standing;
+    let mut reach = height + IMPACT_TOLERANCE;
+    if source.is_area() {
+        reach += source.damage.cutoff_radius;
+    } else if source.kind == Kind::Melee {
+        reach += MELEE_REACH;
+    }
     if distance_squared(report.origin, report.target_position) > reach * reach {
         return Err(Reject::ImpactNotAtTarget);
     }
 
-    // the rate of fire, paid for before the history is looked through
-    let mut record = combat.shooter(shooter_id);
-    let elapsed = tick.saturating_sub(record.hit_seconds_tick) as f32 / TICKS_PER_SECOND as f32;
-    record.hit_seconds = (record.hit_seconds + elapsed).min(BURST_SECONDS);
-    record.hit_seconds_tick = tick;
-    let cost = 1.0 / dealing.rate;
-    if record.hit_seconds < cost {
+    // the rate of fire, paid for before the history is looked through (an explosion's second hit is free)
+    // (it is free only the first time it hurts each target: a second hit of one blast on one player is a hit
+    // that was not made, and pays for itself)
+    let of_this_blast = |(s, d, at, _): &&Blast| {
+        *s == shooter_id && *d == report.damage && distance_squared(*at, report.origin) <= BLAST_MERGE * BLAST_MERGE
+    };
+    let same_blast = source.is_area()
+        && blasts.iter().any(|b| of_this_blast(&b))
+        && !blasts.iter().filter(of_this_blast).any(|(_, _, _, target)| *target == report.target);
+    if !same_blast {
+        let mut record = combat.shooter(shooter_id);
+        let elapsed = tick.saturating_sub(record.hit_seconds_tick) as f32 / TICKS_PER_SECOND as f32;
+        record.hit_seconds = (record.hit_seconds + elapsed).min(BURST_SECONDS);
+        record.hit_seconds_tick = tick;
+        let cost = 1.0 / (source::hit_rate(&source) * RATE_MARGIN);
+        if record.hit_seconds < cost {
+            combat.set_shooter(record);
+            return Err(Reject::TooFast);
+        }
+        record.hit_seconds -= cost;
         combat.set_shooter(record);
-        return Err(Reject::TooFast);
     }
-    record.hit_seconds -= cost;
-    combat.set_shooter(record);
 
     // how far back to look: as far as the report was made, and the flight of what was fired
     let back = (tick - host_tick + HISTORY_SLACK_TICKS).min(TRAIL_TICKS as u64 - 1);
     let to = tick.saturating_sub(1);
-    if let Some((range, flight)) = dealing.reach {
-        let from = tick.saturating_sub((back + flight).min(TRAIL_TICKS as u64 - 1));
-        if trails.near(shooter_id, report.origin, from, to, range + RANGE_TOLERANCE, RANGE_LEAD_TICKS) == Seen::Far {
+    let mut flown = None;
+    if let Some(Window { reach, tolerance }) = window_of(&source, map) {
+        let wanted = back + reach.flight_ticks;
+        let looked = wanted.min(TRAIL_TICKS as u64 - 1);
+        let from = tick.saturating_sub(looked);
+        // what the server cannot see of where the shooter was, they may have moved
+        let unseen = (wanted - looked) as f32 * (map.max_move_speed() / TICKS_PER_SECOND as f32);
+        if trails.near(shooter_id, report.origin, from, to, reach.range + tolerance + unseen, RANGE_LEAD_TICKS)
+            == Seen::Far
+        {
             return Err(Reject::OutOfReach);
+        }
+        if source.kind == Kind::Impact {
+            flown = trails.closest(shooter_id, report.origin, from, to).map(|d| (d - FLIGHT_SLACK - unseen).max(0.0));
         }
     }
     let from = tick.saturating_sub(back);
@@ -647,7 +732,20 @@ fn judge<'a>(
             }
         }
     }
-    Ok(weapon)
+
+    let bounds = ScaleBounds {
+        flown,
+        epicentre_to_target: distance(report.origin, report.target_position),
+        airborne: store.player(shooter_id).is_some_and(|p| p.flags & FLAG_AIRBORNE != 0),
+    };
+    let scale = source::limit(&source, report.scale, &bounds);
+    if source.is_area() && scale <= 0.0 {
+        // an explosion deals nothing to what it does not reach (the engine does not call it a hit)
+        return Err(Reject::ImpactNotAtTarget);
+    }
+    // (only a report that passed everything makes the blast one that later hits of it can ride on)
+    blasts.push((shooter_id, report.damage, report.origin, report.target));
+    Ok(Judged { source, scale })
 }
 
 #[cfg(test)]
@@ -655,7 +753,10 @@ mod tests {
     use alloc::vec;
 
     use super::*;
-    use crate::fixtures::{combat_fixture, flat_floor_map, PISTOL};
+    use crate::fixtures::{
+        combat_fixture, flat_floor_map, rocket_launcher, shotgun, PISTOL, PISTOL_DAMAGE, ROCKET_BLAST, ROCKET_MELEE,
+        SHOTGUN_DAMAGE, SHOTGUN_MELEE,
+    };
     use crate::rules::{self, MemoryGame, Rules};
     use crate::state::{MemoryStore, Player};
 
@@ -693,11 +794,67 @@ mod tests {
     }
 
     impl Fight {
+        /// The shooter carries the weapon as well as the pistol.
+        fn arm(&mut self, weapon: halo_map::combat::Weapon) {
+            let tag = weapon.tag_index;
+            self.map.combat.weapons.push(weapon);
+            let mut fighter = self.combat.fighter(SHOOTER).unwrap();
+            assert!(fighter.loadout.give(tag));
+            self.combat.set_fighter(fighter);
+        }
+
+        /// The report of a hit on the target of `damage`.
+        fn report_of(&self, damage: u16) -> HitReport {
+            HitReport { damage, ..self.report() }
+        }
+
+        /// Another player in the match, alive and where the server has seen them for a second, at `x` on the line.
+        fn add_player(&mut self, id: PlayerId, x: f32) {
+            self.store.set_player(Player::new(id, [x, 0.0, 0.0], 0.0, 0.0));
+            rules::enter_placed(&mut self.game, id, id as u8, [x, 0.0, 0.0], 0.0);
+            spawn(&mut self.combat, &mut self.trails, &self.map, id, 0);
+            for t in 1..=40 {
+                let mut seen: Vec<(PlayerId, [f32; 3])> =
+                    (0..=id).filter_map(|p| self.store.player(p).map(|pl| (p, pl.position))).collect();
+                seen.sort_by_key(|(p, _)| *p);
+                self.trails.record(t, seen);
+            }
+        }
+
+        /// Heal everyone: the targets stay alive to be shot at.
+        fn heal(&mut self) {
+            for id in 0..8 {
+                if let Some(mut t) = self.combat.fighter(id) {
+                    t.vitals = Vitals::full(&self.map.combat.resistance);
+                    self.combat.set_fighter(t);
+                }
+            }
+        }
+
+        /// A report of an explosion of `damage` at `at`, on the player `target` where they stand.
+        fn blast_on(&self, damage: u16, at: [f32; 3], target: PlayerId, scale: f32) -> HitReport {
+            let position = self.store.player(target).unwrap().position;
+            HitReport { target, damage, material: -1, scale, origin: at, target_position: position, ..self.report() }
+        }
+
+        /// The damage a hit dealt, as its event says.
+        fn dealt(outcome: &HitOutcome) -> Vec<f32> {
+            outcome
+                .events
+                .iter()
+                .filter_map(|e| match e {
+                    HitEvent::Hit { hurt, .. } => Some(hurt.shield_damage),
+                    _ => None,
+                })
+                .collect()
+        }
+
         fn report(&self) -> HitReport {
             HitReport {
                 target: TARGET,
-                weapon: PISTOL,
+                damage: PISTOL_DAMAGE,
                 material: 1,
+                scale: 1.0,
                 host_tick: (self.tick - 1) as u32,
                 origin: [self.map_gap(), 0.0, 0.3],
                 target_position: [self.map_gap(), 0.0, 0.0],
@@ -755,7 +912,7 @@ mod tests {
     fn a_report_of_a_weapon_the_shooter_does_not_own_is_rejected_and_counted() {
         let mut f = fight(5.0);
         let mut report = f.report();
-        report.weapon = 999;
+        report.damage = 999;
         let outcome = f.shoot(report);
         assert_eq!(Fight::reasons(&outcome), [Reject::WeaponNotOwned]);
         assert_eq!(f.combat.fighter(TARGET).unwrap().vitals.shield, 1.0, "no damage");
@@ -1016,5 +1173,208 @@ mod tests {
         assert_eq!(t.near(2, [0.0; 3], 95, 100, 100.0, 0.0), Seen::Unknown);
         // a moving player's speed widens the reach
         assert_eq!(t.near(1, [100.0 + 2.9, 0.0, 0.0], 100, 100, 0.0, 3.0), Seen::Near);
+    }
+
+    #[test]
+    fn every_pellet_of_a_shotgun_blast_is_a_hit_and_a_flood_of_them_is_refused() {
+        let mut f = fight(5.0);
+        f.arm(shotgun());
+        let pellet = f.report_of(SHOTGUN_DAMAGE);
+        // fifteen at once, as one shot makes them
+        let blast = [(SHOOTER, pellet); 15];
+        let outcome = resolve(&f.store, &f.game, &mut f.combat, &f.trails, &f.map, &mut f.rng, f.tick, &blast);
+        // (the target does not live to see the last of them: a pellet that is 18 to 25 of its 150 is a hit, and
+        // one on a body that is dead is refused as that, not as a pellet too many)
+        assert_eq!(outcome.events.len(), 15);
+        assert!(Fight::reasons(&outcome).iter().all(|r| *r == Reject::TargetNotAlive), "{outcome:?}");
+        let dealt = Fight::dealt(&outcome);
+        assert!(dealt.len() >= 6, "{outcome:?}");
+        // (a pellet at this range is a whole one: 18 to 25, a shield a hit takes as it is)
+        assert!(dealt[..3].iter().all(|d| (18.0..=25.0).contains(d)), "{dealt:?}");
+        // pellets for good, with the target kept alive: the bucket holds six shots of them
+        let mut f = fight(5.0);
+        f.arm(shotgun());
+        let mut accepted = 0;
+        for _ in 0..100 {
+            f.heal();
+            accepted += Fight::dealt(&f.shoot(pellet)).len();
+        }
+        // 3 seconds of fire at 15 pellets x 1 shot x 2 a second: 90 pellets (the last depends on how a float rounds)
+        assert!((89..=91).contains(&accepted), "{accepted}");
+    }
+
+    #[test]
+    fn a_pellet_that_has_flown_far_deals_the_minimum_whatever_the_client_says() {
+        let mut f = fight(30.0);
+        f.arm(shotgun());
+        let outcome = f.shoot(f.report_of(SHOTGUN_DAMAGE));
+        // the shooter is 30 units off: a pellet that has slowed all the way (past about 17) does the tag's minimum, 8
+        assert_eq!(Fight::dealt(&outcome), [8.0], "{outcome:?}");
+        // (at 5 units it does 18 to 25)
+        let mut near = fight(5.0);
+        near.arm(shotgun());
+        let outcome = near.shoot(near.report_of(SHOTGUN_DAMAGE));
+        assert!(Fight::dealt(&outcome)[0] >= 18.0);
+        // ... and a client that says less than it could is believed
+        let mut f = fight(5.0);
+        f.arm(shotgun());
+        let outcome = f.shoot(HitReport { scale: 0.0, ..f.report_of(SHOTGUN_DAMAGE) });
+        assert_eq!(Fight::dealt(&outcome), [8.0]);
+    }
+
+    #[test]
+    fn an_explosion_costs_its_shooter_once_however_many_it_hurts_and_hurts_those_it_reaches() {
+        let mut f = fight(5.0);
+        for (id, x) in [(3, 6.5), (4, 9.0)] {
+            f.add_player(id, x);
+        }
+        f.arm(rocket_launcher());
+        let at = [5.0, 0.0, 0.3];
+        // the target at the epicentre, one 1.5 away (a scale of (2 - 0.8) / 1.5) and one 4 away (not reached)
+        let reports = [
+            (SHOOTER, f.blast_on(ROCKET_BLAST, at, TARGET, 1.0)),
+            (SHOOTER, f.blast_on(ROCKET_BLAST, at, 3, 0.8)),
+            (SHOOTER, f.blast_on(ROCKET_BLAST, at, 4, 0.1)),
+        ];
+        let outcome = resolve(&f.store, &f.game, &mut f.combat, &f.trails, &f.map, &mut f.rng, f.tick, &reports);
+        let hurt = Fight::dealt(&outcome);
+        assert_eq!(hurt.len(), 2, "{outcome:?}");
+        assert_eq!(Fight::reasons(&outcome), [Reject::ImpactNotAtTarget], "the one that is 4 away is not reached");
+        // 80 to 330 at full scale: the one at the epicentre takes all 300 to 330 (a shield is 75, the rest goes on)
+        assert!(hurt[0] >= 75.0 - 1.0e-3, "{hurt:?}");
+        // the explosion drew one second from the bucket (a rocket every two seconds, at twice the margin)
+        let shooter = f.combat.shooter(SHOOTER);
+        assert!((shooter.hit_seconds - 2.0).abs() < 1.0e-5, "{shooter:?}");
+        // a second call is another tick's reports, and another explosion: two hits of one cost one
+        f.heal();
+        let more = [
+            (SHOOTER, f.blast_on(ROCKET_BLAST, at, TARGET, 1.0)),
+            (SHOOTER, f.blast_on(ROCKET_BLAST, [5.0, 0.0, 0.0], 3, 0.6)),
+        ];
+        resolve(&f.store, &f.game, &mut f.combat, &f.trails, &f.map, &mut f.rng, f.tick, &more);
+        assert!((f.combat.shooter(SHOOTER).hit_seconds - 1.0).abs() < 1.0e-5, "(the same blast, within a unit)");
+        // ... and a blast further than that from the first is a second explosion in the same call, and pays again
+        f.heal();
+        let elsewhere = [
+            (SHOOTER, f.blast_on(ROCKET_BLAST, at, TARGET, 1.0)),
+            (SHOOTER, f.blast_on(ROCKET_BLAST, [6.5, 0.0, 0.3], 3, 1.0)),
+        ];
+        resolve(&f.store, &f.game, &mut f.combat, &f.trails, &f.map, &mut f.rng, f.tick, &elsewhere);
+        assert!(f.combat.shooter(SHOOTER).hit_seconds.abs() < 1.0e-5, "{:?}", f.combat.shooter(SHOOTER));
+    }
+
+    #[test]
+    fn the_same_explosion_on_the_same_player_twice_is_two_hits_and_pays_twice() {
+        let mut f = fight(5.0);
+        f.arm(rocket_launcher());
+        // (a target that three rockets do not kill)
+        f.map.combat.resistance.maximum_body_vitality = 1.0e6;
+        let hit = (SHOOTER, f.blast_on(ROCKET_BLAST, [5.0, 0.0, 0.3], TARGET, 1.0));
+        resolve(&f.store, &f.game, &mut f.combat, &f.trails, &f.map, &mut f.rng, f.tick, &[hit, hit, hit]);
+        // one second for each of the three (a rocket every two seconds, at twice the margin): the bucket is empty
+        assert!(f.combat.shooter(SHOOTER).hit_seconds.abs() < 1.0e-5, "{:?}", f.combat.shooter(SHOOTER));
+    }
+
+    #[test]
+    fn explosions_come_no_faster_than_the_launcher_fires() {
+        let mut f = fight(5.0);
+        f.arm(rocket_launcher());
+        let mut accepted = 0;
+        for i in 0..10 {
+            f.heal();
+            // a rocket a call (each call is a tick's reports, whose blasts are counted by themselves)
+            let report = f.blast_on(ROCKET_BLAST, [5.0, 0.0, 0.3 + i as f32 * 0.01], TARGET, 1.0);
+            accepted += Fight::dealt(&f.shoot(report)).len();
+        }
+        // (the bucket holds 3 seconds and each blast takes one)
+        assert_eq!(accepted, 3, "a rocket every two seconds, at twice the margin: three of them in the burst");
+    }
+
+    #[test]
+    fn a_rocket_in_flight_for_a_long_time_is_not_out_of_reach_of_a_shooter_who_has_since_moved() {
+        // 128 units of range at 0.33 units a tick takes 13 seconds: the server remembers one
+        for (gap, accepted) in [(120.0, true), (140.0, true), (600.0, false)] {
+            let mut f = fight(gap);
+            f.arm(rocket_launcher());
+            let at = [gap, 0.0, 0.3];
+            let outcome = f.shoot(f.blast_on(ROCKET_BLAST, at, TARGET, 1.0));
+            if accepted {
+                assert_eq!(Fight::dealt(&outcome).len(), 1, "{gap}: {outcome:?}");
+            } else {
+                assert_eq!(Fight::reasons(&outcome), [Reject::OutOfReach], "{gap}");
+            }
+        }
+        // a bullet's reach is its range, and no more
+        let mut f = fight(60.0);
+        assert_eq!(Fight::reasons(&f.shoot(f.report())), [Reject::OutOfReach]);
+    }
+
+    #[test]
+    fn a_blast_of_a_weapon_that_the_shooter_does_not_carry_is_refused() {
+        let mut f = fight(5.0);
+        let outcome = f.shoot(f.blast_on(ROCKET_BLAST, [5.0, 0.0, 0.3], TARGET, 1.0));
+        assert_eq!(Fight::reasons(&outcome), [Reject::WeaponNotOwned]);
+        f.arm(rocket_launcher());
+        assert_eq!(Fight::dealt(&f.shoot(f.blast_on(ROCKET_BLAST, [5.0, 0.0, 0.3], TARGET, 1.0))).len(), 1);
+    }
+
+    #[test]
+    fn a_melee_blow_reaches_a_unit_ahead_of_the_shooter_and_no_further() {
+        let blow = |f: &Fight, scale: f32| HitReport {
+            damage: SHOTGUN_MELEE,
+            material: -1,
+            scale,
+            // the engine's origin of a blow is the shooter's head
+            origin: [0.0, 0.0, 0.6],
+            ..f.report()
+        };
+        let mut weapon = shotgun();
+        // (a blow of 55, whatever the roll: the scale shows)
+        let melee = weapon.melee_damage.as_mut().unwrap();
+        melee.lower = 55.0;
+        melee.upper = 55.0;
+        let mut f = fight(0.8);
+        f.arm(weapon.clone());
+        let outcome = f.shoot(blow(&f, 1.0));
+        assert_eq!(Fight::dealt(&outcome), [55.0], "{outcome:?}");
+        // a half-speed blow is (1 - 0.5) x 40 + 0.5 x 55
+        f.heal();
+        assert_eq!(Fight::dealt(&f.shoot(blow(&f, 0.5))), [47.5]);
+        // a client that says it struck harder than a player can on the ground is held to a scale of 1
+        f.heal();
+        let outcome = f.shoot(blow(&f, 9.0));
+        assert_eq!(Fight::dealt(&outcome), [55.0], "{outcome:?}");
+        // ... but one that is in the air may strike at 1.5
+        f.heal();
+        let mut shooter = f.store.player(SHOOTER).unwrap();
+        shooter.flags |= FLAG_AIRBORNE;
+        f.store.set_player(shooter);
+        let outcome = f.shoot(blow(&f, 9.0));
+        // (1 - 1.5) x 40 + 1.5 x 55
+        assert_eq!(Fight::dealt(&outcome), [62.5], "{outcome:?}");
+        // five units away is out of the shooter's reach
+        let mut far = fight(5.0);
+        far.arm(weapon);
+        assert_eq!(Fight::reasons(&far.shoot(blow(&far, 1.0))), [Reject::ImpactNotAtTarget]);
+        // and the blows of another weapon's are not the shooter's to strike
+        let mut other = fight(0.8);
+        other.arm(shotgun());
+        let rocket_blow = HitReport { damage: ROCKET_MELEE, ..blow(&other, 1.0) };
+        assert_eq!(Fight::reasons(&other.shoot(rocket_blow)), [Reject::WeaponNotOwned]);
+    }
+
+    #[test]
+    fn blows_come_no_faster_than_the_swing() {
+        let mut f = fight(0.8);
+        f.arm(shotgun());
+        let report =
+            HitReport { damage: SHOTGUN_MELEE, material: -1, scale: 1.0, origin: [0.0, 0.0, 0.6], ..f.report() };
+        let mut accepted = 0;
+        for _ in 0..20 {
+            f.heal();
+            accepted += Fight::dealt(&f.shoot(report)).len();
+        }
+        // the swing takes 36 frames less a quarter: 27 ticks, 1.11 a second; at twice that a blow costs 0.45 s of 3
+        assert!((6..=7).contains(&accepted), "{accepted}");
     }
 }
