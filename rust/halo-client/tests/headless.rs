@@ -477,6 +477,7 @@ fn the_local_player_is_moved_by_the_library_and_the_server_accepts_every_move() 
     let until = Instant::now() + Duration::from_secs(seconds as u64 + 40);
     let mut exit = None;
     let mut rejected_seen = 0;
+    let mut before = [0.0f32; 3];
     // (the reason and server tick of each rejection, and the first tick seen)
     let mut rejections: Vec<(u8, u64)> = Vec::new();
     while exit.is_none() && Instant::now() < until {
@@ -488,10 +489,13 @@ fn the_local_player_is_moved_by_the_library_and_the_server_accepts_every_move() 
                 rejected_seen = row.rejected_moves;
                 rejections.push((row.last_reject, row.last_reject_tick));
                 println!(
-                    "the game's player was rejected ({rejected_seen}): reason {} at tick {}",
-                    row.last_reject, row.last_reject_tick
+                    "the game's player was rejected ({rejected_seen}): reason {} at tick {}, held at ({:.3} {:.3} {:.3}) \
+                     flags {} air {} updated at tick {}, the move before it from ({:.3} {:.3} {:.3})",
+                    row.last_reject, row.last_reject_tick, row.x, row.y, row.z, row.flags, row.air_ticks,
+                    row.updated_tick, before[0], before[1], before[2]
                 );
             }
+            before = [row.x, row.y, row.z];
         }
         exit = game_process.0.try_wait().unwrap();
     }

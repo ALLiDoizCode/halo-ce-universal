@@ -146,7 +146,7 @@ impl Walkers {
             let Some(p) = self.mirror.player(id) else { continue };
             let mut body = self.bodies[i];
             let phase = self.ticks + 17 * i as u64;
-            let (jump, crouch) = if self.acrobatics { (phase % 50 < 2, (phase / 70) % 3 == 0) } else { (false, false) };
+            let (jump, crouch) = if self.acrobatics { (phase % 50 < 2, (phase / 70).is_multiple_of(3)) } else { (false, false) };
             walk(
                 &self.map,
                 &mut body,

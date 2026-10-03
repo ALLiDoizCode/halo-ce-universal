@@ -168,7 +168,7 @@ pub fn run(seed: u64, ticks: u32) -> Vec<u8> {
             }
             // (and a jump now and then, and the crouch held for stretches)
             controls.jump = tick % 40 == (i as u32 * 9 + 5) % 40 && walker_rng.next_u32().is_multiple_of(2);
-            controls.crouch = (tick / 60 + i as u32) % 3 == 0;
+            controls.crouch = (tick / 60 + i as u32).is_multiple_of(3);
             walk(&maps[i], body, controls);
             chain.bytes(&body_bytes(body));
         }

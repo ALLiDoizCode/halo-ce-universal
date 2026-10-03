@@ -1263,6 +1263,22 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
             let Event::MoveRejected { player, reason } = event else { continue };
             rejected += 1;
             if let Some(mut row) = ctx.db.player().id().find(player) {
+                // (for the operator's log: where the player is, where they said they were, and when they last moved)
+                if let Some(input) = inputs.iter().find(|i| i.player == player) {
+                    log::warn!(
+                        "rejected a move of player {player} ({reason:?}) at tick {}: from ({:.3} {:.3} {:.3}) to \
+                         ({:.3} {:.3} {:.3}), last moved at tick {}, {} ticks in the air",
+                        marker.tick,
+                        row.x,
+                        row.y,
+                        row.z,
+                        input.position[0],
+                        input.position[1],
+                        input.position[2],
+                        row.updated_tick,
+                        row.air_ticks
+                    );
+                }
                 row.rejected_moves += 1;
                 row.last_reject = reject_code(reason);
                 row.last_reject_tick = marker.tick;
