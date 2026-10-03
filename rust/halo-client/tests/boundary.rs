@@ -18,7 +18,6 @@ use halo_gateway::harness::{sim_public_key, Crowd, Impairment, Rig, RigSetup, Tr
 use halo_match_driver::server::{build_module, stdb_bin_dir};
 use halo_sim::fixtures::flat_floor_map;
 use halo_sim::PlayerInput;
-use halo_wire::unit::Bounds;
 
 fn serial() -> MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
@@ -152,23 +151,28 @@ fn the_players_the_library_is_sent_are_the_servers_to_within_the_packing() {
     let (last_tick, _) = frame();
     assert!(last_tick > 60, "the library was sent {last_tick} ticks");
 
-    let bounds = Bounds::from_world(flat_floor_map().world_bounds);
-    let mut checked = 0;
+    // The positions the library hands the game are where it draws each player by now (their state carried
+    // forward by its velocity, see `halo_client::remote`), not the state's own: so they are compared with
+    // where the server has the player at the newest tick the library has heard of, which the extrapolation
+    // aims at, to within what a player who turns or stops in the meantime allows.
+    let mut errors = Vec::new();
     let mut distinct = std::collections::BTreeSet::new();
-    for (_, units) in &seen {
-        for (player, tick, state) in units {
-            let Some(at) = truth.ticks.get(tick) else { continue };
+    for (newest, units) in &seen {
+        for (player, _tick, state) in units {
+            let Some(at) = truth.ticks.get(newest) else { continue };
             let want = at.positions[*player as usize].expect("a state of a player the server has");
             assert_ne!(*player, ME as u32, "the library was sent its own player");
-            for axis in 0..3 {
-                let step = (bounds.max[axis] - bounds.min[axis]) / 65535.0;
-                assert!((state[axis] - want[axis]).abs() <= step, "tick {tick}, player {player}, axis {axis}");
-            }
+            let off = (0..3).map(|a| (state[a] - want[a]).powi(2)).sum::<f32>().sqrt();
+            errors.push(off);
             distinct.insert(*player);
-            checked += 1;
         }
     }
+    let checked = errors.len();
+    errors.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = errors[errors.len() / 2];
     assert!(checked > 1000, "only {checked} states checked");
+    assert!(median < 0.1, "the drawn players are {median} from the server's, as a median");
+    assert!(*errors.last().unwrap() < 3.0, "a player drawn {} from the server's", errors.last().unwrap());
     assert_eq!(distinct.len(), OTHERS as usize, "every other player was heard of");
 }
 

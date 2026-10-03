@@ -39,7 +39,7 @@ use halo_sim::combat::{Fighter, HitReport, Loadout};
 use halo_sim::damage::Vitals;
 use halo_sim::items::{Ammo, Item, Kit};
 use halo_sim::wire::encode_hits;
-use halo_sim::PlayerInput;
+use halo_sim::{MapData, PlayerInput};
 use halo_wire::auth::{self, CHALLENGE_LIFETIME_US, SEED_SIZE};
 use halo_wire::datagram::{
     seq_newer, Ack, Challenge, ClientMessage, ServerMessage, Welcome, MAX_DATAGRAM, REFUSED_BAD_PROOF, REFUSED_NO_SEAT,
@@ -49,6 +49,8 @@ use halo_wire::unit::{Bounds, UnitState};
 use spacetimedb_sdk::{Compression, DbContext, Table, TableWithPrimaryKey};
 
 use crate::identity::{is_rejected_token, IdentityFile};
+use crate::local::MapHandle;
+use crate::remote::{self, Track};
 
 /// How often the join step is repeated until it gets its answer.
 const JOIN_INTERVAL: Duration = Duration::from_millis(200);
@@ -129,6 +131,24 @@ pub struct RemoteUnit {
     pub state: UnitState,
     /// The tick of the datagram that carried it.
     pub tick: u32,
+}
+
+/// A player in range as the game draws them: the held state, and where the
+/// player is drawn by now (see [`crate::remote`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DrawnUnit {
+    /// The newest state the gateway sent: what the facing, the flags and the player are.
+    pub state: UnitState,
+    /// The tick of the datagram that carried it: the state's age is the frame's tick less this.
+    pub tick: u32,
+    /// Where the player is drawn, world units: the state's position carried forward to now.
+    pub position: [f32; 3],
+    /// The velocity to hand the engine, world units a second: the state's, or zero for a player
+    /// the extrapolation has given up on.
+    pub velocity: [f32; 3],
+    /// How far the position the player was drawn at was from where the held state's extrapolation
+    /// put them, when that state arrived (0 for a player's first): what a late update cost.
+    pub arrival_error: f32,
 }
 
 /// Who a player is, from the match's roster.
@@ -241,7 +261,7 @@ impl GameInfo {
 pub struct Frame {
     /// The newest tick any datagram has carried; 0 before the first.
     pub tick: u32,
-    pub units: Vec<RemoteUnit>,
+    pub units: Vec<DrawnUnit>,
 }
 
 /// What comes over the direct SpacetimeDB connection.
@@ -285,6 +305,10 @@ struct Shared {
     /// The gateway's challenge to answer, and when it came.
     challenge: Option<(Challenge, Instant)>,
     units: BTreeMap<u16, RemoteUnit>,
+    /// What each held state's arrival left to fade (see [`crate::remote`]).
+    tracks: BTreeMap<u16, Track>,
+    /// When `newest_tick` came: the ticks since are the time the extrapolation runs on.
+    newest_at: Option<Instant>,
     /// Everyone in the match, from the direct connection.
     roster: BTreeMap<u16, Member>,
     /// How each of them is doing (score, alive, when they spawn), likewise.
@@ -334,6 +358,9 @@ struct Inner {
     /// The SpacetimeDB connection, for the thread that stops the session to
     /// leave and close.
     connection: Mutex<Option<DbConnection>>,
+    /// The player's own copy of the map, once it is being read: the ground the players who are in
+    /// the air are drawn down to.
+    ground: Mutex<Option<MapHandle>>,
 }
 
 impl Inner {
@@ -396,6 +423,7 @@ impl Session {
             seq: AtomicU32::new(1),
             stop: AtomicBool::new(false),
             connection: Mutex::new(None),
+            ground: Mutex::new(None),
         });
         let network = {
             let inner = inner.clone();
@@ -461,9 +489,26 @@ impl Session {
         self.inner.identity.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
-    /// The newest state of every other player in range.
+    /// Where to find the ground for the players in the air: the map the local player moves on, which
+    /// the game loads on a thread of its own (until it is in, they are drawn for a few ticks only).
+    pub fn use_map(&self, map: MapHandle) {
+        *self.inner.ground.lock().unwrap_or_else(|p| p.into_inner()) = Some(map);
+    }
+
+    fn ground(&self) -> Option<MapHandle> {
+        self.inner.ground.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// Every other player in range, with where each is drawn now.
     pub fn frame(&self) -> Frame {
-        frame_of(&self.inner.shared())
+        self.frame_at(Instant::now())
+    }
+
+    /// [`Session::frame`] at a time of the caller's.
+    pub fn frame_at(&self, at: Instant) -> Frame {
+        let ground = self.ground();
+        let map = ground.as_ref().and_then(|g| g.get()).and_then(|r| r.as_ref().ok());
+        frame_with(&self.inner.shared(), at, map)
     }
 
     /// Who a player is, if the roster has them.
@@ -638,8 +683,58 @@ fn scoreboard_of(shared: &Shared) -> Vec<(u16, Standing, Member)> {
         .collect()
 }
 
-/// The players in range as of `shared`.
+/// The players in range as of `shared`, with no map to draw the ones in the air down to.
+#[cfg(test)]
 fn frame_of(shared: &Shared) -> Frame {
+    frame_with(shared, Instant::now(), None)
+}
+
+/// How old a state of tick `tick` is at `at`, in ticks: the ticks behind the newest, and the time
+/// since the newest came.
+fn age_of(shared: &Shared, tick: u32, at: Instant) -> f32 {
+    let behind = shared.newest_tick.wrapping_sub(tick) as i32 as f32;
+    let since = shared.newest_at.map_or(0.0, |newest| ticks_between(newest, at));
+    behind + since
+}
+
+fn ticks_between(from: Instant, to: Instant) -> f32 {
+    to.saturating_duration_since(from).as_secs_f32() * halo_sim::TICKS_PER_SECOND as f32
+}
+
+/// Where a player is drawn at `at`.
+fn draw(shared: &Shared, unit: &RemoteUnit, at: Instant, map: Option<&MapData>) -> remote::Drawn {
+    let age = age_of(shared, unit.tick, at);
+    let late = shared.tracks.get(&unit.state.player).map(|t| (t, ticks_between(t.arrived, at)));
+    remote::drawn(unit, age, late, map)
+}
+
+/// A state of a player the gateway has sent has come, at `at`, in the datagram of tick `tick` (the
+/// newest tick, `shared.newest_tick`, already says so if it is newer than the ones before). What
+/// the player was drawn at against where the new state puts them is kept to fade; for a first
+/// state, or one of a player who was out of range, the player is drawn where it says.
+fn take_state(shared: &mut Shared, state: UnitState, tick: u32, at: Instant, map: Option<&MapData>) {
+    let player = state.player;
+    let known = shared.units.get(&player).copied();
+    if known.is_some_and(|k| !seq_newer(tick, k.tick)) {
+        return;
+    }
+    let new = RemoteUnit { state, tick };
+    let mut track = Track { offset: [0.0; 3], error: 0.0, step: remote::correction_step(state.velocity), arrived: at };
+    let in_range = |unit: &RemoteUnit| age_of(shared, unit.tick, at) <= OUT_OF_RANGE_TICKS as f32;
+    if let Some(old) = known.filter(in_range) {
+        let was = draw(shared, &old, at, map).position;
+        let should = remote::drawn(&new, age_of(shared, tick, at), None, map).position;
+        track.error = remote::length([was[0] - should[0], was[1] - should[1], was[2] - should[2]]);
+        if let Some(offset) = remote::late_offset(was, should) {
+            track.offset = offset;
+        }
+    }
+    shared.tracks.insert(player, track);
+    shared.units.insert(player, new);
+}
+
+/// The players in range as of `shared`, and where each is drawn at `at`.
+fn frame_with(shared: &Shared, at: Instant, map: Option<&MapData>) -> Frame {
     let newest = shared.newest_tick;
     let in_range = |unit: &&RemoteUnit| {
         let in_the_world = shared.standings.get(&unit.state.player).is_none_or(|s| {
@@ -650,7 +745,22 @@ fn frame_of(shared: &Shared) -> Frame {
             && in_the_world
             && (newest.wrapping_sub(unit.tick) as i32) <= OUT_OF_RANGE_TICKS as i32
     };
-    Frame { tick: newest, units: shared.units.values().filter(in_range).copied().collect() }
+    let units = shared
+        .units
+        .values()
+        .filter(in_range)
+        .map(|unit| {
+            let drawn = draw(shared, unit, at, map);
+            DrawnUnit {
+                state: unit.state,
+                tick: unit.tick,
+                position: drawn.position,
+                velocity: drawn.velocity,
+                arrival_error: shared.tracks.get(&unit.state.player).map_or(0.0, |t| t.error),
+            }
+        })
+        .collect();
+    Frame { tick: newest, units }
 }
 
 /// What a player sends to be let in, given what has come: Hello, and once the
@@ -787,18 +897,19 @@ fn handle(inner: &Inner, datagram: &[u8], last_join: &mut Instant) {
             let Some(welcome) = shared.welcome else { return };
             shared.last_snapshot = Some(Instant::now());
             shared.ack.record(snapshot.seq);
+            let at = Instant::now();
             if shared.newest_tick == 0 || seq_newer(snapshot.tick, shared.newest_tick) {
                 shared.newest_tick = snapshot.tick;
+                shared.newest_at = Some(at);
             }
+            let ground = inner.ground.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            let map = ground.as_ref().and_then(|g| g.get()).and_then(|r| r.as_ref().ok());
             for packed in &snapshot.states {
                 let state = packed.unpack(&welcome.bounds);
                 if state.player == player {
                     continue;
                 }
-                let newer = shared.units.get(&state.player).is_none_or(|known| seq_newer(snapshot.tick, known.tick));
-                if newer {
-                    shared.units.insert(state.player, RemoteUnit { state, tick: snapshot.tick });
-                }
+                take_state(&mut shared, state, snapshot.tick, at, map);
             }
         }
         Some(_) => {}
@@ -1258,3 +1369,7 @@ mod tests {
         assert!(!auth::verify_challenge(&auth::public_key(&[1; SEED_SIZE]), 7, 1234, &cookie, &signature));
     }
 }
+
+#[cfg(test)]
+#[path = "remote_tests.rs"]
+mod remote_tests;

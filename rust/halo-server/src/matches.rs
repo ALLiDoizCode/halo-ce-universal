@@ -93,6 +93,10 @@ pub struct Report {
     /// Hit reports the server refused in the window, and since the match began.
     pub rejected_hits: u64,
     pub rejected_hits_total: u64,
+    /// Hit reports accepted since the match began, and those of the refused that the server judged
+    /// to be of a target nowhere near where the shooter says they saw it (`Reject::TargetNotWhereSeen`).
+    pub hits_total: u64,
+    pub not_where_seen_total: u64,
     pub inputs_late: u64,
     pub inputs_unbound: u64,
     pub ticks_missed: u64,
@@ -220,6 +224,8 @@ impl RunningMatch {
             rejected_total,
             rejected_hits: rejected_hits_total.saturating_sub(self.window.rejected_hits_total),
             rejected_hits_total,
+            hits_total: marker.as_ref().map_or(0, |m| m.hits_total),
+            not_where_seen_total: marker.as_ref().map_or(0, |m| m.rejected_not_where_seen_total),
             ..Report::default()
         };
         let delta = metrics.since(&self.window.metrics);

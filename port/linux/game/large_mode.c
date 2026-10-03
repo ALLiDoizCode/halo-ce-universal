@@ -156,6 +156,7 @@ void halo_large_stop(void);
 unsigned long halo_large_status(unsigned long *out);
 unsigned long halo_large_frame(unsigned long *tick);
 unsigned long halo_large_unit(unsigned long index, unsigned long *player, unsigned long *tick, float *out);
+unsigned long halo_large_unit_error(unsigned long index, float *error);
 unsigned long halo_large_member(unsigned long player, unsigned long *team, char *name, unsigned long size);
 unsigned long halo_large_local(float *out);
 unsigned long halo_large_life(unsigned long *info, float *position);
@@ -1138,6 +1139,16 @@ static void large_mode_update_remotes_work(
 		if (!large_remote_data.remotes[player].present && !large_mode_create_remote(player, tick, state))
 			continue;
 		seen[player] = TRUE;
+		if (large.log_players && large_remote_data.remotes[player].tick != tick)
+		{
+			/* a new state of the player has come: how far the drawn position was from where the state
+			puts them (the library draws them by extrapolating), at its position (the check's bands) */
+			float error;
+
+			if (halo_large_unit_error(index, &error))
+				platform_log("large mode: drawn error player %lu tick %lu %.4f (%.4f %.4f %.4f)", player, tick, error,
+					state[0], state[1], state[2]);
+		}
 		large_remote_data.remotes[player].tick = tick;
 		memcpy(large_remote_data.remotes[player].state, state, sizeof(large_remote_data.remotes[player].state));
 	}

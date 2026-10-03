@@ -10,6 +10,13 @@ bands by their distance from the game's own player.
 
 Prints, for each band: how many player-seconds, the age's median, p99 and
 largest, and the share of them older than 4 ticks (133 ms).
+
+The game also logs, each time a new state of a player arrives, the drawn error:
+the distance in world units between where the player was drawn and where that
+state's extrapolation puts them (#50: the client draws remote players where
+their last state would have taken them by now). Those are reported next, by
+the same bands (the player's distance from the game's own player), as the
+median, p99 and largest drawn error and how many states there were.
 """
 import math
 import re
@@ -17,6 +24,10 @@ import sys
 
 GATEWAY = re.compile(r"large mode: tick \d+ joined .*gateway tick (?P<tick>\d+),")
 PLAYER = re.compile(r"large mode: player (?P<id>\d+) tick (?P<tick>\d+) \((?P<x>-?[\d.]+) (?P<y>-?[\d.]+) (?P<z>-?[\d.]+)\)")
+ERROR = re.compile(
+    r"large mode: drawn error player (?P<id>\d+) tick (?P<tick>\d+) (?P<error>[\d.]+) "
+    r"\((?P<x>-?[\d.]+) (?P<y>-?[\d.]+) (?P<z>-?[\d.]+)\)"
+)
 LOCAL = re.compile(r"large mode: local unit \((?P<x>-?[\d.]+) (?P<y>-?[\d.]+) (?P<z>-?[\d.]+)\)")
 BANDS = [(0, 10), (10, 25), (25, 60), (60, 1e9)]
 
@@ -31,9 +42,13 @@ def main():
     seconds = []  # (gateway tick, local position, [(distance, age)])
     local = None
     current = None
+    errors = []  # (seconds logged so far, distance from the game's own player, drawn error)
     for text in open(sys.argv[1], errors="replace"):
         if m := LOCAL.search(text):
             local = (float(m["x"]), float(m["y"]), float(m["z"]))
+        elif (m := ERROR.search(text)) and local is not None:
+            at = (float(m["x"]), float(m["y"]), float(m["z"]))
+            errors.append((len(seconds), math.dist(at, local), float(m["error"])))
         elif m := GATEWAY.search(text):
             current = (int(m["tick"]), local, [])
             seconds.append(current)
@@ -55,6 +70,20 @@ def main():
         print(
             f"  {label} wu  {len(ages):>7} player-seconds   age in ticks: median {pct(ages, .5):>3}  p99 {pct(ages, .99):>3}  "
             f"largest {max(ages):>3}   older than 4 ticks: {older:.2f}%"
+        )
+    errors = [(d, e) for n, d, e in errors if n > skip]
+    if not errors:
+        print("no drawn error lines (a game before the drawn position was extrapolated, or no GAME_LOG)")
+        return
+    print(f"drawn error at the arrival of a state, {len(errors)} states (world units; a player is 0.2 in radius)")
+    for lo, hi in BANDS:
+        band = [e for d, e in errors if lo <= d < hi]
+        if not band:
+            continue
+        label = f"{lo:>3} to {hi:<4.0f}" if hi < 1e8 else f"{lo:>3} to ... "
+        print(
+            f"  {label} wu  {len(band):>7} states   drawn error: median {pct(band, .5):.3f}  p99 {pct(band, .99):.3f}  "
+            f"largest {max(band):.3f}"
         )
 
 
