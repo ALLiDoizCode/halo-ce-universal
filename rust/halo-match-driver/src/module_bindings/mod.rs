@@ -16,7 +16,11 @@ pub mod game_state_row_type;
 pub mod game_state_table;
 pub mod hit_report_row_type;
 pub mod input_batch_type;
+pub mod item_row_type;
+pub mod item_table;
 pub mod join_reducer;
+pub mod kit_row_type;
+pub mod kit_table;
 pub mod leave_reducer;
 pub mod load_map_reducer;
 pub mod map_blob_type;
@@ -30,7 +34,10 @@ pub mod member_name_type;
 pub mod pending_death_type;
 pub mod player_row_type;
 pub mod player_table;
+pub mod powerup_row_type;
+pub mod powerup_table;
 pub mod remove_players_reducer;
+pub mod report_ammo_reducer;
 pub mod report_death_reducer;
 pub mod report_hits_reducer;
 pub mod reset_reducer;
@@ -54,6 +61,8 @@ pub mod start_reducer;
 pub mod stop_reducer;
 pub mod submit_inputs_reducer;
 pub mod tick_timer_type;
+pub mod use_item_reducer;
+pub mod use_request_type;
 
 pub use add_players_reducer::add_players;
 pub use ban_type::Ban;
@@ -65,7 +74,11 @@ pub use game_state_row_type::GameStateRow;
 pub use game_state_table::*;
 pub use hit_report_row_type::HitReportRow;
 pub use input_batch_type::InputBatch;
+pub use item_row_type::ItemRow;
+pub use item_table::*;
 pub use join_reducer::join;
+pub use kit_row_type::KitRow;
+pub use kit_table::*;
 pub use leave_reducer::leave;
 pub use load_map_reducer::load_map;
 pub use map_blob_type::MapBlob;
@@ -79,7 +92,10 @@ pub use member_name_type::MemberName;
 pub use pending_death_type::PendingDeath;
 pub use player_row_type::PlayerRow;
 pub use player_table::*;
+pub use powerup_row_type::PowerupRow;
+pub use powerup_table::*;
 pub use remove_players_reducer::remove_players;
+pub use report_ammo_reducer::report_ammo;
 pub use report_death_reducer::report_death;
 pub use report_hits_reducer::report_hits;
 pub use reset_reducer::reset;
@@ -103,6 +119,8 @@ pub use start_reducer::start;
 pub use stop_reducer::stop;
 pub use submit_inputs_reducer::submit_inputs;
 pub use tick_timer_type::TickTimer;
+pub use use_item_reducer::use_item;
+pub use use_request_type::UseRequest;
 
 #[derive(Clone, PartialEq, Debug)]
 
@@ -128,6 +146,9 @@ pub enum Reducer {
     },
     RemovePlayers {
         ids: Vec<u16>,
+    },
+    ReportAmmo {
+        rounds: Vec<u8>,
     },
     ReportDeath {
         victim: u16,
@@ -176,6 +197,9 @@ pub enum Reducer {
     SubmitInputs {
         batch: Vec<u8>,
     },
+    UseItem {
+        slot: u8,
+    },
 }
 
 impl __sdk::InModule for Reducer {
@@ -192,6 +216,7 @@ impl __sdk::Reducer for Reducer {
             Reducer::Leave => "leave",
             Reducer::LoadMap { .. } => "load_map",
             Reducer::RemovePlayers { .. } => "remove_players",
+            Reducer::ReportAmmo { .. } => "report_ammo",
             Reducer::ReportDeath { .. } => "report_death",
             Reducer::ReportHits { .. } => "report_hits",
             Reducer::Reset => "reset",
@@ -206,6 +231,7 @@ impl __sdk::Reducer for Reducer {
             Reducer::Start => "start",
             Reducer::Stop => "stop",
             Reducer::SubmitInputs { .. } => "submit_inputs",
+            Reducer::UseItem { .. } => "use_item",
             _ => unreachable!(),
         }
     }
@@ -224,6 +250,9 @@ impl __sdk::Reducer for Reducer {
             Reducer::LoadMap { data } => __sats::bsatn::to_vec(&load_map_reducer::LoadMapArgs { data: data.clone() }),
             Reducer::RemovePlayers { ids } => {
                 __sats::bsatn::to_vec(&remove_players_reducer::RemovePlayersArgs { ids: ids.clone() })
+            }
+            Reducer::ReportAmmo { rounds } => {
+                __sats::bsatn::to_vec(&report_ammo_reducer::ReportAmmoArgs { rounds: rounds.clone() })
             }
             Reducer::ReportDeath { victim, killer } => __sats::bsatn::to_vec(&report_death_reducer::ReportDeathArgs {
                 victim: victim.clone(),
@@ -281,6 +310,7 @@ impl __sdk::Reducer for Reducer {
             Reducer::SubmitInputs { batch } => {
                 __sats::bsatn::to_vec(&submit_inputs_reducer::SubmitInputsArgs { batch: batch.clone() })
             }
+            Reducer::UseItem { slot } => __sats::bsatn::to_vec(&use_item_reducer::UseItemArgs { slot: slot.clone() }),
             _ => unreachable!(),
         }
     }
@@ -292,9 +322,12 @@ impl __sdk::Reducer for Reducer {
 pub struct DbUpdate {
     fighter: __sdk::TableUpdate<FighterRow>,
     game_state: __sdk::TableUpdate<GameStateRow>,
+    item: __sdk::TableUpdate<ItemRow>,
+    kit: __sdk::TableUpdate<KitRow>,
     map_info: __sdk::TableUpdate<MapInfo>,
     match_tick: __sdk::TableUpdate<MatchTick>,
     player: __sdk::TableUpdate<PlayerRow>,
+    powerup: __sdk::TableUpdate<PowerupRow>,
     roster: __sdk::TableUpdate<RosterRow>,
     seat: __sdk::TableUpdate<Seat>,
     standing: __sdk::TableUpdate<StandingRow>,
@@ -308,9 +341,12 @@ impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
             match &table_update.table_name[..] {
                 "fighter" => db_update.fighter.append(fighter_table::parse_table_update(table_update)?),
                 "game_state" => db_update.game_state.append(game_state_table::parse_table_update(table_update)?),
+                "item" => db_update.item.append(item_table::parse_table_update(table_update)?),
+                "kit" => db_update.kit.append(kit_table::parse_table_update(table_update)?),
                 "map_info" => db_update.map_info.append(map_info_table::parse_table_update(table_update)?),
                 "match_tick" => db_update.match_tick.append(match_tick_table::parse_table_update(table_update)?),
                 "player" => db_update.player.append(player_table::parse_table_update(table_update)?),
+                "powerup" => db_update.powerup.append(powerup_table::parse_table_update(table_update)?),
                 "roster" => db_update.roster.append(roster_table::parse_table_update(table_update)?),
                 "seat" => db_update.seat.append(seat_table::parse_table_update(table_update)?),
                 "standing" => db_update.standing.append(standing_table::parse_table_update(table_update)?),
@@ -336,11 +372,15 @@ impl __sdk::DbUpdate for DbUpdate {
             cache.apply_diff_to_table::<FighterRow>("fighter", &self.fighter).with_updates_by_pk(|row| &row.player);
         diff.game_state =
             cache.apply_diff_to_table::<GameStateRow>("game_state", &self.game_state).with_updates_by_pk(|row| &row.id);
+        diff.item = cache.apply_diff_to_table::<ItemRow>("item", &self.item).with_updates_by_pk(|row| &row.id);
+        diff.kit = cache.apply_diff_to_table::<KitRow>("kit", &self.kit).with_updates_by_pk(|row| &row.player);
         diff.map_info =
             cache.apply_diff_to_table::<MapInfo>("map_info", &self.map_info).with_updates_by_pk(|row| &row.id);
         diff.match_tick =
             cache.apply_diff_to_table::<MatchTick>("match_tick", &self.match_tick).with_updates_by_pk(|row| &row.id);
         diff.player = cache.apply_diff_to_table::<PlayerRow>("player", &self.player).with_updates_by_pk(|row| &row.id);
+        diff.powerup =
+            cache.apply_diff_to_table::<PowerupRow>("powerup", &self.powerup).with_updates_by_pk(|row| &row.player);
         diff.roster =
             cache.apply_diff_to_table::<RosterRow>("roster", &self.roster).with_updates_by_pk(|row| &row.player);
         diff.seat = cache.apply_diff_to_table::<Seat>("seat", &self.seat).with_updates_by_pk(|row| &row.player);
@@ -355,9 +395,12 @@ impl __sdk::DbUpdate for DbUpdate {
             match &table_rows.table[..] {
                 "fighter" => db_update.fighter.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "game_state" => db_update.game_state.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "item" => db_update.item.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "kit" => db_update.kit.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "map_info" => db_update.map_info.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "match_tick" => db_update.match_tick.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "player" => db_update.player.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "powerup" => db_update.powerup.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "roster" => db_update.roster.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "seat" => db_update.seat.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "standing" => db_update.standing.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
@@ -374,9 +417,12 @@ impl __sdk::DbUpdate for DbUpdate {
             match &table_rows.table[..] {
                 "fighter" => db_update.fighter.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "game_state" => db_update.game_state.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "item" => db_update.item.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "kit" => db_update.kit.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "map_info" => db_update.map_info.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "match_tick" => db_update.match_tick.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "player" => db_update.player.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "powerup" => db_update.powerup.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "roster" => db_update.roster.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "seat" => db_update.seat.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "standing" => db_update.standing.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
@@ -395,9 +441,12 @@ impl __sdk::DbUpdate for DbUpdate {
 pub struct AppliedDiff<'r> {
     fighter: __sdk::TableAppliedDiff<'r, FighterRow>,
     game_state: __sdk::TableAppliedDiff<'r, GameStateRow>,
+    item: __sdk::TableAppliedDiff<'r, ItemRow>,
+    kit: __sdk::TableAppliedDiff<'r, KitRow>,
     map_info: __sdk::TableAppliedDiff<'r, MapInfo>,
     match_tick: __sdk::TableAppliedDiff<'r, MatchTick>,
     player: __sdk::TableAppliedDiff<'r, PlayerRow>,
+    powerup: __sdk::TableAppliedDiff<'r, PowerupRow>,
     roster: __sdk::TableAppliedDiff<'r, RosterRow>,
     seat: __sdk::TableAppliedDiff<'r, Seat>,
     standing: __sdk::TableAppliedDiff<'r, StandingRow>,
@@ -412,9 +461,12 @@ impl<'r> __sdk::AppliedDiff<'r> for AppliedDiff<'r> {
     fn invoke_row_callbacks(&self, event: &EventContext, callbacks: &mut __sdk::DbCallbacks<RemoteModule>) {
         callbacks.invoke_table_row_callbacks::<FighterRow>("fighter", &self.fighter, event);
         callbacks.invoke_table_row_callbacks::<GameStateRow>("game_state", &self.game_state, event);
+        callbacks.invoke_table_row_callbacks::<ItemRow>("item", &self.item, event);
+        callbacks.invoke_table_row_callbacks::<KitRow>("kit", &self.kit, event);
         callbacks.invoke_table_row_callbacks::<MapInfo>("map_info", &self.map_info, event);
         callbacks.invoke_table_row_callbacks::<MatchTick>("match_tick", &self.match_tick, event);
         callbacks.invoke_table_row_callbacks::<PlayerRow>("player", &self.player, event);
+        callbacks.invoke_table_row_callbacks::<PowerupRow>("powerup", &self.powerup, event);
         callbacks.invoke_table_row_callbacks::<RosterRow>("roster", &self.roster, event);
         callbacks.invoke_table_row_callbacks::<Seat>("seat", &self.seat, event);
         callbacks.invoke_table_row_callbacks::<StandingRow>("standing", &self.standing, event);
@@ -1074,13 +1126,27 @@ impl __sdk::SpacetimeModule for RemoteModule {
     fn register_tables(client_cache: &mut __sdk::ClientCache<Self>) {
         fighter_table::register_table(client_cache);
         game_state_table::register_table(client_cache);
+        item_table::register_table(client_cache);
+        kit_table::register_table(client_cache);
         map_info_table::register_table(client_cache);
         match_tick_table::register_table(client_cache);
         player_table::register_table(client_cache);
+        powerup_table::register_table(client_cache);
         roster_table::register_table(client_cache);
         seat_table::register_table(client_cache);
         standing_table::register_table(client_cache);
     }
-    const ALL_TABLE_NAMES: &'static [&'static str] =
-        &["fighter", "game_state", "map_info", "match_tick", "player", "roster", "seat", "standing"];
+    const ALL_TABLE_NAMES: &'static [&'static str] = &[
+        "fighter",
+        "game_state",
+        "item",
+        "kit",
+        "map_info",
+        "match_tick",
+        "player",
+        "powerup",
+        "roster",
+        "seat",
+        "standing",
+    ];
 }

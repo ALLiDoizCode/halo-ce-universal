@@ -3434,8 +3434,9 @@ static void game_engine_update_purge(
 	long cutoff_time = game_time_get() - 900;
 
 	/* (a client of the distributed netcode removes items when the host does,
-	port/linux/game/network_distributed.c) */
-	if (!network_game_distributed_client())
+	port/linux/game/network_distributed.c; in the large-scale mode the server
+	owns the items: port/linux/game/large_mode.c) */
+	if (!network_game_distributed_client() && !large_mode_active())
 	{
 		struct object_iterator item_iterator;
 
@@ -8081,8 +8082,9 @@ static void game_engine_update_item_spawn(
 	short equipment_index;
 
 	/* a client of the distributed netcode has the host's items
-	(port/linux/game/network_distributed.c) */
-	if (network_game_distributed_client())
+	(port/linux/game/network_distributed.c), and in the large-scale mode the
+	server makes them at the placements (port/linux/game/large_mode.c) */
+	if (network_game_distributed_client() || large_mode_active())
 		return;
 
 	for (equipment_index = 0;

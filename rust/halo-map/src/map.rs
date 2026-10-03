@@ -15,6 +15,7 @@ use crate::combat::{
     MATERIAL_TYPES,
 };
 use crate::error::{malformed, MapError, Result};
+use crate::items::{ItemDef, Items, Placement, Reach};
 use crate::movement::Movement;
 use crate::reader::{Raw, Space};
 
@@ -204,6 +205,19 @@ const RM_SHIELD_LEAK_FRACTION: usize = 0x28;
 const RM_SHIELD_DAMAGE_MULTIPLIER: usize = 0x2C;
 const RM_BODY_DAMAGE_MULTIPLIER: usize = 0x3C;
 
+// an object definition's bounding sphere, an item's flags and an equipment's powerup, and an item collection's spawn time
+const OBJECT_BOUNDING_RADIUS: usize = 4;
+const OBJECT_BOUNDING_OFFSET: usize = 8;
+const ITEM_FLAGS: usize = 0x17C;
+const EQUIPMENT_SIZE: usize = 0x320;
+const EQ_POWERUP_TYPE: usize = 0x308;
+const EQ_GRENADE_TYPE: usize = 0x30A;
+const EQ_POWERUP_TIME: usize = 0x30C;
+const ITEM_COLLECTION_SIZE: usize = 0x5C;
+const IC_SPAWN_TIME: usize = 0xC;
+/// struct scenario_netgame_equipment: the item collection's tag reference
+const NE_ITEM_COLLECTION: usize = 0x50;
+
 // element sizes
 const SZ_PLAYER_START: usize = 0x34;
 const SZ_NETGAME_FLAG: usize = 0x94;
@@ -344,6 +358,8 @@ pub struct HaloMap {
     pub vehicles: Vec<VehiclePlacement>,
     /// What the tags say of fighting: weapons, the player's health and shields.
     pub combat: Combat,
+    /// What the tags say of items: what can be picked up, where it appears and how often.
+    pub items: Items,
 }
 
 impl HaloMap {
@@ -537,6 +553,7 @@ fn parse(data: &[u8], compressed: bool) -> Result<HaloMap> {
 
     let movement = parse_movement(&raw, &tags_space, &tags)?;
     let combat = parse_combat(&raw, &tags_space, &tags, scn)?;
+    let items = parse_items(&raw, &tags_space, &tags, scn)?;
 
     // struct scenario_structure_bsp_reference { file_offset, file_size,
     // base_address, pad, tag_reference }; a multiplayer map has one
@@ -587,6 +604,7 @@ fn parse(data: &[u8], compressed: bool) -> Result<HaloMap> {
         netgame_equipment,
         vehicles,
         combat,
+        items,
     })
 }
 
@@ -1014,6 +1032,85 @@ fn parse_combat(raw: &Raw, space: &Space, tags: &[TagInstance], scn: usize) -> R
         });
     }
     Ok(Combat { weapons, resistance, starting_equipment })
+}
+
+/// What the tags say of items: every weapon and equipment (their bounding
+/// spheres and, for an equipment, its powerup), the scenario's netgame
+/// equipment with the item collection each names, and how far the
+/// multiplayer player's biped reaches.
+fn parse_items(raw: &Raw, space: &Space, tags: &[TagInstance], scn: usize) -> Result<Items> {
+    let mut defs = Vec::new();
+    for tag in tags.iter().filter(|t| matches!(t.group.trim_end(), "weap" | "eqip")) {
+        let is_weapon = tag.group.trim_end() == "weap";
+        let o = space.resolve(tag.base_address, if is_weapon { WEAPON_SIZE } else { EQUIPMENT_SIZE })?;
+        let (powerup_type, grenade_type, powerup_time) = if is_weapon {
+            (0, 0, 0.0)
+        } else {
+            (raw.i16(o + EQ_POWERUP_TYPE)?, raw.i16(o + EQ_GRENADE_TYPE)?, raw.f32(o + EQ_POWERUP_TIME)?)
+        };
+        defs.push(ItemDef {
+            tag_index: (tag.tag_index & 0xFFFF) as u16,
+            is_weapon,
+            name: format!("{}.{}", tag.name, tag.group.trim_end()),
+            bounding_radius: raw.f32(o + OBJECT_BOUNDING_RADIUS)?,
+            bounding_offset: raw.f32s(o + OBJECT_BOUNDING_OFFSET)?,
+            flags: raw.u32(o + ITEM_FLAGS)?,
+            powerup_type,
+            grenade_type,
+            powerup_time,
+        });
+    }
+
+    let (n, p) = space.block(raw, scn + SCN_NETGAME_EQUIPMENT, SZ_NETGAME_EQUIPMENT)?;
+    let mut placements = Vec::with_capacity(n);
+    for i in 0..n {
+        let o = p + i * SZ_NETGAME_EQUIPMENT;
+        let mut permutations = Vec::new();
+        let mut collection_spawn_time = 0;
+        if let Some(collection) = referenced(raw, tags, o + NE_ITEM_COLLECTION, "itmc")? {
+            let cd = space.resolve(collection.base_address, ITEM_COLLECTION_SIZE)?;
+            collection_spawn_time = raw.i16(cd + IC_SPAWN_TIME)?;
+            let (count, perms) = space.block(raw, cd, SZ_ITEM_PERMUTATION)?;
+            for k in 0..count {
+                let q = perms + k * SZ_ITEM_PERMUTATION;
+                let index = raw.u32(q + IP_ITEM + 0xC)?;
+                let tag = (index & 0xFFFF) as u16;
+                // (an item the map has: a collection of anything else gives nothing)
+                if index != 0xFFFF_FFFF && defs.iter().any(|d| d.tag_index == tag) {
+                    permutations.push((raw.f32(q + IP_WEIGHT)?, tag));
+                }
+            }
+        }
+        placements.push(Placement {
+            flags: raw.u32(o)?,
+            game_types: raw.i16s(o + 4)?,
+            spawn_time: raw.i16(o + 0xE)?,
+            position: raw.f32s(o + 0x40)?,
+            facing: raw.f32(o + 0x4C)?,
+            collection_spawn_time,
+            permutations,
+        });
+    }
+
+    // the multiplayer player's biped, as parse_movement finds it
+    let Some(globals) = tags.iter().find(|t| t.group == "matg") else {
+        return malformed("the map has no globals tag");
+    };
+    let g = space.resolve(globals.base_address, GLOBALS_SIZE)?;
+    let (n, mpi) = space.block(raw, g + GLOBALS_MULTIPLAYER_INFORMATION, SZ_MULTIPLAYER_INFORMATION)?;
+    if n == 0 {
+        return malformed("the globals tag has no multiplayer information");
+    }
+    let unit_index = raw.u32(mpi + MPI_UNIT + 0xC)?;
+    let Some(biped_tag) = tags.get((unit_index & 0xFFFF) as usize).filter(|t| t.tag_index == unit_index) else {
+        return malformed("the multiplayer unit is not a tag of the map");
+    };
+    let b = space.resolve(biped_tag.base_address, BIPED_SIZE)?;
+    let player = Reach {
+        bounding_radius: raw.f32(b + OBJECT_BOUNDING_RADIUS)?,
+        bounding_offset: raw.f32s(b + OBJECT_BOUNDING_OFFSET)?,
+    };
+    Ok(Items { defs, placements, player })
 }
 
 /// struct collision_bsp (0x60): eight tag blocks in the order bsp3d nodes,

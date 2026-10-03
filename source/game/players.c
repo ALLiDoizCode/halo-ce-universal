@@ -308,8 +308,10 @@ static void network_player_log_idle_action(long player_index, unsigned long cont
 
 /* whether this machine decides pickups: not a client of the distributed
 netcode, whose players' weapons, grenades and power-ups are the host's
-(port/linux/game/network_distributed.c) */
-#define players_decide_pickups() (!network_game_distributed_client())
+(port/linux/game/network_distributed.c), and not the large-scale mode's, where
+the server decides them (port/linux/game/large_mode.c) */
+boolean large_mode_active(void);
+#define players_decide_pickups() (!network_game_distributed_client() && !large_mode_active())
 
 /* ---------- constants */
 
