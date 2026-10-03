@@ -401,7 +401,7 @@ fn fighter_bytes(combat: &MemoryCombat, id: u16) -> Vec<u8> {
 }
 
 /// A crowd that fights: the players fire pistols (and shotguns, rocket launchers and plasma rifles, by who they are: their
-/// pellets, explosions, melee blows, projectiles that slow down and batteries that run out) at the weapon's real rate, with a random damage between two
+/// pellets, explosions, melee blows, charged shots, projectiles that slow down and batteries that run out) at the weapon's real rate, with a random damage between two
 /// bounds, and report hits (good ones, and every kind of bad one: a weapon not owned, a target elsewhere,
 /// a report too old or from the future, a hit on oneself or a body, numbers that are not numbers), which
 /// `halo_sim::combat::resolve` judges and deals; the deaths go to the game's rules, which respawn the players
@@ -427,11 +427,12 @@ pub fn run_fight(seed: u64, ticks: u32) -> Vec<u8> {
         halo_sim::fixtures::shotgun(),
         halo_sim::fixtures::rocket_launcher(),
         halo_sim::fixtures::plasma_rifle(),
+        halo_sim::fixtures::plasma_pistol(),
     ];
     map.combat.weapons.extend(weapons[1..].iter().cloned());
     let weapon_of = |id: u16| &weapons[id as usize % weapons.len()];
-    let hit_damage = |weapon: &halo_map::combat::Weapon| {
-        let projectile = weapon.triggers[0].projectile.as_ref().unwrap();
+    let hit_damage = |weapon: &halo_map::combat::Weapon, trigger: u8| {
+        let projectile = weapon.triggers[trigger as usize].projectile.as_ref().unwrap();
         projectile.impact_damage.or(projectile.detonation_damage.first().copied()).unwrap().tag_index
     };
     let mut rules = if seed & 1 == 0 { Rules::slayer() } else { Rules::team_slayer() };
@@ -472,7 +473,11 @@ pub fn run_fight(seed: u64, ticks: u32) -> Vec<u8> {
             for _ in 0..pellets {
                 let mut report = HitReport {
                     target,
-                    damage: if blow { weapon.melee_damage.unwrap().tag_index } else { hit_damage(weapon) },
+                    damage: if blow {
+                        weapon.melee_damage.unwrap().tag_index
+                    } else {
+                        hit_damage(weapon, shot.trigger)
+                    },
                     material: (rng.next_u32() % 5) as i16 - 1,
                     scale: (rng.next_u32() % 1_300) as f32 / 1_000.0,
                     host_tick: tick.saturating_sub(rng.next_u32() as u64 % 5) as u32,

@@ -228,8 +228,27 @@ fn every_map_has_every_weapon_of_the_game_as_the_tags_have_it() {
         assert!(plasma.age_misfire_start > 0.0 && plasma.age_heat_recovery_penalty > 0.0, "{name}");
         assert!(plasma.heat_overheated_threshold > plasma.heat_recovery_threshold, "{name}");
 
+        // a plasma pistol charges its first trigger for 0.6 s, and the second is the overcharged bolt of 70
+        let pistol = weapon("plasma pistol\\plasma pistol");
+        assert_eq!(pistol.triggers.len(), 2, "{name}");
+        assert_eq!(
+            (trigger(pistol, 0).charging_time, trigger(pistol, 0).heat_generated_per_round),
+            (0.6, 0.16),
+            "{name}"
+        );
+        assert_eq!(trigger(pistol, 1).heat_generated_per_round, 1.0, "{name}");
+        assert_eq!(projectile(pistol, 1).impact_damage.unwrap().upper, 70.0, "{name}");
+        assert_eq!((pistol.weapon_type, pistol.secondary_trigger_mode), (3, 0), "{name}");
+
         // every weapon has a melee blow, and the first-person animation it is timed by
-        for w in ["assault rifle\\assault rifle", "pistol\\pistol", "shotgun\\shotgun", "sniper rifle\\sniper rifle"] {
+        for w in [
+            "assault rifle\\assault rifle",
+            "pistol\\pistol",
+            "shotgun\\shotgun",
+            "sniper rifle\\sniper rifle",
+            "plasma pistol\\plasma pistol",
+            "plasma rifle\\plasma rifle",
+        ] {
             let w = weapon(w);
             let blow = w.melee_damage.unwrap_or_else(|| panic!("{name}: {} has no melee damage", w.name));
             assert!(blow.lower > 0.0 && blow.cutoff_radius > 0.0, "{name}: {}", w.name);

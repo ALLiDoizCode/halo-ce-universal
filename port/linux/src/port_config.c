@@ -224,6 +224,10 @@ static const struct config_setting config_settings[] =
 	{ "large.autofire", _config_boolean, "false", "HALO_LARGE_AUTOFIRE", _environment_set_is_true, _platform_desktop,
 		"The large-scale mode's player aims at the nearest other player in the world\n"
 		"and holds the trigger down (for the automated tests' shooter)." },
+	{ "large.autofire_cycle", _config_real, "0.0", "HALO_LARGE_AUTOFIRE_CYCLE", _environment_value, _platform_desktop,
+		"With large.autofire, the trigger is held for this many ticks and let go for\n"
+		"one, over and over: a weapon that fires when the trigger is let go (the plasma\n"
+		"pistol's charge) needs it; 0 holds the trigger the whole time." },
 	{ "large.log_sounds", _config_boolean, "false", "HALO_LARGE_LOG_SOUNDS", _environment_set_is_true, _platform_all,
 		"Log every sound the game is asked to start, with its tag and the game tick\n"
 		"(port/linux/game/large_effects.c; for the large-scale mode's tests, which\n"

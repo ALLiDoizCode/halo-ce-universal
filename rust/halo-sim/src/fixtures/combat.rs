@@ -120,6 +120,10 @@ pub const ROCKET_MELEE: u16 = 1113;
 /// The tag indices of [`sniper_rifle`], its bullet's damage effect and its melee blow's.
 pub const SNIPER_RIFLE: u16 = 1172;
 pub const SNIPER_RIFLE_DAMAGE: u16 = 1219;
+/// The tag indices of [`plasma_pistol`], its bolt's damage effect, its overcharged bolt's and its melee blow's.
+pub const PLASMA_PISTOL: u16 = 1281;
+pub const PLASMA_PISTOL_DAMAGE: u16 = 1317;
+pub const PLASMA_PISTOL_CHARGED_DAMAGE: u16 = 1349;
 /// The tag indices of [`plasma_rifle`], its bolt's damage effect and its melee blow's.
 pub const PLASMA_RIFLE: u16 = 1005;
 pub const PLASMA_RIFLE_DAMAGE: u16 = 1046;
@@ -276,6 +280,68 @@ pub fn rocket_launcher() -> Weapon {
         melee(ROCKET_MELEE),
         (125, 52, 4),
     )
+}
+
+/// The multiplayer plasma pistol, as the tags of the maps have it: a first trigger that charges for 0.6 s and
+/// fires a bolt of 16 to 20 when the button is let go before the charge is full, and a second that fires an
+/// overcharged bolt of 70 when it is let go after; each shot makes heat (a sixth of the gauge, and all of it)
+/// and ages the battery.
+pub fn plasma_pistol() -> Weapon {
+    let mut bolt = damage(PLASMA_PISTOL_DAMAGE, 10.0, 16.0, 20.0);
+    bolt.flags = 0x4;
+    let mut charged = damage(PLASMA_PISTOL_CHARGED_DAMAGE, 70.0, 70.0, 70.0);
+    charged.flags = 0x4;
+    let first = Trigger {
+        initial_rate_of_fire: 0.0,
+        final_rate_of_fire: 0.0,
+        rate_of_fire_acceleration: 1.0,
+        rate_of_fire_deceleration: 1.0,
+        rounds_per_shot: 0,
+        charging_time: 0.6,
+        charged_time: 45.0,
+        heat_generated_per_round: 0.16,
+        age_generated_per_round: 0.002,
+        projectile: Some(projectile(0.833_333_4, 0.5, 50.0, (20.0, 50.0), Some(bolt), Vec::new())),
+        ..pistol().triggers.remove(0)
+    };
+    let second = Trigger {
+        flags: 0x4,
+        charging_time: 0.0,
+        charged_time: 0.0,
+        overcharged_action: 1,
+        heat_generated_per_round: 1.0,
+        age_generated_per_round: 0.11,
+        projectile: Some(projectile(0.5, 0.3, 40.0, (5.0, 20.0), Some(charged), Vec::new())),
+        ..first.clone()
+    };
+    let magazine = Magazine {
+        rounds_total_initial: 0,
+        rounds_total_maximum: 0,
+        rounds_loaded_maximum: 0,
+        reload_time: 0.0,
+        rounds_reloaded: 0,
+        ..pistol().magazines.remove(0)
+    };
+    let mut weapon = Weapon {
+        weapon_type: 3,
+        flags: 0x800,
+        heat_recovery_threshold: 0.25,
+        heat_overheated_threshold: 1.0,
+        heat_detonation_threshold: 1.0,
+        heat_loss_per_second: 0.65,
+        age_misfire_start: 0.9,
+        age_misfire_chance: 0.5,
+        ..weapon_like_the_pistol(
+            PLASMA_PISTOL,
+            "weapons\\plasma pistol\\plasma pistol.weap",
+            first,
+            magazine,
+            melee(1303),
+            (9, 33, 4),
+        )
+    };
+    weapon.triggers.push(second);
+    weapon
 }
 
 /// The multiplayer sniper rifle, as the tags of the maps have it: a shot twice a second, one a press of
