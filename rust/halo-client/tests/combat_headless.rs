@@ -314,13 +314,15 @@ fn weapon_tag(data: &Path, name: &str) -> u16 {
 /// server gives a player who spawns the starting weapon, and the game takes the weapon the server says when its unit
 /// first spawns, so the weapon has to be there when it does), shoots the player in front of it dead with it, and
 /// the server counts the kill as the game's; `what` says what the weapon is for the log.
-fn the_game_kills_with(name: &str, weapon: &str, what: &str) {
+fn the_game_kills_with(name: &str, weapon: &str, what: &str, extra: &[(&str, &str)]) {
     let Some(a) = arena(name, &[at(84.0, -166.2, std::f32::consts::PI), at(80.0, -166.2, 0.0)]) else {
         return;
     };
     let (_target, target_id) = a.seat(1);
     assert_eq!(target_id, 0);
-    let (game, log) = a.start_game(130, &[("HALO_LARGE_AUTOFIRE", "1")]);
+    let mut environment = vec![("HALO_LARGE_AUTOFIRE", "1")];
+    environment.extend_from_slice(extra);
+    let (game, log) = a.start_game(130, &environment);
     let me = wait_for("the game's seat", 60, || a.owner.seats().values().map(|s| s.player).find(|p| *p != target_id));
     let tag = weapon_tag(&a.data, weapon);
     wait_for("the game to take the weapon", 60, || {
@@ -354,7 +356,25 @@ fn the_game_kills_with(name: &str, weapon: &str, what: &str) {
 
 #[test]
 fn the_game_shoots_a_player_dead_with_the_plasma_rifle_whose_bolts_take_time_to_fly() {
-    the_game_kills_with("combat-plasma-rifle", "weapons\\plasma rifle\\plasma rifle.weap", "the plasma rifle");
+    the_game_kills_with("combat-plasma-rifle", "weapons\\plasma rifle\\plasma rifle.weap", "the plasma rifle", &[]);
+}
+
+#[test]
+fn the_game_shoots_a_player_dead_with_the_plasma_pistol_tapped_and_charged() {
+    // the trigger is let go every other tick: each press fires a bolt on its release
+    the_game_kills_with(
+        "combat-plasma-pistol-taps",
+        "weapons\\plasma pistol\\plasma pistol.weap",
+        "the plasma pistol, tapped",
+        &[("HALO_LARGE_AUTOFIRE_CYCLE", "1")],
+    );
+    // ... and held for 40 ticks (a charge of 18 is full) before it is let go: overcharged bolts of 70
+    the_game_kills_with(
+        "combat-plasma-pistol-charged",
+        "weapons\\plasma pistol\\plasma pistol.weap",
+        "the plasma pistol, charged",
+        &[("HALO_LARGE_AUTOFIRE_CYCLE", "40")],
+    );
 }
 
 #[test]

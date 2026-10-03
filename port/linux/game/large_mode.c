@@ -320,6 +320,8 @@ static struct
 	boolean vitals_short;
 	long reports_logged;
 	boolean autofire;
+	/* ... with the trigger let go for a tick after this many (large.autofire_cycle), 0 for never */
+	long autofire_cycle;
 
 	/* the local weapon (large_mode_fire_local): the library's numbers for this tick, whether it
 	fired, and how many shots each has counted (the engine's weapon says when it fired), and on
@@ -371,6 +373,7 @@ static void large_mode_read_settings(
 		large.log_players = config_boolean("large.log_players") != 0;
 		large.scoreboard_always = config_boolean("large.scoreboard") != 0;
 		large.autofire = config_boolean("large.autofire") != 0;
+		large.autofire_cycle = (long)config_real("large.autofire_cycle");
 		large.autouse_after = (real)config_real("large.autouse");
 		if (large.root[0])
 		{
@@ -387,6 +390,7 @@ static void large_mode_read_settings(
 	large.log_players = config_boolean("large.log_players") != 0;
 	large.scoreboard_always = config_boolean("large.scoreboard") != 0;
 	large.autofire = config_boolean("large.autofire") != 0;
+	large.autofire_cycle = (long)config_real("large.autofire_cycle");
 	large.autouse_after = (real)config_real("large.autouse");
 	if (!large.database[0])
 	{
@@ -1767,7 +1771,8 @@ static boolean large_mode_equip_local(
 }
 
 /* large.autofire: the local player looks at the nearest other player in the world, from the eye to the
-middle of the body, and holds the trigger */
+middle of the body, and holds the trigger (large.autofire_cycle: for that many ticks, and then lets go of it
+for one) */
 static void large_mode_autofire(
 	struct unit_datum *unit)
 {
@@ -1804,6 +1809,8 @@ static void large_mode_autofire(
 	aim.j = dy / length;
 	aim.k = dz / length;
 	player_control_set_facing(0, &aim);
+	if (large.autofire_cycle > 0 && game_time_get() % (large.autofire_cycle + 1) == large.autofire_cycle)
+		return;
 	SET_FLAG(unit->unit.control_flags, _unit_control_weapon_primary_trigger_bit, TRUE);
 	unit->unit.primary_trigger = 1.0f;
 }

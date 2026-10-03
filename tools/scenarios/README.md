@@ -164,8 +164,11 @@ input 60 100 fire=1                  # the trigger is held
   pistol and the assault rifle), `sniper_kill` (a latched trigger and a
   reload), `shotgun_blast` (fifteen pellets a shot, each its own hit) and
   `shotgun_reload` (a magazine reloaded a shell at a time, and given up for the
-  trigger), and `plasma_rifle_heat` (a rate of fire that comes up, heat,
-  overheating and the age of the battery).
+  trigger), `plasma_rifle_heat` (a rate of fire that comes up, heat,
+  overheating and the age of the battery), `plasma_pistol_taps` (a bolt fired
+  when the button is let go, and overheating) and `plasma_pistol_charge` (a
+  charge held and let go: the overcharged bolt, heat that stays while a charge
+  is held, a weapon that cannot be charged while it is overheated).
 
 The part of the body a bullet hits in the engine depends on the frame's
 timing and the machine's load, and the damage it rolls is the engine's random

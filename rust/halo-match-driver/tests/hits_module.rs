@@ -21,8 +21,9 @@ use halo_match_driver::{FighterRow, MatchClient, PlayerClient};
 use halo_sim::combat::HitReport;
 use halo_sim::damage::{Vitals, DEAD};
 use halo_sim::fixtures::{
-    combat_fixture, flat_floor_map, plasma_rifle, shotgun, sniper_rifle, start_at, with_starts, PISTOL, PISTOL_DAMAGE,
-    PLASMA_RIFLE, PLASMA_RIFLE_DAMAGE, SHOTGUN, SHOTGUN_DAMAGE, SNIPER_RIFLE, SNIPER_RIFLE_DAMAGE,
+    combat_fixture, flat_floor_map, plasma_pistol, plasma_rifle, shotgun, sniper_rifle, start_at, with_starts, PISTOL,
+    PISTOL_DAMAGE, PLASMA_PISTOL, PLASMA_PISTOL_CHARGED_DAMAGE, PLASMA_PISTOL_DAMAGE, PLASMA_RIFLE,
+    PLASMA_RIFLE_DAMAGE, SHOTGUN, SHOTGUN_DAMAGE, SNIPER_RIFLE, SNIPER_RIFLE_DAMAGE,
 };
 use halo_sim::rules::Rules;
 use halo_sim::TICKS_PER_SECOND;
@@ -343,7 +344,7 @@ fn armed_fight(name: &str, weapon: u16, vitality: f32) -> Option<Fight> {
 /// ... with the players `gap` apart.
 fn armed_fight_apart(name: &str, gap: f32, weapon: u16, vitality: f32) -> Option<Fight> {
     let f = fight_apart(name, gap, |map| {
-        map.combat.weapons.extend([shotgun(), sniper_rifle(), plasma_rifle()]);
+        map.combat.weapons.extend([shotgun(), sniper_rifle(), plasma_rifle(), plasma_pistol()]);
         map.combat.resistance.maximum_shield_vitality *= vitality;
         map.combat.resistance.maximum_body_vitality *= vitality;
     })?;
@@ -414,4 +415,27 @@ fn a_plasma_rifle_is_held_to_what_its_heat_lets_it_fire() {
     let target = f.fighter(TARGET);
     let dealt = (1.0 - target.shield) * 75.0 * 1.0e4 / f.fighter(TARGET).hurt_count as f32;
     assert!((9.0..=14.0).contains(&dealt), "each bolt dealt {dealt} on average");
+}
+
+#[test]
+fn a_plasma_pistols_two_triggers_each_deal_their_own_damage_and_the_charged_one_is_rare() {
+    // (a target that ten overcharged bolts do not kill, so that every report is judged on its rate alone)
+    let Some(f) = armed_fight("hit-plasma-pistol", PLASMA_PISTOL, 1.0e4) else { return };
+    // a bolt of the first trigger: 16 to 20 of the target's shield (at most the 10 minimum, if it has slowed to nothing)
+    f.report(&[HitReport { damage: PLASMA_PISTOL_DAMAGE, ..f.hit_on_target() }]);
+    wait_until("the bolt", || f.fighter(TARGET).hurt_count == 1);
+    let bolt = (1.0 - f.fighter(TARGET).shield) * 75.0 * 1.0e4;
+    assert!((10.0..=20.0).contains(&bolt), "the bolt dealt {bolt}");
+    // the charged bolt of the second: 70, always
+    let before = f.fighter(TARGET).shield;
+    f.report(&[HitReport { damage: PLASMA_PISTOL_CHARGED_DAMAGE, ..f.hit_on_target() }]);
+    wait_until("the charged bolt", || f.fighter(TARGET).hurt_count == 2);
+    let charged = (before - f.fighter(TARGET).shield) * 75.0 * 1.0e4;
+    assert!((charged - 70.0).abs() < 1.0e-2, "the charged bolt dealt {charged}");
+    // a charge takes 18 ticks and a heat gauge only lets one go a second: ten at once are mostly too many
+    let bolt = HitReport { damage: PLASMA_PISTOL_CHARGED_DAMAGE, ..f.hit_on_target() };
+    f.report(&[bolt; 10]);
+    wait_until("the verdicts", || f.rejected_hits() >= 4);
+    let rejected = f.rejected_hits();
+    assert!((4..=6).contains(&rejected), "about 5 of 10 pass: {rejected} were rejected");
 }

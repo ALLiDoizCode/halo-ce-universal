@@ -1,0 +1,35 @@
+# The plasma pistol charged, at a target three units away that stands still: held
+# for 0.6 s (18 ticks) and let go, the button fires the second trigger's shot, an
+# overcharged bolt of 70 that makes all the heat the gauge has (the weapon is
+# overheated until it has cooled); let go sooner it is an ordinary bolt. The
+# heat is not lost while a full charge is held.
+scenario plasma_pistol_charge
+map bloodgulch
+start flat_field 77.9 -166.2 0.32 0.0
+target 81.0 -166.2 0.32 3.14159265
+weapon weapons/plasma pistol/plasma pistol
+ticks 420
+# aim at the body
+input 0 420 pitch=-0.13
+# an ordinary bolt: let go before the charge is full
+input 60 70 fire=1
+# a charged one, held for half a second more than it takes
+input 100 130 fire=1
+# held the whole time the weapon is overheated and a while after, and let go
+input 140 230 fire=1
+# a charged one again, once the weapon has cooled
+input 280 310 fire=1
+
+tolerance position 0
+tolerance velocity 0
+tolerance facing 0
+tolerance state 0
+tolerance rounds 0
+tolerance heat 0
+tolerance shield 0
+tolerance body 0
+tolerance stun 0
+tolerance life 0
+tolerance hit 0
+tolerance shots 0
+tolerance age 0

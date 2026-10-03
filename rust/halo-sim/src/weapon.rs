@@ -787,6 +787,92 @@ mod tests {
         assert!(!hands.request_reload(&weapon), "a full magazine does not");
     }
 
+    /// The shots a plasma pistol makes (the tick, which trigger) when the button is held on the ticks `held` says.
+    fn plasma_shots(held: impl Fn(u32) -> bool, ticks: u32) -> (Vec<(u32, u8)>, Hands) {
+        let weapon = crate::fixtures::plasma_pistol();
+        let mut hands = Hands::new(&weapon);
+        let mut shots = Vec::new();
+        for tick in 0..ticks {
+            let shot = hands.update(&weapon, held(tick));
+            if shot.fired {
+                shots.push((tick, shot.trigger));
+            }
+        }
+        (shots, hands)
+    }
+
+    #[test]
+    fn a_plasma_pistol_fires_the_first_triggers_bolt_when_the_button_is_let_go_early() {
+        // a tap: pressed on tick 10, let go on tick 11, which fires it
+        let (shots, hands) = plasma_shots(|t| t == 10, 40);
+        assert_eq!(shots, [(11, 0)]);
+        assert!((hands.age - 0.002).abs() < 1.0e-6, "the battery has aged by a shot's worth: {}", hands.age);
+        // ... held for 17 ticks (a charge takes 18) it is the same
+        let (shots, _) = plasma_shots(|t| (10..27).contains(&t), 60);
+        assert_eq!(shots, [(27, 0)]);
+    }
+
+    #[test]
+    fn a_plasma_pistol_held_until_the_charge_is_full_fires_the_overcharged_bolt_and_overheats() {
+        let (shots, hands) = plasma_shots(|t| (10..60).contains(&t), 62);
+        assert_eq!(shots, [(60, 1)], "nothing until the button is let go, and then the second trigger's shot");
+        // a shot of all the gauge: the weapon is overheated and has aged by the shot's 0.11
+        assert!(hands.overheated, "{hands:?}");
+        assert!((hands.age - 0.11).abs() < 1.0e-6);
+        // the weapon fires nothing until it has cooled to a quarter (0.65 a second takes 35 ticks of the 0.75)
+        let weapon = crate::fixtures::plasma_pistol();
+        let mut hands = hands;
+        let mut fired_at = None;
+        for tick in 0..120 {
+            if hands.update(&weapon, tick % 2 == 0).fired {
+                fired_at = Some(tick);
+                break;
+            }
+        }
+        assert!(matches!(fired_at, Some(t) if (30..45).contains(&t)), "{fired_at:?}");
+    }
+
+    #[test]
+    fn heat_is_not_lost_while_a_full_charge_is_held() {
+        let weapon = crate::fixtures::plasma_pistol();
+        let mut hands = Hands::new(&weapon);
+        // a bolt, and then a button held: the charge is full 18 ticks into the hold
+        hands.update(&weapon, true);
+        hands.update(&weapon, false);
+        let mut heats = Vec::new();
+        for _ in 0..60 {
+            hands.update(&weapon, true);
+            heats.push(hands.heat);
+        }
+        assert!(heats[0] > heats[10], "heat is lost while the charge fills: {heats:?}");
+        let at_full = heats[19];
+        assert!(heats[20..].iter().all(|h| *h == at_full), "and not once it is full: {heats:?}");
+    }
+
+    #[test]
+    fn a_blow_cannot_be_struck_while_charging_and_it_starts_the_triggers_over() {
+        let weapon = crate::fixtures::plasma_pistol();
+        let mut hands = Hands::new(&weapon);
+        let mut melee = Melee::default();
+        hands.update(&weapon, true);
+        assert!(hands.is_charging());
+        melee.update(&weapon, &mut hands, true);
+        assert!(!melee.is_striking(), "a charge is no time to strike a blow");
+        // let go: the first shot fires, and now a blow can be struck: it lands after the first-person animation's key frame
+        hands.update(&weapon, false);
+        hands.update(&weapon, false);
+        let mut landed = None;
+        for tick in 0..60 {
+            if melee.update(&weapon, &mut hands, tick == 0) {
+                landed = Some(tick);
+            }
+            hands.update(&weapon, false);
+        }
+        // (33 frames less a quarter is a blow of 25 ticks, the key frame 4 less a quarter of 33, so 21 left to go: the
+        // blow lands on the fifth tick after the press)
+        assert_eq!(landed, Some(5), "{landed:?}");
+    }
+
     #[test]
     fn the_rate_of_a_trigger_is_the_greater_of_its_two_and_what_charging_and_heat_allow() {
         let mut weapon = pistol();
