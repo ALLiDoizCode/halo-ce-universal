@@ -141,6 +141,8 @@ pub struct Planner {
     priority: Vec<f32>,
     /// For ranking.
     scratch: Vec<Ranked>,
+    /// For choosing the near players of the share: (priority, index, place in `scratch`).
+    near: Vec<(f32, u32, u32)>,
     /// The number of the next Snapshot.
     next_seq: u16,
     /// The most recent Snapshots sent and not yet known to have arrived or
@@ -197,6 +199,7 @@ impl Planner {
             credit: per_tick,
             priority: Vec::new(),
             scratch: Vec::new(),
+            near: Vec::new(),
             next_seq: 1,
             in_flight: VecDeque::new(),
             last_sent: Vec::new(),
@@ -242,6 +245,9 @@ impl Planner {
         self.credit = (self.credit + self.per_tick).min(self.per_tick * 2.0);
         let cfg = self.config;
         let near2 = cfg.near_radius * cfg.near_radius;
+        // from this squared distance on, the weight is the floor: (near_radius / distance)^1.5 <= far_floor
+        // (about 58 wu); half of a crowd is out there, and need not pay for a square root
+        let floor2 = if cfg.far_floor > 0.0 { near2 * cfg.far_floor.powf(-4.0 / 3.0) } else { f32::INFINITY };
         let cone = (cfg.facing_degrees.to_radians()).cos();
         let cone2 = cone * cone;
         let (sy, cy) = me.yaw.sin_cos();
@@ -269,6 +275,8 @@ impl Planner {
             let d2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
             let mut weight = if d2 <= near2 {
                 1.0
+            } else if d2 >= floor2 {
+                cfg.far_floor
             } else {
                 // (near_radius / distance)^1.5
                 let q = cfg.near_radius / d2.sqrt();
@@ -321,28 +329,35 @@ impl Planner {
                 self.scratch[*i].overdue = false;
             }
         }
+        let mut near_wanting = 0;
         for r in &mut self.scratch {
             r.urgent |= r.overdue;
+            near_wanting += (r.near && !r.urgent) as usize;
         }
 
         let take = affordable(self.credit, self.scratch.len());
         // The near players go ahead of the rest only up to their share of what the tick pays for,
         // the highest accumulated priority first. Those beyond it compete with everyone else.
         let share = (cfg.near_share.clamp(0.0, 1.0) * take as f32).round() as usize;
-        let mut near: Vec<usize> =
-            (0..self.scratch.len()).filter(|i| self.scratch[*i].near && !self.scratch[*i].urgent).collect();
-        if near.len() > share {
-            let order = |a: &usize, b: &usize| {
-                let (a, b) = (&self.scratch[*a], &self.scratch[*b]);
-                b.priority.total_cmp(&a.priority).then(a.index.cmp(&b.index))
-            };
-            if share > 0 {
-                near.select_nth_unstable_by(share - 1, order);
+        let wants = |r: &Ranked| r.near && !r.urgent;
+        if near_wanting <= share {
+            // (the usual case: all of them fit)
+            for r in &mut self.scratch {
+                r.in_share = wants(r);
             }
-            near.truncate(share);
-        }
-        for i in near {
-            self.scratch[i].in_share = true;
+        } else {
+            self.near.clear();
+            for (slot, r) in self.scratch.iter().enumerate() {
+                if wants(r) {
+                    self.near.push((r.priority, r.index, slot as u32));
+                }
+            }
+            if share > 0 {
+                self.near.select_nth_unstable_by(share - 1, |a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+            }
+            for &(_, _, slot) in &self.near[..share] {
+                self.scratch[slot as usize].in_share = true;
+            }
         }
         // urgent players first, then near ones within the share, then by accumulated priority, then by world order
         let by_priority = |a: &Ranked, b: &Ranked| {
