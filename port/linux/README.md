@@ -241,6 +241,20 @@ A player the gateway has not sent a state of for 120 ticks is out of range, and
 one who has left the match is gone at once: the unit is deleted, and made
 afresh when the gateway sends the player again.
 
+Between the gateway's updates a player is not left where the last state put
+them: the library draws each remote player where that state would have taken
+them by now (its velocity carried forward by the ticks since it came, and
+gravity down to the map's ground for a player in the air), and the adapter puts
+the unit there and hands the engine that velocity. It goes on for at most the
+planner's staleness cap (15 ticks), after which the player is held still, with
+no velocity, so that the engine shows them standing. A state that arrives where
+the extrapolation was not leaves an offset that shrinks by 0.6 each tick; one
+more than 2 world units away is where the player is drawn at once (a respawn).
+With `large.log_players`, the game logs each new state's drawn error, the
+distance between where the player was drawn and where the state puts them
+(`large mode: drawn error player 7 tick 812 0.0123 (x y z)`); `smoothness.py`
+reports their median, p99 and largest by band.
+
 Each second, the game logs one line for the session (`large mode: tick ...`:
 whether the gateway has welcomed the player and the direct connection is
 up, and what has been received) and, with `large.log_players`, a line for
@@ -338,7 +352,9 @@ counted forward by the client and the server, so a recharge writes nothing).
   several is one), the shooter within the weapon's reach, the target near where
   the shooter saw it). A report that fails is dropped, counted against the
   shooter (the private table `shooter`) and in `match_tick.rejected_hits`, and
-  logged by `halo-server` (`rejected hits N (+M)`). A hit that passes deals the
+  logged by `halo-server` (`rejected hits N (+M)`, with `hits accepted` and how
+many were refused as `TargetNotWhereSeen`, from `match_tick.hits_total` and
+`match_tick.rejected_not_where_seen_total`). A hit that passes deals the
   damage to the target's shield and health as the engine does, rolled by the
   server at the report's scale brought down to what the server's view allows
   (`halo_sim::source::limit`); the hit that takes the last health is a death

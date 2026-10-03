@@ -157,6 +157,11 @@ pub struct MatchTick {
     rejected_hits: u32,
     /// Refused hit reports since the match was reset.
     rejected_hits_total: u64,
+    /// Hit reports that passed and hurt someone since the match was reset, and the refused ones that
+    /// were refused as `Reject::TargetNotWhereSeen` (the server had the target nowhere near where the
+    /// shooter says it saw them): what the client's treatment of other players between updates is measured by.
+    hits_total: u64,
+    rejected_not_where_seen_total: u64,
 }
 
 /// One player. Position and facing are the last move the server accepted.
@@ -1290,6 +1295,8 @@ pub fn init(ctx: &ReducerContext) {
         hits: 0,
         rejected_hits: 0,
         rejected_hits_total: 0,
+        hits_total: 0,
+        rejected_not_where_seen_total: 0,
     });
 }
 
@@ -1712,6 +1719,8 @@ pub fn reset(ctx: &ReducerContext) -> Result<(), String> {
         hits: 0,
         rejected_hits: 0,
         rejected_hits_total: 0,
+        hits_total: 0,
+        rejected_not_where_seen_total: 0,
     };
     ctx.db.match_tick().id().update(blank);
     rules::begin(&mut TableGame { ctx }, 0);
@@ -1911,7 +1920,7 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
     }
 
     let mut rejected = 0u32;
-    let (mut hits, mut rejected_hits) = (0u32, 0u32);
+    let (mut hits, mut rejected_hits, mut not_where_seen) = (0u32, 0u32, 0u64);
     if let Some(map) = current_map(ctx) {
         let mut store = TableStore { ctx, tick: marker.tick };
         let mut game = TableGame { ctx };
@@ -1937,6 +1946,7 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
                 HitEvent::Hit { .. } => hits += 1,
                 HitEvent::Rejected { shooter, reason } => {
                     rejected_hits += 1;
+                    not_where_seen += (*reason == halo_sim::combat::Reject::TargetNotWhereSeen) as u64;
                     log::warn!("rejected a hit report of player {shooter} ({reason:?}) at tick {}", marker.tick);
                 }
             }
@@ -2046,6 +2056,8 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
     marker.hits = hits;
     marker.rejected_hits = rejected_hits;
     marker.rejected_hits_total += rejected_hits as u64;
+    marker.hits_total += hits as u64;
+    marker.rejected_not_where_seen_total += not_where_seen;
     ctx.db.match_tick().id().update(marker);
     Ok(())
 }

@@ -402,13 +402,15 @@ fn progress(watcher: &MatchClient, elapsed: Duration, fired: u64, engaged: usize
     busiest.sort_by_key(|(_, (r, b))| std::cmp::Reverse(r + b));
     say(&format!("      busiest squares {:?}", &busiest[..busiest.len().min(5)]));
     say(&format!(
-        "{:>4.0} s  tick {}  players {}  alive {alive}  armed {armed}  shooting at someone {engaged}  red {} blue {}  hits sent {fired}  refused {}  moves refused {}",
+        "{:>4.0} s  tick {}  players {}  alive {alive}  armed {armed}  shooting at someone {engaged}  red {} blue {}  hits sent {fired}  accepted {}  refused {} (as target not where seen {})  moves refused {}",
         elapsed.as_secs_f64(),
         marker.tick,
         marker.players,
         game.red_score,
         game.blue_score,
+        marker.hits_total,
         marker.rejected_hits_total,
+        marker.rejected_not_where_seen_total,
         marker.rejected_total
     ));
 }
@@ -474,9 +476,9 @@ fn scoreboard(watcher: &MatchClient, line: &mut impl FnMut(String)) {
     let kills: i64 = standings.values().map(|s| s.score as i64).sum();
     let deaths: u64 = standings.values().map(|s| s.deaths as u64).sum();
     line(format!(
-        "final: ending {} (0 not ended, 1 score limit, 2 time), winner kind {} id {}; red {} blue {}; score limit {}; {} players, {} deaths in all, sum of scores {kills}; hits refused {} of the tick markers, moves refused {}",
+        "final: ending {} (0 not ended, 1 score limit, 2 time), winner kind {} id {}; red {} blue {}; score limit {}; {} players, {} deaths in all, sum of scores {kills}; hits accepted {}, refused {} (as target not where seen {}) of the tick markers, moves refused {}",
         game.ending, game.winner_kind, game.winner, game.red_score, game.blue_score, game.score_limit, standings.len(), deaths,
-        marker.rejected_hits_total, marker.rejected_total
+        marker.hits_total, marker.rejected_hits_total, marker.rejected_not_where_seen_total, marker.rejected_total
     ));
     let mut moves: BTreeMap<&str, (u32, u64)> = BTreeMap::new();
     for p in watcher.players().values().filter(|p| p.rejected_moves > 0) {
