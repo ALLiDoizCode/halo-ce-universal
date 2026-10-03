@@ -26,7 +26,10 @@
 //! resent in the next tick's datagrams). Independently, a player not sent to
 //! this recipient for `max_stale_ticks` becomes urgent too, so that no
 //! player's state stays unsent for longer than that while the budget can pay
-//! for it (about `players x 16 bytes / max_stale_ticks` a tick). A new
+//! for it (about `players x 16 bytes / max_stale_ticks` a tick). So that those
+//! who fall due together (everyone does, after a recipient is brought up to
+//! date) do not take the tick from the near ones, no more than 1.5 times the
+//! average need of them go first in a tick, the longest waiting first. A new
 //! recipient has been sent no one, so everyone is urgent to it at first and
 //! it is brought up to date, nearest and facing first, within its budget.
 //!
@@ -153,6 +156,10 @@ struct Sent {
 #[derive(Debug, Clone, Copy)]
 struct Ranked {
     urgent: bool,
+    /// Not sent for `max_stale_ticks` (or ever): urgent, within the tick's quota of those.
+    overdue: bool,
+    /// `tick + 1` of the last tick the player was sent in; 0 if never.
+    since: u32,
     near: bool,
     priority: f32,
     /// Index into the world.
@@ -245,11 +252,15 @@ impl Planner {
             }
             let slot = id as usize;
             self.present[slot] = tick + 1;
-            let overdue = self.last_sent[slot] == 0 || tick + 1 - self.last_sent[slot] >= cfg.max_stale_ticks;
+            let never = self.last_sent[slot] == 0;
+            let overdue = !never && tick + 1 - self.last_sent[slot] >= cfg.max_stale_ticks;
             let p = &mut self.priority[slot];
             *p += weight;
             self.scratch.push(Ranked {
-                urgent: self.urgent[slot] || overdue,
+                // (a player never sent to this recipient is brought up to date before anything else)
+                urgent: self.urgent[slot] || never,
+                overdue,
+                since: self.last_sent[slot],
                 near: d2 <= near2,
                 priority: *p,
                 index: index as u32,
@@ -262,6 +273,27 @@ impl Planner {
                 self.present[id] = 0;
                 (self.priority[id], self.last_sent[id], self.urgent[id]) = (0.0, 0, false);
             }
+        }
+
+        // Players who fall due together (a new recipient is brought up to date in a few ticks, so
+        // its whole world falls due again together) would take the budget from the near ones for
+        // as long as the wave lasts. Only a tick's quota of them goes first, those waiting longest;
+        // the rest follow in the next ticks. The quota is one and a half times what the bound needs
+        // on average, so the bound still holds, and the wave is flushed within a few ticks.
+        let quota = (self.scratch.len().div_ceil(cfg.max_stale_ticks.max(1) as usize) * 3 / 2).max(1);
+        if self.scratch.iter().filter(|r| r.overdue).count() > quota {
+            let mut due: Vec<usize> = (0..self.scratch.len()).filter(|i| self.scratch[*i].overdue).collect();
+            let order = |a: &usize, b: &usize| {
+                let (a, b) = (&self.scratch[*a], &self.scratch[*b]);
+                a.since.cmp(&b.since).then(b.priority.total_cmp(&a.priority)).then(a.index.cmp(&b.index))
+            };
+            due.select_nth_unstable_by(quota - 1, order);
+            for i in &due[quota..] {
+                self.scratch[*i].overdue = false;
+            }
+        }
+        for r in &mut self.scratch {
+            r.urgent |= r.overdue;
         }
 
         let take = affordable(self.credit, self.scratch.len());
@@ -671,6 +703,35 @@ mod tests {
             }
         }
         assert!(last_far.is_some());
+    }
+
+    #[test]
+    fn players_falling_due_together_do_not_take_the_tick_from_the_near_ones() {
+        // 120 players within 10 wu (1,920 bytes of the 3,000 a tick) and 379 far ones. A new
+        // recipient is brought up to date within a tick or two, so that all of them fall due
+        // together 15 ticks later: they would fill the budget, and the near ones would go unsent
+        let mut radii: Vec<f32> = (0..120).map(|i| 2.0 + (i as f32 * 0.37) % 7.0).collect();
+        radii.extend((0..379).map(|i| 30.0 + (i as f32 * 0.37) % 60.0));
+        let world = ring(&radii);
+        let config = PlannerConfig::with_budget(90_000);
+        let mut planner = Planner::new(config);
+        let (mut sent_at, mut oldest_far) = (vec![0u32; 500], 0);
+        for tick in 0..2 {
+            for id in states_of(&planner.plan(&observer_at_origin(), &world, tick)) {
+                sent_at[id as usize] = tick;
+            }
+        }
+        assert!((121..500).all(|id| sent_at[id] <= 1), "the far ones were brought up to date in two ticks");
+        // (the ticks in between are skipped: only the near ones are sent in them, which changes nothing)
+        for tick in 1 + config.max_stale_ticks..40 {
+            let got = states_of(&planner.plan(&observer_at_origin(), &world, tick));
+            assert!((1..=120u16).all(|id| got.contains(&id)), "tick {tick}: near players went unsent");
+            for id in got {
+                sent_at[id as usize] = tick;
+            }
+            oldest_far = oldest_far.max((121..500).map(|id| tick - sent_at[id]).max().unwrap());
+        }
+        assert!(oldest_far <= 3 * config.max_stale_ticks, "a far player went {oldest_far} ticks unsent");
     }
 
     #[test]
