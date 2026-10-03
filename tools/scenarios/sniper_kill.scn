@@ -1,0 +1,34 @@
+# The sniper rifle, a shot at a time (its trigger is latched: a held button fires
+# once) at a target three units away that stands still: the first shot takes its
+# shield and a quarter of its health (101 damage), the second kills. Four rounds
+# in the magazine: the fourth is the last, and the weapon reloads on its own.
+scenario sniper_kill
+map bloodgulch
+start flat_field 77.9 -166.2 0.32 0.0
+target 81.0 -166.2 0.32 3.14159265
+weapon weapons/sniper rifle/sniper rifle
+ticks 300
+# aim at the body
+input 0 300 pitch=-0.13
+# the button is pressed and let go six times, fifteen ticks apart (it is held for
+# three, which is one shot, not three)
+input 60 63 fire=1
+input 75 78 fire=1
+input 90 93 fire=1
+input 105 108 fire=1
+input 120 123 fire=1
+input 135 138 fire=1
+
+tolerance position 0
+tolerance velocity 0
+tolerance facing 0
+tolerance state 0
+tolerance rounds 0
+tolerance heat 0
+tolerance shield 0
+tolerance body 0
+tolerance stun 0
+tolerance life 0
+tolerance hit 0
+tolerance shots 0
+tolerance age 0

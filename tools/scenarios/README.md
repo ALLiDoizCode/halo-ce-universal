@@ -134,7 +134,8 @@ a person).
 ## Firing scenarios
 
 A scenario can give the player a weapon and a target to shoot, and compare
-the weapon's rate of fire, the damage of its hits and the target's shields.
+the weapon's rate of fire, ammunition, heat and age, the damage of its hits and
+the target's shields.
 
 ```
 weapon weapons/pistol/pistol   # the weapon tag's name (the rest of the line)
@@ -150,24 +151,38 @@ input 60 100 fire=1                  # the trigger is held
   simulation reads the weapon's data from the same tags.
 - `target <x> <y> <z> <yaw>`: a unit with the multiplayer body's health and
   shields. Without it the target columns of the trace are zero.
-- Keys `fire` (1 while the trigger is held) and `part` (the target's material
-  the shots are to hit, for the simulation: 0 head, 1 body; the default is
-  1). The engine's own hits land where its aim takes them (`pitch`).
+- Keys `fire` (1 while the trigger is held), `melee` (1 while the melee button
+  is held) and `part` (the target's material the shots are to hit, for the
+  simulation: 0 head, 1 body; the default is 1). The engine's own hits land
+  where its aim takes them (`pitch`).
 - Quantities (besides the walking ones): `rounds` (loaded and in reserve),
   `heat`, `shield`, `body`, `stun` (ticks of the target's shield stun), `life`
-  (whether the target is dead) and `hit` (the part of the target hit this
-  tick). The
-  scenarios `pistol_kill`, `pistol_magazine`, `pistol_shield` and `rifle_burst`
-  compare all of them with tolerance 0.
+  (whether the target is dead), `hit` (the part of the target hit this tick),
+  `shots` (the shots the weapon has fired) and `age` (the weapon's: a plasma
+  weapon's battery). The firing scenarios compare all of them with tolerance 0:
+  `pistol_kill`, `pistol_magazine`, `pistol_shield` and `rifle_burst` (the
+  pistol and the assault rifle), `sniper_kill` (a latched trigger and a
+  reload), `shotgun_blast` (fifteen pellets a shot, each its own hit) and
+  `shotgun_reload` (a magazine reloaded a shell at a time, and given up for the
+  trigger), and `plasma_rifle_heat` (a rate of fire that comes up, heat,
+  overheating and the age of the battery).
 
 The part of the body a bullet hits in the engine depends on the frame's
-timing and the machine's load, though the weapon's own timing does not. So a
-comparison of the simulation with the engine replays the hits the engine
-made: the engine's trace is the input of `halo-scenario --hits <engine trace>`
-(tick and part of each hit), and the simulation deals the same hits at the
-same ticks in the engine's order of a tick (the weapon updates, the target
-ticks, then the hits). The gate of this is
-`test_the_simulation_matches_the_engine_on_a_scenario_of_firing` in
+timing and the machine's load, and the damage it rolls is the engine's random
+choice, though the weapon's own timing does not depend on either. So a
+comparison of the simulation with the engine replays what the engine did: the
+engine's trace is the input of `halo-scenario --hits <engine trace>`, which
+takes from its `# hit` lines each hit on the target (the tick, the part of the
+body, the scale and total of the damage, which damage it was of, how far the
+explosion was from the target, and whether it came before or after the
+target's own update in the engine's order of the tick) and from its `# shot`
+lines the shots that misfired (an old battery's, by the engine's random
+number). The simulation deals the same hits at the same ticks, in the
+engine's order, and holds each to what it knows of it: the damage is one of
+the weapon's tags, the scale is what the simulation works out (an explosion's,
+a blow's) or within what the server would allow (a bullet's, by how far it
+had flown), and the total is within the bounds of the damage's tag. The gate
+of this is `test_the_simulation_matches_the_engine_on_a_scenario_of_firing` in
 `tools/test_scenario_harness.py`, which runs the engine.
 
 ## Trace format
@@ -203,8 +218,17 @@ tick	x	y	z	vx	vy	vz	yaw	pitch	state
   | `state` | the movement state, a sum of bits: 1 airborne (not on the ground), 2 crouching |
 
 A trace of a scenario of firing is `# halo-trace 2`: the columns above, then
-`rounds total heat shield body stun dead hit` (the weapon's rounds loaded and
-in reserve, its heat, the target's shield and health as fractions of full,
-the ticks of shield stun left, 1 when the target is dead, and the target's
-material hit this tick, -1 for none). With no target the target's columns are zero.
+`rounds total heat shield body stun dead hit shots age` (the weapon's rounds
+loaded and in reserve, its heat, the target's shield and health as fractions
+of full, the ticks of shield stun left, 1 when the target is dead, the
+target's material hit this tick (-1 for none, -2 for a hit with no part of the
+body of its own, an explosion's or a blow's), how many times the weapon has
+fired, and its age). With no target the target's columns are zero.
 `compare` refuses a version 1 trace against a version 2 one.
+
+The engine's trace of firing also has, among its headers, a `# shot <tick>
+<trigger> <misfired>` line for each shot of the weapon, and a `# hit <tick>
+<part> <scale> <total> <damage> <distance> <x> <y> <z> <after the target's
+update>` line for each hit on the target (`part` is the engine's, -1 for
+none; `damage` is the damage effect's tag index; `distance` is from the
+epicentre to the middle of the target).

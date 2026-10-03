@@ -187,3 +187,57 @@ fn every_map_has_the_pistol_and_the_players_body_as_the_tags_have_them() {
         assert_eq!(&halo_map::combat::Combat::from_bytes(&c.to_bytes()).unwrap(), c, "{name}");
     }
 }
+
+#[test]
+fn every_map_has_every_weapon_of_the_game_as_the_tags_have_it() {
+    let Some(maps) = load_all() else { return };
+    for (name, map) in &maps {
+        let weapon = |weapon: &str| {
+            map.combat
+                .weapons
+                .iter()
+                .find(|w| w.name == format!("weapons\\{weapon}.weap"))
+                .unwrap_or_else(|| panic!("{name}: no {weapon}"))
+        };
+        let trigger = |weapon: &halo_map::combat::Weapon, i: usize| weapon.triggers[i].clone();
+        let projectile = |weapon: &halo_map::combat::Weapon, i: usize| trigger(weapon, i).projectile.unwrap();
+
+        let rifle = weapon("assault rifle\\assault rifle");
+        assert_eq!(trigger(rifle, 0).final_rate_of_fire, 15.0, "{name}");
+
+        // a shotgun's shot is fifteen pellets, which slow down: the engine's timer starts that late
+        let shotgun = weapon("shotgun\\shotgun");
+        assert_eq!(trigger(shotgun, 0).projectiles_per_shot, 15, "{name}");
+        let pellet = projectile(shotgun, 0);
+        assert_eq!((pellet.air_damage_range_lower, pellet.air_damage_range_upper), (1.5, 3.0), "{name}");
+        assert!(pellet.initial_velocity > pellet.final_velocity, "{name}");
+        assert_eq!(shotgun.weapon_type, 1, "{name}");
+        assert!(shotgun.shotgun_enter_frames > 0 && shotgun.reload_frames > 0, "{name}");
+        let d = pellet.impact_damage.unwrap();
+        assert_eq!((d.minimum, d.lower, d.upper), (8.0, 18.0, 25.0), "{name}");
+
+        // a sniper rifle's trigger is latched, and its bullet does 101
+        let sniper = weapon("sniper rifle\\sniper rifle");
+        assert!(trigger(sniper, 0).flags & halo_map::combat::trigger_flags::LATCHED != 0, "{name}");
+        assert_eq!(projectile(sniper, 0).impact_damage.unwrap().upper, 101.0, "{name}");
+
+        // a plasma rifle heats, has a battery and misfires when it is old
+        let plasma = weapon("plasma rifle\\plasma rifle");
+        let t = trigger(plasma, 0);
+        assert_eq!((t.heat_generated_per_round, t.age_generated_per_round), (0.08, 0.005), "{name}");
+        assert!(plasma.age_misfire_start > 0.0 && plasma.age_heat_recovery_penalty > 0.0, "{name}");
+        assert!(plasma.heat_overheated_threshold > plasma.heat_recovery_threshold, "{name}");
+
+        // every weapon has a melee blow, and the first-person animation it is timed by
+        for w in ["assault rifle\\assault rifle", "pistol\\pistol", "shotgun\\shotgun", "sniper rifle\\sniper rifle"] {
+            let w = weapon(w);
+            let blow = w.melee_damage.unwrap_or_else(|| panic!("{name}: {} has no melee damage", w.name));
+            assert!(blow.lower > 0.0 && blow.cutoff_radius > 0.0, "{name}: {}", w.name);
+            assert!(
+                w.melee_frames > 0 && w.melee_key_frame > 0 && w.melee_key_frame < w.melee_frames,
+                "{name}: {}",
+                w.name
+            );
+        }
+    }
+}

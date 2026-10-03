@@ -67,5 +67,5 @@ fn play(scenario_path: &str, maps: &str, hits: Option<&str>) -> Result<String, S
         }
         None => None,
     };
-    halo_scenario::trace_with_hits(&scenario, &map.into(), observed.as_deref())
+    halo_scenario::trace_with_hits(&scenario, &map.into(), observed.as_ref())
 }

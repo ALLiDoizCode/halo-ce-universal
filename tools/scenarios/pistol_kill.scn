@@ -27,3 +27,5 @@ tolerance body 0
 tolerance stun 0
 tolerance life 0
 tolerance hit 0
+tolerance shots 0
+tolerance age 0

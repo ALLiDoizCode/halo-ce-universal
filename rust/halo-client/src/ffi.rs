@@ -699,10 +699,12 @@ pub unsafe extern "C" fn halo_large_weapon_name(tag_index: u32, buffer: *mut c_c
 }
 
 /// Report a hit the engine saw the local player's weapon make: `target` is the
-/// player hit, `weapon` the weapon's tag index in the map, `material` the part
-/// of the target that was hit (an index of the player's body's materials, -1
-/// for none), `ox oy oz` where the shot hit and `tx ty tz` where the engine
-/// has the target (world units). The report goes to the server over the direct
+/// player hit, `damage` the damage effect's tag index in the map (what hurt
+/// the target: the weapon's bullet, its explosion, its blow in melee),
+/// `material` the part of the target that was hit (an index of the player's
+/// body's materials, -1 for none), `scale` the scale the engine dealt the
+/// damage at (see `halo_sim::source`), `ox oy oz` where the shot hit and
+/// `tx ty tz` where the engine has the target (world units). The report goes to the server over the direct
 /// connection, which does not lose it (the server's `report_hits`), made at the
 /// newest server tick the client has heard of; the server checks it and deals
 /// the damage (the client deals none). Returns 1 when the report is on its way,
@@ -711,8 +713,9 @@ pub unsafe extern "C" fn halo_large_weapon_name(tag_index: u32, buffer: *mut c_c
 #[allow(clippy::too_many_arguments)]
 pub extern "C" fn halo_large_report_hit(
     target: u32,
-    weapon: u32,
+    damage: u32,
     material: i32,
+    scale: f32,
     ox: f32,
     oy: f32,
     oz: f32,
@@ -721,13 +724,13 @@ pub extern "C" fn halo_large_report_hit(
     tz: f32,
 ) -> u32 {
     guard(0, || {
-        let (Ok(target), Ok(weapon), Ok(material)) =
-            (u16::try_from(target), u16::try_from(weapon), i16::try_from(material))
+        let (Ok(target), Ok(damage), Ok(material)) =
+            (u16::try_from(target), u16::try_from(damage), i16::try_from(material))
         else {
             return 0;
         };
         match &global().session {
-            Some(session) => session.report_hit(target, weapon, material, [ox, oy, oz], [tx, ty, tz]) as u32,
+            Some(session) => session.report_hit(target, damage, material, scale, [ox, oy, oz], [tx, ty, tz]) as u32,
             None => 0,
         }
     })

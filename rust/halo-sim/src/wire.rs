@@ -60,7 +60,7 @@ pub fn decode_inputs(batch: &[u8]) -> Result<Vec<PlayerInput>, BadBatchLength> {
 }
 
 /// Bytes per hit report in a batch of them (see [`encode_hits`]).
-pub const HIT_SIZE: usize = 2 + 2 + 2 + 4 + 6 * 4;
+pub const HIT_SIZE: usize = 2 + 2 + 2 + 4 + 4 + 6 * 4;
 
 /// The most hit reports the match module takes in one call.
 pub const MAX_HITS_PER_CALL: usize = 64;
@@ -71,21 +71,23 @@ pub const MAX_HITS_PER_CALL: usize = 64;
 ///
 /// ```text
 /// target          u16
-/// weapon          u16   the weapon's tag index
+/// damage          u16   the damage effect's tag index: what hurt the target
 /// material        i16   the part of the target that was hit, -1 for none
 /// host_tick       u32   the server tick the client had last heard of
+/// scale           f32   the scale the client's engine dealt the damage at
 /// origin          f32 x 3   where the shot hit
 /// target_position f32 x 3   where the shooter saw the target
 /// ```
 ///
-/// all little-endian, 34 bytes a record, floats as their IEEE-754 bits.
+/// all little-endian, 38 bytes a record, floats as their IEEE-754 bits.
 pub fn encode_hits(hits: &[crate::combat::HitReport]) -> Vec<u8> {
     let mut out = Vec::with_capacity(hits.len() * HIT_SIZE);
     for h in hits {
         out.extend_from_slice(&h.target.to_le_bytes());
-        out.extend_from_slice(&h.weapon.to_le_bytes());
+        out.extend_from_slice(&h.damage.to_le_bytes());
         out.extend_from_slice(&h.material.to_le_bytes());
         out.extend_from_slice(&h.host_tick.to_le_bytes());
+        out.extend_from_slice(&h.scale.to_le_bytes());
         for v in h.origin.iter().chain(&h.target_position) {
             out.extend_from_slice(&v.to_le_bytes());
         }
@@ -105,11 +107,12 @@ pub fn decode_hits(batch: &[u8]) -> Result<Vec<crate::combat::HitReport>, BadBat
             let f = |i: usize| f32::from_le_bytes(r[10 + 4 * i..14 + 4 * i].try_into().unwrap());
             crate::combat::HitReport {
                 target: u16::from_le_bytes([r[0], r[1]]),
-                weapon: u16::from_le_bytes([r[2], r[3]]),
+                damage: u16::from_le_bytes([r[2], r[3]]),
                 material: i16::from_le_bytes([r[4], r[5]]),
                 host_tick: u32::from_le_bytes([r[6], r[7], r[8], r[9]]),
-                origin: [f(0), f(1), f(2)],
-                target_position: [f(3), f(4), f(5)],
+                scale: f(0),
+                origin: [f(1), f(2), f(3)],
+                target_position: [f(4), f(5), f(6)],
             }
         })
         .collect())
@@ -193,26 +196,29 @@ mod tests {
         let hits = [
             crate::combat::HitReport {
                 target: 0x0102,
-                weapon: 476,
+                damage: 476,
                 material: -1,
                 host_tick: 0x0A0B0C0D,
+                scale: 0.5,
                 origin: [1.0, -2.5, 3.25],
                 target_position: [f32::NAN, 0.0, -0.0],
             },
             crate::combat::HitReport {
                 target: 7,
-                weapon: 1,
+                damage: 1,
                 material: 3,
                 host_tick: 5,
+                scale: 1.5,
                 origin: [0.0; 3],
                 target_position: [9.0; 3],
             },
         ];
         let bytes = encode_hits(&hits);
         assert_eq!(bytes.len(), 2 * HIT_SIZE);
-        assert_eq!(HIT_SIZE, 34);
+        assert_eq!(HIT_SIZE, 38);
         assert_eq!(&bytes[..10], [0x02, 0x01, 0xDC, 0x01, 0xFF, 0xFF, 0x0D, 0x0C, 0x0B, 0x0A]);
-        assert_eq!(&bytes[10..14], 1.0f32.to_le_bytes());
+        assert_eq!(&bytes[10..14], 0.5f32.to_le_bytes());
+        assert_eq!(&bytes[14..18], 1.0f32.to_le_bytes());
         let back = decode_hits(&bytes).unwrap();
         assert_eq!(encode_hits(&back), bytes);
         assert_eq!(back[1], hits[1]);

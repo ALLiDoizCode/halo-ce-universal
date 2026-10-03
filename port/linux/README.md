@@ -322,20 +322,26 @@ counted forward by the client and the server, so a recharge writes nothing).
   (`large_mode_damage_deals`); in its place, when the local player's shot
   hits a remote player's unit, the game reports the hit to the server
   (`halo_large_report_hit`), once a tick in a batch of at most 64, with the
-  weapon, the part of the body, where the shot hit and where the shooter saw
-  the target. The report goes in the reliable reducer `report_hits` over the
-  direct connection and not in a datagram: a hit lost on the way would be a
-  kill lost, and the connection says who shot.
+  damage (the damage effect's tag, which says what hurt the player: a bullet,
+  an explosion or a melee blow, and so which weapon's it is), the part of the
+  body, the scale the engine dealt it at (how far a bullet had flown, how far
+  the player was from the blast, how fast the blow was struck), where it hit and
+  where the shooter saw the target. The report goes in the reliable reducer
+  `report_hits` over the direct connection and not in a datagram: a hit lost on
+  the way would be a kill lost, and the connection says who shot.
 - The server judges each report (`halo_sim::combat::resolve`: finite numbers,
-  both players alive and in the match, not oneself, the weapon carried or put
-  down in the last 10 seconds, not older than 3 seconds nor from the future,
-  the impact at the target, no more hits than the weapon fires, the shooter
-  within the weapon's reach, the target near where the shooter saw it). A
-  report that fails is dropped, counted against the shooter (the private table
-  `shooter`) and in `match_tick.rejected_hits`, and logged by `halo-server`
-  (`rejected hits N (+M)`). A hit that passes deals the weapon's damage to the
-  target's shield and health as the engine does; the hit that takes the last
-  health is a death for the rules, with the shooter as the killer, who scores.
+  both players alive and in the match, not oneself, a weapon carried (or put
+  down in the last 15 seconds) that has the damage, not older than 3 seconds
+  nor from the future, the impact at the target, no more hits than the
+  weapon fires (a pellet of a shotgun's shot is a hit, a blast that hurts
+  several is one), the shooter within the weapon's reach, the target near where
+  the shooter saw it). A report that fails is dropped, counted against the
+  shooter (the private table `shooter`) and in `match_tick.rejected_hits`, and
+  logged by `halo-server` (`rejected hits N (+M)`). A hit that passes deals the
+  damage to the target's shield and health as the engine does, rolled by the
+  server at the report's scale brought down to what the server's view allows
+  (`halo_sim::source::limit`); the hit that takes the last health is a death
+  for the rules, with the shooter as the killer, who scores.
 - The game shows the server's shield and health on the local HUD (the shield
   flash and the recharge are the engine's own, driven by the table), and a
   remote player the hits killed falls and stays as a body.
@@ -374,10 +380,10 @@ on the wire firing, hitting and killing another and the game's player, with the
 sounds each causes; and a hundred players in view (the frame rate, with
 `HALO_FPS_FLOOR`).
 
-`rust/halo-client/tests/combat_headless.rs` runs three real games: the game
-shoots a simulated player until it dies; simulated players shoot the game's
-player (shield down, recharge, death, respawn); a bystander watches one
-simulated player kill another. Run it as `headless` above, with
+`rust/halo-client/tests/combat_headless.rs` runs real games: the game
+shoots a simulated player until it dies, with the pistol and with the plasma
+rifle; simulated players shoot the game's player (shield down, recharge,
+death, respawn); a bystander watches one simulated player kill another. Run it as `headless` above, with
 `--test combat_headless -- --test-threads=1`.
 
 ### Items and pickups

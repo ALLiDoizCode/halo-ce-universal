@@ -60,6 +60,7 @@ pub mod pickups;
 mod pill;
 mod rng;
 pub mod rules;
+pub mod source;
 pub mod spawn;
 mod state;
 mod step;

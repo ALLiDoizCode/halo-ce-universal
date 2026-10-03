@@ -2,11 +2,12 @@
 //! runs on the real Blood Gulch: the game's own engine fires the pistol and
 //! reports what it hits, the server checks the reports and deals the damage, and
 //! what the server says of each player's health and shields is what the engine
-//! shows. Three runs of the game, each with simulated players beside it:
+//! shows. Runs of the game, each with simulated players beside it:
 //!
 //! - **the shooter**: the game aims at a simulated player and holds the trigger
 //!   (`large.autofire`); the server kills the player with the game's reported hits,
-//!   credits the game's player with the kill, and the player respawns;
+//!   credits the game's player with the kill, and the player respawns; the same
+//!   with the plasma rifle (bolts that take time to fly, and heat);
 //! - **the victim**: a simulated player reports hits on the game's player, as a
 //!   client would: the game's HUD shows the shield going down, staying down for
 //!   the stun and recharging, and the game's player is killed by hits and spawns
@@ -217,18 +218,20 @@ impl Arena {
         let p = &self.owner.players()[&target];
         HitReport {
             target,
-            weapon: self.pistol(),
+            damage: self.pistol_damage(),
             material,
+            scale: 1.0,
             host_tick: self.tick() as u32,
             origin: [p.x, p.y, p.z + 0.3],
             target_position: [p.x, p.y, p.z],
         }
     }
 
-    /// The pistol's tag index in Blood Gulch, as the match's own map has it.
-    fn pistol(&self) -> u16 {
+    /// The damage effect tag of the pistol's bullet in Blood Gulch, as the match's own map has it.
+    fn pistol_damage(&self) -> u16 {
         let map = halo_map::HaloMap::from_path(self.data.join("maps/bloodgulch.map")).unwrap();
-        map.combat.weapons.iter().find(|w| w.name == "weapons\\pistol\\pistol.weap").unwrap().tag_index
+        let pistol = map.combat.weapons.iter().find(|w| w.name == "weapons\\pistol\\pistol.weap").unwrap();
+        pistol.triggers[0].projectile.as_ref().unwrap().impact_damage.unwrap().tag_index
     }
 
     fn finish(self, game: Game) {
@@ -299,6 +302,59 @@ fn the_game_shoots_a_player_dead_with_the_pistol_and_the_server_counts_the_kill(
         a.rejected_hits()
     );
     a.finish(game);
+}
+
+/// A weapon's tag index in Blood Gulch, as the match's own map has it.
+fn weapon_tag(data: &Path, name: &str) -> u16 {
+    let map = halo_map::HaloMap::from_path(data.join("maps/bloodgulch.map")).unwrap();
+    map.combat.weapons.iter().find(|w| w.name == name).unwrap_or_else(|| panic!("no {name} in the map")).tag_index
+}
+
+/// The game holds `weapon` (which the owner keeps putting in the player's hands from the moment they are seated: the
+/// server gives a player who spawns the starting weapon, and the game takes the weapon the server says when its unit
+/// first spawns, so the weapon has to be there when it does), shoots the player in front of it dead with it, and
+/// the server counts the kill as the game's; `what` says what the weapon is for the log.
+fn the_game_kills_with(name: &str, weapon: &str, what: &str) {
+    let Some(a) = arena(name, &[at(84.0, -166.2, std::f32::consts::PI), at(80.0, -166.2, 0.0)]) else {
+        return;
+    };
+    let (_target, target_id) = a.seat(1);
+    assert_eq!(target_id, 0);
+    let (game, log) = a.start_game(130, &[("HALO_LARGE_AUTOFIRE", "1")]);
+    let me = wait_for("the game's seat", 60, || a.owner.seats().values().map(|s| s.player).find(|p| *p != target_id));
+    let tag = weapon_tag(&a.data, weapon);
+    wait_for("the game to take the weapon", 60, || {
+        a.owner.set_loadout(me, tag, u16::MAX).ok()?;
+        read(&log).contains("the local unit is given").then_some(())
+    });
+    wait_for("the game to hold the server's weapon", 60, || {
+        read(&log).contains("the local unit holds the server's weapon").then_some(())
+    });
+    let output = read(&log);
+    assert!(output.contains(&format!("the local unit is given {}", weapon.trim_end_matches(".weap"))), "{output}");
+    println!("the game is player {me}, holding {what}");
+
+    wait_for("the first hit to hurt the target", 60, || (a.owner.fighters()[&target_id].hurt_count > 0).then_some(()));
+    assert_eq!(a.owner.fighters()[&target_id].hurt_by, me, "the hit is the game's player's");
+    wait_for("the target's death", 60, || (a.owner.standings()[&target_id].state == STATE_DEAD).then_some(()));
+    let standings = a.owner.standings();
+    println!("the target died: the game's player has {} points", standings[&me].score);
+    assert_eq!(standings[&me].score, 1, "the kill is the game's");
+    assert_eq!(standings[&target_id].deaths, 1);
+    let reports = read(&log).matches("large mode: a hit on player").count();
+    assert!(reports >= 1, "the engine's hooks reported hits:\n{}", read(&log));
+    println!("the server refused {} hit reports", a.rejected_hits());
+    assert!(
+        a.rejected_hits() <= 3,
+        "the engine's reports of {what} pass the server's checks: {} refused",
+        a.rejected_hits()
+    );
+    a.finish(game);
+}
+
+#[test]
+fn the_game_shoots_a_player_dead_with_the_plasma_rifle_whose_bolts_take_time_to_fly() {
+    the_game_kills_with("combat-plasma-rifle", "weapons\\plasma rifle\\plasma rifle.weap", "the plasma rifle");
 }
 
 #[test]

@@ -230,8 +230,9 @@ impl Arena {
         let p = &self.owner.players()[&target];
         HitReport {
             target,
-            weapon: self.pistol().tag_index,
+            damage: self.pistol().triggers[0].projectile.as_ref().unwrap().impact_damage.unwrap().tag_index,
             material,
+            scale: 1.0,
             host_tick: self.tick() as u32,
             origin: [p.x, p.y, p.z + 0.3],
             target_position: [p.x, p.y, p.z],
