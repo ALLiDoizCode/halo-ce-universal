@@ -224,9 +224,10 @@ static const struct config_setting config_settings[] =
 	{ "large.autofire", _config_boolean, "false", "HALO_LARGE_AUTOFIRE", _environment_set_is_true, _platform_desktop,
 		"The large-scale mode's player aims at the nearest other player in the world\n"
 		"and holds the trigger down (for the automated tests' shooter)." },
-	{ "large.autouse", _config_boolean, "false", "HALO_LARGE_AUTOUSE", _environment_set_is_true, _platform_desktop,
-		"The large-scale mode's player presses the action button twice a second, to\n"
-		"pick up or swap for what is at their feet (for the automated tests)." },
+	{ "large.autouse", _config_real, "0.0", "HALO_LARGE_AUTOUSE", _environment_value, _platform_desktop,
+		"The large-scale mode's player presses the action button twice a second, from\n"
+		"this many seconds after the weapon is in hand, to pick up or swap for what is\n"
+		"at their feet (for the automated tests); 0 never." },
 	{ "debug.network_test", _config_string, "\"\"", "HALO_NETWORK_TEST", _environment_value, _platform_all,
 		"Automated system link sessions for testing (port/linux/game/network_test.c):\n"
 		"\"host:<map>\" hosts a game on that map, \"join\" joins the first game found;\n"

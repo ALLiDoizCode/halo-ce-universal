@@ -52,7 +52,7 @@ use alloc::vec::Vec;
 use halo_map::items::powerup;
 
 use crate::combat::{CombatStore, Loadout, NO_WEAPON};
-use crate::items::{drop_item, Ammo, Item, ItemId, ItemStore, Kit};
+use crate::items::{drop_item, Ammo, Item, ItemId, ItemStore};
 use crate::map::MapData;
 use crate::math::{sin_cos, Vec3};
 use crate::rng::Rng;
@@ -448,9 +448,4 @@ pub fn report_ammo(
     }
     items.set_kit(kit);
     true
-}
-
-/// Where a kit says a player is camouflaged: for a client that shows it.
-pub fn is_camouflaged(kit: &Kit, tick: u64) -> bool {
-    kit.is_camouflaged(tick)
 }

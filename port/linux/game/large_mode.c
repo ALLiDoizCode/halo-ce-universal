@@ -133,6 +133,7 @@ the library) the mode is not there: large_mode_active() is FALSE.
 /* the platform layer's (port/linux/src/port_config.c, xbox_files.c) */
 const char *config_string(char const *name);
 long config_integer(char const *name);
+double config_real(char const *name);
 int config_boolean(char const *name);
 void platform_log(char const *format, ...);
 void platform_translate_path(const char *xbox_path, char *host_path, unsigned long host_path_size);
@@ -313,12 +314,14 @@ static struct
 	it twice a second) and when it last did, the rounds last told to the server and when, and the version
 	of the server's rounds last taken */
 	boolean action_held;
-	boolean autouse;
+	real autouse_after;
+	long autouse_start;
 	long autouse_time;
 	unsigned long reported_rounds[4];
 	long reported_time;
 	boolean kit_seen;
 	unsigned long kit_version;
+	long synced_unit;
 } large;
 
 static void large_mode_read_settings(
@@ -336,7 +339,7 @@ static void large_mode_read_settings(
 		large.log_players = config_boolean("large.log_players") != 0;
 		large.scoreboard_always = config_boolean("large.scoreboard") != 0;
 		large.autofire = config_boolean("large.autofire") != 0;
-		large.autouse = config_boolean("large.autouse") != 0;
+		large.autouse_after = (real)config_real("large.autouse");
 		if (large.root[0])
 		{
 			large.browser_mode = TRUE;
@@ -352,7 +355,7 @@ static void large_mode_read_settings(
 	large.log_players = config_boolean("large.log_players") != 0;
 	large.scoreboard_always = config_boolean("large.scoreboard") != 0;
 	large.autofire = config_boolean("large.autofire") != 0;
-	large.autouse = config_boolean("large.autouse") != 0;
+	large.autouse_after = (real)config_real("large.autouse");
 	if (!large.database[0])
 	{
 		platform_log("large mode: large.database names the match's database and cannot be missing: the game is "
@@ -438,6 +441,7 @@ void large_mode_new_game(
 	large.reported_time = 0;
 	memset(large.reported_rounds, 0, sizeof(large.reported_rounds));
 	large.kit_seen = FALSE;
+	large.synced_unit = NONE;
 	large_mode_forget_items();
 	large_mode_forget_remotes();
 	/* (with a server list the session is the player's join's, which started it) */
@@ -1788,9 +1792,25 @@ static void large_mode_sync_weapons(
 	unsigned long kit[5];
 	short slot;
 	boolean in_step = TRUE;
+	/* (the weapon a new unit starts with is not a pickup to tell the player of) */
+	boolean announce = large.synced_unit == unit_index;
 
 	if (!halo_large_loadout(large.player_id, weapons))
 		return;
+	large.synced_unit = unit_index;
+	/* (the server's loadout is two slots: the engine's other slots hold what the first equip put where
+	it was free, and are the server's no longer) */
+	for (slot = 2; slot < MAXIMUM_WEAPONS_PER_UNIT; slot++)
+	{
+		long extra = unit->unit.weapon_object_indices[slot];
+
+		if (extra != NONE)
+		{
+			unit_network_forget_weapon(unit_index, slot);
+			if (object_try_and_get_and_verify_type(extra, _object_mask_weapon))
+				object_delete(extra);
+		}
+	}
 	for (slot = 0; slot < 2; slot++)
 	{
 		long have = unit->unit.weapon_object_indices[slot];
@@ -1836,7 +1856,8 @@ static void large_mode_sync_weapons(
 			unit->unit.desired_weapon_index = slot;
 			player_control_set_desired_weapon(unit_index, slot);
 			platform_log("large mode: the local unit takes a weapon (slot %d): %s", (int)slot, name);
-			network_player_show_pickup(local_player_get_player_index(0), _large_pickup_weapon, definition_index, 0);
+			if (announce)
+				network_player_show_pickup(local_player_get_player_index(0), _large_pickup_weapon, definition_index, 0);
 			/* (and what rounds the server has for it, below) */
 			large.kit_seen = FALSE;
 		}
@@ -1862,7 +1883,8 @@ static void large_mode_sync_weapons(
 
 /* the action button, as the player's press: the server says what they take (the engine does not pick
 anything up in this mode, but it still says what there is to swap for, on the HUD, from the objects that
-show the server's items). large.autouse presses it twice a second. */
+show the server's items). large.autouse presses it twice a second, from some seconds after the first weapon is
+in hand. */
 static void large_mode_use_local(
 	struct unit_datum *unit)
 {
@@ -1870,7 +1892,8 @@ static void large_mode_use_local(
 	boolean press = held && !large.action_held;
 
 	large.action_held = held;
-	if (large.autouse && game_time_get() - large.autouse_time >= LARGE_AUTOUSE_TICKS)
+	if (large.autouse_after > 0.0f && game_time_get() >= large.autouse_start &&
+		game_time_get() - large.autouse_time >= LARGE_AUTOUSE_TICKS)
 	{
 		large.autouse_time = game_time_get();
 		press = TRUE;
@@ -2220,6 +2243,7 @@ void large_mode_game_tick(
 			if (large_mode_equip_local(unit_index))
 			{
 				large.equipped_unit = unit_index;
+				large.autouse_start = game_time_get() + (long)(large.autouse_after * TICKS_PER_SECOND);
 				platform_log("large mode: the local unit holds the server's weapon");
 			}
 		}
