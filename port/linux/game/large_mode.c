@@ -872,7 +872,8 @@ static long large_mode_weapon_definition(
 	if (dot)
 		*dot = 0;
 	definition_index = tag_loaded(WEAPON_DEFINITION_TAG, name);
-	if (large_remote_data.weapon_cache_count < LARGE_WEAPON_CACHE)
+	/* (only a tag that was found is kept: one that was not may be asked for again) */
+	if (definition_index != NONE && large_remote_data.weapon_cache_count < LARGE_WEAPON_CACHE)
 	{
 		slot = large_remote_data.weapon_cache_count++;
 		large_remote_data.weapon_cache_tag[slot] = tag_index;
