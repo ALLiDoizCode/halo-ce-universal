@@ -275,6 +275,7 @@ fn main() {
     ));
     ticks_per_second(&seen_ticks, &mut line);
 
+    let near_capacity = halo_gateway::harness::near_capacity(budget as u32);
     let window_ticks = (window_secs * TICKS_PER_SECOND) as usize;
     let all: Vec<u32> = truth.ticks.keys().copied().collect();
     let mut worst = (0.0f64, 0u32);
@@ -286,6 +287,7 @@ fn main() {
         let r = analyze(&crowd, &truth, range, &DEFAULT_BANDS);
         line(format!("-- window {n}: ticks {}..{} --", chunk[0], chunk[chunk.len() - 1]));
         line(r.to_string().trim_end().to_string());
+        line(r.near_summary(near_capacity));
         if r.max_download > worst.0 {
             worst = (r.max_download, n as u32);
         }
@@ -301,6 +303,7 @@ fn main() {
         let r = analyze(&crowd, &truth, all[3]..all[all.len() - 3], &DEFAULT_BANDS);
         line("-- the whole of it --".to_string());
         line(r.to_string().trim_end().to_string());
+        line(r.near_summary(near_capacity));
     }
 
     scoreboard(&watcher, &mut line);
