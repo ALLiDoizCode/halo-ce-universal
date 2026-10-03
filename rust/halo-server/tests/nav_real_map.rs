@@ -86,7 +86,7 @@ fn a_crowd_told_where_it_is_a_tick_late_gets_to_the_other_base() {
     let (red, blue) = bases(&map);
     let players = 500u16;
     let (mut walkers, _) = Walkers::new(map.clone(), &starts, players, 7);
-    let goal = |id: u16| if id % 2 == 0 { blue } else { red };
+    let goal = |id: u16| if id.is_multiple_of(2) { blue } else { red };
     let position = |w: &Walkers, id: u16| w.mirror.player(id).expect("a player").position;
     let mut sent: Vec<Vec<[f32; 3]>> = (0..players).map(|id| vec![position(&walkers, id); 2]).collect();
     let mut scratch = Scratch::default();
@@ -120,7 +120,7 @@ fn a_crowd_told_where_it_is_a_tick_late_gets_to_the_other_base() {
             })
             .collect();
         walkers.sync_with_server(rows.iter());
-        if tick % TICKS_PER_SECOND as u64 == 0 {
+        if tick.is_multiple_of(TICKS_PER_SECOND as u64) {
             for input in &inputs {
                 if let Some(heading) = nav.heading(&mut scratch, input.position, goal(input.player)) {
                     walkers.set_course(input.player, 1.0, heading);
