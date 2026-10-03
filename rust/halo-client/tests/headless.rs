@@ -37,7 +37,6 @@ use std::time::{Duration, Instant};
 use halo_gateway::harness::{Crowd, Impairment, Rig, RigSetup, Truth};
 use halo_match_driver::server::{build_module, stdb_bin_dir};
 use halo_sim::MapData;
-use halo_wire::unit::Bounds;
 
 /// Players seated and walking beside the game's, which takes the next seat
 /// (`HALO_HEADLESS_PLAYERS` says another number, such as 500 for the adapter's
@@ -68,6 +67,11 @@ impl Drop for Game {
         let _ = self.0.wait();
     }
 }
+
+/// How far from the position of a player's state the game may draw them (the log has the drawn
+/// position, which is where the state would have taken the player by now): the state's age is at most
+/// the extrapolation's limit of 15 ticks, at the fastest legal speed of 4 units a second, and a little over.
+const EXTRAPOLATED: f32 = 2.2;
 
 /// What one log line of the game says about one player.
 #[derive(Debug, Clone, PartialEq)]
@@ -140,7 +144,6 @@ fn the_logged_players_are_the_ones_the_server_sent() {
     let halo_map = halo_map::HaloMap::from_path(maps.join("bloodgulch.map")).expect("Blood Gulch");
     let anchors: Vec<[f32; 3]> = halo_map.player_starts.iter().map(|s| s.position).collect();
     let map = MapData::from(halo_map);
-    let bounds = Bounds::from_world(map.world_bounds);
     let wasm = build_module();
     let mut rig = Rig::start(
         &stdb,
@@ -249,7 +252,7 @@ fn the_logged_players_are_the_ones_the_server_sent() {
         let want = at.positions[l.player as usize].expect("a state of a player the server has");
         for (axis, held) in want.iter().enumerate() {
             // the packing's resolution, and the log's four decimals
-            let step = (bounds.max[axis] - bounds.min[axis]) / 65535.0 + 0.0001;
+            let step = EXTRAPOLATED;
             assert!(
                 (l.position[axis] - held).abs() <= step,
                 "tick {}, player {}, axis {axis}: logged {} but the server held {}",
@@ -285,7 +288,7 @@ fn the_logged_players_are_the_ones_the_server_sent() {
         let Some(at) = truth.ticks.get(&d.tick) else { continue };
         let want = at.positions[d.player as usize].expect("a state of a player the server has");
         for (axis, held) in want.iter().enumerate() {
-            let step = (bounds.max[axis] - bounds.min[axis]) / 65535.0 + 0.0001;
+            let step = EXTRAPOLATED;
             assert!(
                 (d.position[axis] - held).abs() <= step,
                 "tick {}, player {}, axis {axis}: drawn at {} but the server held {}",
@@ -307,7 +310,7 @@ fn the_logged_players_are_the_ones_the_server_sent() {
         if let Some(state) = held.get(&(d.player, d.tick)) {
             for (axis, held) in state.iter().enumerate() {
                 assert!(
-                    (d.position[axis] - held).abs() <= 0.00011,
+                    (d.position[axis] - held).abs() <= EXTRAPOLATED,
                     "tick {}, player {}, axis {axis}: drawn at {} but the library held {}",
                     d.tick,
                     d.player,
