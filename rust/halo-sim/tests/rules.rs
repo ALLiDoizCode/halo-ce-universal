@@ -224,7 +224,8 @@ fn a_start_inside_a_wall_is_moved_clear_of_it() {
 fn a_spawned_player_can_be_moved_by_the_step_from_where_they_were_put() {
     let mut m = Match::new(floor_with(3), Rules::slayer());
     m.join(2, 0);
-    m.run(1);
+    // (the moves that reach the server just after a spawn are dropped: see `SPAWN_INPUT_DELAY_TICKS`)
+    m.run(1 + halo_sim::rules::SPAWN_INPUT_DELAY_TICKS);
     let at = m.store.player(2).unwrap().position;
     let input = PlayerInput { player: 2, position: [at[0] + 0.05, at[1], at[2]], yaw: 0.5, pitch: 0.0, flags: 0 };
     let events = {
@@ -501,6 +502,39 @@ fn a_dead_player_does_not_move() {
     let outcome = play(&mut m.store, &mut m.game, &m.map, &mut m.rng, m.tick, &[], &[input]);
     assert!(outcome.moves.is_empty(), "the input of a dead player is dropped: {:?}", outcome.moves);
     assert_eq!(m.store.player(1).unwrap().position, at);
+}
+
+#[test]
+fn a_move_that_was_on_its_way_when_the_player_spawned_is_dropped_not_refused() {
+    // the client sends where its unit is (the body, once dead) until it hears of the spawn: the
+    // moves it sent in that time reach the server after the player has been put at the start
+    let mut m = Match::new(floor_with(4), Rules::slayer());
+    m.join(0, 0);
+    m.join(1, 0);
+    m.run(1);
+    let body = m.store.player(1).unwrap().position;
+    m.tick(&[kill(1, 0)], &[]);
+    m.run(89);
+    let events = m.tick(&[], &[]);
+    assert!(spawned(&events).contains(&1));
+    let start = m.store.player(1).unwrap().position;
+    // (the body lay somewhere else on the floor than the start the player is given)
+    let body = [body[0] + 60.0, body[1], body[2]];
+    assert!(distance(start, body) > 5.0, "the start is not where the body lay");
+    let stale = PlayerInput { player: 1, position: body, yaw: 0.0, pitch: 0.0, flags: 0 };
+    for _ in 0..halo_sim::rules::SPAWN_INPUT_DELAY_TICKS {
+        m.tick += 1;
+        let outcome = play(&mut m.store, &mut m.game, &m.map, &mut m.rng, m.tick, &[], &[stale]);
+        assert!(outcome.moves.is_empty(), "dropped, not refused: {:?}", outcome.moves);
+        assert_eq!(m.store.player(1).unwrap().position, start);
+    }
+    // ... and the first move from the start after that is judged as any other
+    m.tick += 1;
+    let from_start =
+        PlayerInput { player: 1, position: [start[0] + 0.05, start[1], start[2]], yaw: 0.0, pitch: 0.0, flags: 0 };
+    let outcome = play(&mut m.store, &mut m.game, &m.map, &mut m.rng, m.tick, &[], &[from_start]);
+    assert!(outcome.moves.iter().all(|e| matches!(e, Event::MoveAccepted { .. })), "{:?}", outcome.moves);
+    assert_eq!(m.store.player(1).unwrap().position, [start[0] + 0.05, start[1], start[2]]);
 }
 
 // ---- the end

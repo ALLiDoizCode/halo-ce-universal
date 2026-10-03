@@ -448,9 +448,15 @@ pub fn begin(game: &mut impl GameStore, tick: u64) {
     }
 }
 
+/// How many ticks after a spawn the moves that reach the server are the ones the
+/// player's client sent before it heard of the spawn (the tick's completion reaches
+/// the gateway's connection, then the client; the client's input comes back through
+/// the gateway and the next tick's batch), and so are dropped without being judged.
+pub const SPAWN_INPUT_DELAY_TICKS: u64 = 3;
+
 /// Advance the match by one tick (1/30 s), at match tick `tick`: apply the
 /// deaths, end the match if its time is up, judge the moves of the players who
-/// are alive (the input of a player who is dead is dropped), and spawn the
+/// are alive (the input of a player who is dead, or has just spawned, is dropped), and spawn the
 /// players who are due. The one place where the rules and the step meet.
 pub fn play(
     store: &mut impl Store,
@@ -482,9 +488,18 @@ pub fn play(
     }
 
     // only a player who is alive moves (an input for a player the rules do not
-    // know goes to the step, which refuses it)
-    let living: Vec<PlayerInput> =
-        inputs.iter().filter(|i| game.contestant(i.player).is_none_or(|c| c.is_alive())).copied().collect();
+    // know goes to the step, which refuses it), and not at once after a spawn: what
+    // their client sent before it heard of the spawn is still on its way, from where
+    // their body was, and would be refused as a move across the map
+    let living: Vec<PlayerInput> = inputs
+        .iter()
+        .filter(|i| {
+            game.contestant(i.player).is_none_or(|c| {
+                c.is_alive() && (c.spawned_tick == 0 || tick > c.spawned_tick + SPAWN_INPUT_DELAY_TICKS)
+            })
+        })
+        .copied()
+        .collect();
     let moves = step(store, &living, map, rng);
 
     events.extend(spawn_due(store, game, map, rng, tick));
