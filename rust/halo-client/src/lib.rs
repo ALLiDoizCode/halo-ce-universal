@@ -19,8 +19,9 @@ pub mod browser;
 pub mod ffi;
 pub mod identity;
 pub mod local;
+pub mod remote;
 pub mod session;
 
 pub use browser::{Browser, ServerEntry};
 pub use identity::IdentityFile;
-pub use session::{Config, Frame, Refusal, RefusalKind, RemoteUnit, Session, Slow};
+pub use session::{Config, DrawnUnit, Frame, Refusal, RefusalKind, RemoteUnit, Session, Slow};

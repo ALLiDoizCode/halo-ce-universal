@@ -25,6 +25,7 @@ use halo_gateway::harness::{analyze, run_walk, Crowd, Impairment, Rig, RigSetup,
 use halo_match_driver::server::{build_module, stdb_bin_dir};
 use halo_sim::fixtures::flat_floor_map;
 use halo_sim::MapData;
+use halo_wire::planner::PlannerConfig;
 
 fn main() {
     let args: HashMap<String, String> = std::env::args()
@@ -97,6 +98,8 @@ fn main() {
     );
     println!("datagrams per thread    {:?}", stats.per_thread_datagrams);
 
+    let near_capacity = PlannerConfig::with_budget(budget).near_capacity();
+    println!("{}", report.near_summary(near_capacity));
     let checks: Vec<(String, bool)> = if loss > 0.0 {
         let mut checks = vec![(
             format!("no state older than {stale_bound} ticks ({} ms)", stale_bound * 1000 / 30),
@@ -114,7 +117,10 @@ fn main() {
             ("download per player within the budget".to_string(), report.max_download <= budget as f64 * 1.001),
             ("every player receives every tick".to_string(), report.missed_ticks == 0),
             ("median tick age under 10 ms".to_string(), report.tick_age_ms.p50 < 10.0 || delay_ms > 0),
-            ("players within 10 wu updated every tick".to_string(), report.bands[0].fraction_updated >= 0.999),
+            (
+                format!("players within 10 wu updated every tick (recipients with up to {near_capacity} of them), else 20 Hz"),
+                report.near_service(near_capacity).is_ok(),
+            ),
             ("sending a tick to everyone under 10 ms (p99)".to_string(), stats.send_ms.p99 < 10.0),
         ]
     };

@@ -19,6 +19,9 @@
 # Settings, as environment variables (defaults in brackets):
 #   PLAYERS [500]   simulated players (the game, if any, is one more)
 #   SCORE_LIMIT [600]  team score that ends the match; SECONDS_LIMIT [900] its time limit
+#   RESPAWN_SECONDS [5]  seconds a dead player waits; SUICIDE_SECONDS [10] more for a suicide or a
+#                   death nobody caused; WAVE_SECONDS [5] between the waves of the fallback
+#                   (all three are written into the server's configuration, and the report prints them)
 #   END_SECS [90]   seconds the final scoreboard stays up; HOLD [END_SECS] seconds the
 #                   simulated players stay seated after the end (they must outlast the scoreboard)
 #   SHOTS [0.5]     shots a second per player with a target in range; RANGE [25];
@@ -49,6 +52,9 @@ repo=$(cd "$rust/.." && pwd)
 PLAYERS=${PLAYERS:-500}
 SCORE_LIMIT=${SCORE_LIMIT:-600}
 SECONDS_LIMIT=${SECONDS_LIMIT:-900}
+RESPAWN_SECONDS=${RESPAWN_SECONDS:-5}
+SUICIDE_SECONDS=${SUICIDE_SECONDS:-10}
+WAVE_SECONDS=${WAVE_SECONDS:-5}
 END_SECS=${END_SECS:-90}
 HOLD=${HOLD:-$END_SECS}
 WINDOW=${WINDOW:-30}
@@ -107,6 +113,9 @@ game_type = "team_slayer"
 capacity = $((PLAYERS + 10))
 seconds = $SECONDS_LIMIT
 score_limit = $SCORE_LIMIT
+respawn_seconds = $RESPAWN_SECONDS
+suicide_penalty_seconds = $SUICIDE_SECONDS
+wave_seconds = $WAVE_SECONDS
 TOML
 
 stdb=""

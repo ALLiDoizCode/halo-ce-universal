@@ -31,7 +31,7 @@ use halo_sim::MapData;
 use crate::browser::{Browser, ServerEntry};
 use crate::identity::IdentityFile;
 use crate::local::Local;
-use crate::session::{Config, LifeState, Member, RefusalKind, RemoteUnit, Session, Standing};
+use crate::session::{Config, DrawnUnit, LifeState, Member, RefusalKind, Session, Standing};
 
 #[derive(Default)]
 struct Global {
@@ -39,7 +39,7 @@ struct Global {
     /// The local player's own movement, once the map is being read.
     local: Option<Local>,
     /// What [`halo_large_frame`] froze, for [`halo_large_unit`] to read.
-    frame: Vec<RemoteUnit>,
+    frame: Vec<DrawnUnit>,
     /// What [`halo_large_scoreboard_freeze`] froze, best first, for
     /// [`halo_large_scoreboard_row`] to read.
     board: Vec<(u16, Standing, Member)>,
@@ -164,7 +164,13 @@ pub unsafe extern "C" fn halo_large_load_map(path: *const c_char) -> u32 {
             global().error = "a null path".into();
             return 0;
         };
-        global().local = Some(Local::load(path));
+        let local = Local::load(path);
+        let mut g = global();
+        // (the other players are drawn down to the ground of the same map)
+        if let Some(session) = &g.session {
+            session.use_map(local.map_handle());
+        }
+        g.local = Some(local);
         1
     })
 }
@@ -360,7 +366,8 @@ pub unsafe extern "C" fn halo_large_frame(tick: *mut u32) -> u32 {
 
 /// One state of the frozen frame, `index` below the count [`halo_large_frame`]
 /// returned. Returns 1, or 0 when there is no such state. `player` is the
-/// player number, `tick` the tick of the datagram that carried the state, and
+/// player number, `tick` the tick of the datagram that carried the state (the
+/// newest tick of [`halo_large_frame`] less it is the state's age), and
 /// `out` has nine `float`s: position `x y z` (world units), velocity
 /// `x y z` (world units a second), yaw and pitch (radians), and the player's
 /// flags as a number (1 in the air, 2 crouched: `halo_sim::FLAG_AIRBORNE`,
@@ -381,18 +388,41 @@ pub unsafe extern "C" fn halo_large_unit(index: u32, player: *mut u32, tick: *mu
         unsafe {
             *player = s.player as u32;
             *tick = unit.tick;
+            // the position and velocity are the drawn ones: where the state's player is by now (see
+            // `crate::remote`), and the velocity the engine is to play (zero for a player held still)
             std::slice::from_raw_parts_mut(out, 9).copy_from_slice(&[
-                s.position[0],
-                s.position[1],
-                s.position[2],
-                s.velocity[0],
-                s.velocity[1],
-                s.velocity[2],
+                unit.position[0],
+                unit.position[1],
+                unit.position[2],
+                unit.velocity[0],
+                unit.velocity[1],
+                unit.velocity[2],
                 s.yaw,
                 s.pitch,
                 s.flags as f32,
             ]);
         }
+        1
+    })
+}
+
+/// How far off the drawn position was when the state of a unit of the frozen frame
+/// arrived: the distance, in world units, between where the player was drawn
+/// and where the new state's extrapolation put them (0 for a player's first
+/// state). It belongs to the state the unit's `tick` says, so the game logs it
+/// when that tick is a new one. Returns 1, or 0 when there is no such unit.
+///
+/// # Safety
+/// `error` points to a writable `float`.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_unit_error(index: u32, error: *mut f32) -> u32 {
+    guard(0, || {
+        if error.is_null() {
+            return 0;
+        }
+        let g = global();
+        let Some(unit) = g.frame.get(index as usize) else { return 0 };
+        unsafe { *error = unit.arrival_error };
         1
     })
 }

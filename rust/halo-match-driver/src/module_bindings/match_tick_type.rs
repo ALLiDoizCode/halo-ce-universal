@@ -17,6 +17,8 @@ pub struct MatchTick {
     pub hits: u32,
     pub rejected_hits: u32,
     pub rejected_hits_total: u64,
+    pub hits_total: u64,
+    pub rejected_not_where_seen_total: u64,
 }
 
 impl __sdk::InModule for MatchTick {
@@ -37,6 +39,8 @@ pub struct MatchTickCols {
     pub hits: __sdk::__query_builder::Col<MatchTick, u32>,
     pub rejected_hits: __sdk::__query_builder::Col<MatchTick, u32>,
     pub rejected_hits_total: __sdk::__query_builder::Col<MatchTick, u64>,
+    pub hits_total: __sdk::__query_builder::Col<MatchTick, u64>,
+    pub rejected_not_where_seen_total: __sdk::__query_builder::Col<MatchTick, u64>,
 }
 
 impl __sdk::__query_builder::HasCols for MatchTick {
@@ -53,6 +57,11 @@ impl __sdk::__query_builder::HasCols for MatchTick {
             hits: __sdk::__query_builder::Col::new(table_name, "hits"),
             rejected_hits: __sdk::__query_builder::Col::new(table_name, "rejected_hits"),
             rejected_hits_total: __sdk::__query_builder::Col::new(table_name, "rejected_hits_total"),
+            hits_total: __sdk::__query_builder::Col::new(table_name, "hits_total"),
+            rejected_not_where_seen_total: __sdk::__query_builder::Col::new(
+                table_name,
+                "rejected_not_where_seen_total",
+            ),
         }
     }
 }
