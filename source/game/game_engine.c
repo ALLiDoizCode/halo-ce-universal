@@ -1678,6 +1678,7 @@ long distributed_player_ping(short player_index);
 boolean large_mode_active(void);
 boolean large_mode_player_spawn(long player_index, boolean *spawn);
 boolean large_mode_state_message(long player_index, wchar_t *buffer, long count);
+boolean large_mode_bare_remote_unit(long unit_index, long *team, wchar_t *name, long name_size);
 boolean large_mode_scoreboard_active(void);
 boolean large_mode_scoreboard_forced(void);
 boolean large_mode_scoreboard_teams(void);
@@ -2754,6 +2755,53 @@ void game_engine_post_rasterize_post_game(
 	return;
 }
 
+/* port: what the name over the crosshair is told by. A player is told by the index of their
+player record; a remote unit of the large-scale mode that has no record (the engine holds 128) by
+its unit's index without the top bit. The index of a datum always has it (a datum's identifier,
+the index's upper half, is 0x8000 or more), and so has NONE, so the two are never mistaken, and
+the hold time that fades a name in and out works as it does for a player. */
+#define TARGET_ID_FROM_BARE_UNIT(unit_index) ((long)((unsigned long)(unit_index) & 0x7FFFFFFFUL))
+#define TARGET_ID_IS_BARE_UNIT(target_id) ((target_id) >= 0)
+#define BARE_UNIT_FROM_TARGET_ID(target_id) ((long)((unsigned long)(target_id) | 0x80000000UL))
+
+static long target_id_from_unit_index(
+	long unit_index)
+{
+	long player_index = player_index_from_unit_index(unit_index);
+
+	if (player_index == NONE && unit_index != NONE && large_mode_bare_remote_unit(unit_index, NULL, NULL, 0))
+		return TARGET_ID_FROM_BARE_UNIT(unit_index);
+
+	return player_index;
+}
+
+/* the name of the target, as the HUD shows it (size: the characters the buffer holds, with the
+terminator) */
+static boolean target_name_from_id(
+	long target_id,
+	wchar_t *name,
+	long size)
+{
+	if (target_id == NONE)
+		return FALSE;
+	if (TARGET_ID_IS_BARE_UNIT(target_id))
+		return large_mode_bare_remote_unit(BARE_UNIT_FROM_TARGET_ID(target_id), NULL, name, size);
+	ustrncpy(name, player_get(target_id)->name, size - 1);
+	name[size - 1] = 0;
+
+	return TRUE;
+}
+
+/* port: the name that is shown for aiming at the unit, if it has one (the large-scale mode's log
+checks this for every remote unit, with a player record or without) */
+boolean game_engine_unit_target_name(
+	long unit_index,
+	wchar_t *name,
+	long size)
+{
+	return target_name_from_id(target_id_from_unit_index(unit_index), name, size);
+}
+
 static long find_closest_player_index(
 	long player_index)
 {
@@ -2800,7 +2848,7 @@ static long find_closest_player_index(
 			real target_angle;
 
 			if ((candidate->unit.active_camouflage < 1.0f ||
-				player->player_display_index == player_index_from_unit_index(candidate_object_index)) &&
+				player->player_display_index == target_id_from_unit_index(candidate_object_index)) && /* port */
 				autoaim_compute_target(
 					object_indices[object_index],
 					&camera_position,
@@ -2820,7 +2868,7 @@ static long find_closest_player_index(
 	}
 
 	if (best_object_index != NONE)
-		best_object_index = player_index_from_unit_index(best_object_index);
+		best_object_index = target_id_from_unit_index(best_object_index); /* port: or a unit with no player */
 
 	return best_object_index;
 }
@@ -7589,17 +7637,18 @@ static void internal_rasterize_target_name(
 
 	if (player->player_display_index != NONE)
 	{
-		struct player_datum *target_player = player_get(player->player_display_index);
 		wchar_t target_name[12] = { 0 };
 		long hold_time = player->player_display_count;
 		real alpha;
 
 		if (hold_time >= 10)
 			hold_time = 10;
-		ustrncpy(target_name, target_player->name, NUMBEROF(target_name) - 1);
-		target_name[NUMBEROF(target_name) - 1] = 0;
-		alpha = linear_to_non_linear_alpha(hold_time * 0.1f) * 0.5f;
-		game_engine_rasterize_message(target_name, alpha);
+		/* port: a target may be a unit with no player */
+		if (target_name_from_id(player->player_display_index, target_name, NUMBEROF(target_name)))
+		{
+			alpha = linear_to_non_linear_alpha(hold_time * 0.1f) * 0.5f;
+			game_engine_rasterize_message(target_name, alpha);
+		}
 	}
 
 	return;
