@@ -8,9 +8,42 @@
 //! 11      u16     yaw: 65536 is a full turn, counted from 0 radians
 //! 13      i8      pitch: 127 is straight up (+pi/2), -127 straight down
 //! 14      u8      the low 8 bits of the tick this state is from
-//! 15      u8      flags: bit 0 airborne, bit 1 crouched (`halo_sim::FLAG_AIRBORNE`,
-//!                 `halo_sim::FLAG_CROUCHED`); the rest 0
+//! 15      u8      flags (see below)
 //! ```
+//!
+//! # Flags, and how a remote player's shots reach the others
+//!
+//! ```text
+//! bit 0      airborne    the server's judgement of the moves it accepted (`halo_sim::FLAG_AIRBORNE`)
+//! bit 1      crouched    the player's own report (`halo_sim::FLAG_CROUCHED`)
+//! bits 2-4   shots       how many shots the player's weapon has fired, modulo 8
+//!                        (`halo_sim::FLAG_SHOTS_MASK`)
+//! bit 5      reloading   the player's weapon is reloading (`halo_sim::FLAG_RELOADING`)
+//! bits 6-7   free
+//! ```
+//!
+//! Firing is carried in the state and not in a table of shots, or an event of its own. A table of
+//! every shot of everybody is a write per shot and a row for every client to hear of; an event the
+//! gateway had to send would need its own packets, its own loss handling and its own priority. A
+//! state is already sent to exactly the recipients the player matters to (the ones in range), under
+//! the budget, and a lost one costs one update. So the 8 bits of flags cost no byte more: the
+//! shooter's client counts its own shots (`halo_sim::weapon::Hands` says when the trigger fired) and
+//! reports the count with each input, the server passes the counter on (`halo_sim::step`: a client
+//! says its crouch, shot counter and reload, never the air), and the gateway puts it in the packed
+//! state of every recipient that gets the shooter.
+//!
+//! It is a *count* because far players are sent only 6 to 8 times a second and the shots of an
+//! automatic weapon come faster than that: a recipient that last saw count `a` and now sees `b` knows
+//! that `(b - a) mod 8` shots were fired in between (`halo_sim::shots_between`), however long since
+//! it last heard, so that no shot of those it can tell is lost to a datagram that was. (Eight shots
+//! between two states, a whole turn, reads as none. The planner sends every player in range at least
+//! every `max_stale_ticks`, 15 by default, half a second: 5 shots of the fastest weapon at 10 a
+//! second. Under heavy loss the gap can reach the 40 ticks of `STALENESS_BOUND_TICKS`, 13 shots, and
+//! the shots that wrapped are not shown; nothing else is hurt by it.) A recipient that
+//! has just got a player in range takes the count it sees as the start and plays nothing for it.
+//! Whether a shot hit is not here: the shooter reports hits to the server (the match's
+//! `report_hits`), the server's `fighter` table says what they did, and what a recipient shows of a
+//! hit (a shield flash, a pain sound, the damage on its own screen) comes from that.
 //!
 //! All little-endian. A coordinate is quantised to its axis's range over
 //! 65535, so on a 150-unit axis a step is 0.0023 units.
