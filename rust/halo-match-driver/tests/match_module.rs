@@ -94,8 +94,21 @@ fn drive(client: &MatchClient, walkers: &mut Walkers, ticks: usize, slow: bool) 
         let tick = seen.marker.tick;
         accepted.clear();
         let could_be_in = waiting.iter().take_while(|(after, _)| *after < tick).count();
-        if could_be_in > 0 && seen.players.values().any(|p| p.updated_tick == tick) {
-            let taken: Vec<Vec<PlayerInput>> = waiting.drain(..could_be_in).map(|(_, batch)| batch).collect();
+        // (a tick that took inputs and refused every one of them moved nobody)
+        if could_be_in > 0 && seen.marker.inputs > 0 {
+            // (a batch sent before the tick was seen may still have reached the server after the
+            // tick ran: the tick took the batches up to the one whose positions its rows hold)
+            let holds = |batch: &[PlayerInput]| {
+                let mut moved = batch.iter().filter_map(|i| {
+                    seen.players
+                        .get(&i.player)
+                        .filter(|p| p.updated_tick == tick)
+                        .map(|p| [p.x, p.y, p.z] == i.position)
+                });
+                moved.next().is_some_and(|first| first && moved.all(|same| same))
+            };
+            let took = (0..could_be_in).find(|&n| holds(&waiting[n].1)).map_or(could_be_in, |n| n + 1);
+            let taken: Vec<Vec<PlayerInput>> = waiting.drain(..took).map(|(_, batch)| batch).collect();
             for event in walkers.apply(&halo_sim::wire::collapse_batches(taken), tick) {
                 match event {
                     Event::MoveAccepted { player } => accepted.push(player),
