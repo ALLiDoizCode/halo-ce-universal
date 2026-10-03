@@ -481,8 +481,9 @@ impl Session {
         self.inner.shared().fighters.get(&player).copied()
     }
 
-    /// Report a hit the game's engine saw the local player's weapon make: `weapon` is the weapon's tag
-    /// index, `material` the part of `target` hit (-1 for none), `origin`
+    /// Report a hit the game's engine saw the local player's weapon make: `damage` is the damage
+    /// effect's tag index (what hurt the target: a bullet, an explosion, a blow), `material` the part
+    /// of `target` hit (-1 for none), `scale` the scale the engine dealt it at, `origin`
     /// where the shot hit and `target_position` where the engine has the
     /// target. The report is sent over the direct connection with the others of
     /// the tick (the server's `report_hits`), and made at the newest server tick
@@ -491,8 +492,9 @@ impl Session {
     pub fn report_hit(
         &self,
         target: u16,
-        weapon: u16,
+        damage: u16,
         material: i16,
+        scale: f32,
         origin: [f32; 3],
         target_position: [f32; 3],
     ) -> bool {
@@ -501,7 +503,7 @@ impl Session {
             return false;
         }
         let host_tick = shared.newest_tick;
-        shared.hits.push(HitReport { target, weapon, material, host_tick, origin, target_position });
+        shared.hits.push(HitReport { target, damage, material, scale, host_tick, origin, target_position });
         true
     }
 

@@ -99,7 +99,11 @@ const WEAPON_HEAT_OVERHEATED_THRESHOLD: usize = 0x350;
 const WEAPON_HEAT_DETONATION_THRESHOLD: usize = 0x354;
 const WEAPON_HEAT_LOSS_PER_SECOND: usize = 0x35C;
 const WEAPON_MELEE_ATTACK_DAMAGE: usize = 0x394;
+const WEAPON_HEAT_OVERHEATED_EXPLOSION_FRACTION: usize = 0x358;
+const WEAPON_AGE_HEAT_RECOVERY_PENALTY: usize = 0x440;
 const WEAPON_AGE_RATE_OF_FIRE_PENALTY: usize = 0x444;
+const WEAPON_AGE_MISFIRE_START: usize = 0x448;
+const WEAPON_AGE_MISFIRE_CHANCE: usize = 0x44C;
 const WEAPON_TYPE: usize = 0x4E2;
 const WEAPON_MAGAZINES: usize = 0x4F0;
 const WEAPON_TRIGGERS: usize = 0x4FC;
@@ -124,6 +128,10 @@ const SZ_ANIMATION: usize = 0xB4;
 const ANIM_FRAME_COUNT: usize = 0x22;
 /// `_first_person_weapon_animation_reload_while_empty`, which the engine times every reload by
 const FIRST_PERSON_RELOAD_WHILE_EMPTY: usize = 7;
+/// `_first_person_weapon_animation_melee` and `_first_person_weapon_animation_shotgun_enter`
+const FIRST_PERSON_MELEE: usize = 13;
+const FIRST_PERSON_SHOTGUN_ENTER: usize = 23;
+const ANIM_KEY_FRAME: usize = 0x34;
 
 // struct projectile_definition (0x24C bytes)
 const PROJECTILE_SIZE: usize = 0x24C;
@@ -136,10 +144,32 @@ const PROJ_MAXIMUM_RANGE: usize = 0x1C8;
 const PROJ_AIR_GRAVITY_SCALE: usize = 0x1CC;
 const PROJ_INITIAL_VELOCITY: usize = 0x1E4;
 const PROJ_FINAL_VELOCITY: usize = 0x1E8;
+const PROJ_SUPER_DETONATION: usize = 0x18C;
+const PROJ_EFFECT: usize = 0x1AC;
+const PROJ_AIR_DAMAGE_RANGE_LOWER: usize = 0x1D0;
+const PROJ_AIR_DAMAGE_RANGE_UPPER: usize = 0x1D4;
+const PROJ_ATTACHED_DETONATION_DAMAGE: usize = 0x214;
 const PROJ_IMPACT_DAMAGE: usize = 0x224;
+const PROJ_MATERIAL_RESPONSES: usize = 0x240;
+const SZ_MATERIAL_RESPONSE: usize = 0xA0;
+const MR_DETONATION_EFFECT: usize = 0x68;
+
+// struct effect_definition (0x40 bytes): its events, whose parts name what
+// the effect makes (a damage effect, for one)
+const EFFECT_SIZE: usize = 0x40;
+const EFFECT_EVENTS: usize = 0x34;
+const SZ_EFFECT_EVENT: usize = 0x44;
+const EVENT_PARTS: usize = 0x2C;
+const SZ_EFFECT_PART: usize = 0x68;
+const PART_REFERENCE: usize = 0x18;
 
 // struct damage_effect_definition (0x2A0 bytes)
 const DAMAGE_EFFECT_SIZE: usize = 0x2A0;
+const DMG_FALLOFF_RADIUS: usize = 0;
+const DMG_CUTOFF_RADIUS: usize = 4;
+const DMG_CUTOFF_SCALE: usize = 8;
+const DMG_EFFECT_FLAGS: usize = 0xC;
+const DMG_CORE_RADIUS: usize = 0x1CC;
 const DMG_SIDE_EFFECT: usize = 0x1C4;
 const DMG_CATEGORY: usize = 0x1C6;
 const DMG_FLAGS: usize = 0x1C8;
@@ -654,9 +684,15 @@ fn parse_damage(raw: &Raw, space: &Space, tags: &[TagInstance], off: usize) -> R
         *m = raw.f32(d + DMG_MATERIAL_MODIFIERS + 4 * i)?;
     }
     Ok(Some(Damage {
+        tag_index: (tag.tag_index & 0xFFFF) as u16,
         side_effect: raw.i16(d + DMG_SIDE_EFFECT)?,
         category: raw.i16(d + DMG_CATEGORY)?,
         flags: raw.u32(d + DMG_FLAGS)?,
+        falloff_radius: raw.f32(d + DMG_FALLOFF_RADIUS)?,
+        cutoff_radius: raw.f32(d + DMG_CUTOFF_RADIUS)?,
+        cutoff_scale: raw.f32(d + DMG_CUTOFF_SCALE)?,
+        effect_flags: raw.u32(d + DMG_EFFECT_FLAGS)?,
+        core_radius: raw.f32(d + DMG_CORE_RADIUS)?,
         minimum: raw.f32(d + DMG_MINIMUM)?,
         lower: raw.f32(d + DMG_LOWER_BOUND)?,
         upper: raw.f32(d + DMG_UPPER_BOUND)?,
@@ -664,9 +700,56 @@ fn parse_damage(raw: &Raw, space: &Space, tags: &[TagInstance], off: usize) -> R
     }))
 }
 
+/// The damage effects an effect tag (referenced at `off`, if it is) makes
+/// (every event's parts that are damage effects, each damage once, in the
+/// order the tag has them), added to `out`. As the engine plays an effect, a
+/// part is made or not by its environment and disposition (air or water,
+/// violent or not); the damage of each is in this list whichever.
+fn parse_effect_damages(
+    raw: &Raw,
+    space: &Space,
+    tags: &[TagInstance],
+    off: usize,
+    out: &mut Vec<Damage>,
+) -> Result<()> {
+    let Some(tag) = referenced(raw, tags, off, "effe")? else { return Ok(()) };
+    let e = space.resolve(tag.base_address, EFFECT_SIZE)?;
+    let (events, first_event) = space.block(raw, e + EFFECT_EVENTS, SZ_EFFECT_EVENT)?;
+    for i in 0..events {
+        let (parts, first_part) = space.block(raw, first_event + i * SZ_EFFECT_EVENT + EVENT_PARTS, SZ_EFFECT_PART)?;
+        for j in 0..parts {
+            let part = first_part + j * SZ_EFFECT_PART;
+            // (a part's reference may be of any group: only a damage effect is read)
+            let index = raw.u32(part + PART_REFERENCE + 0xC)?;
+            if index == 0xFFFF_FFFF {
+                continue;
+            }
+            let Some(named) = tags.get((index & 0xFFFF) as usize).filter(|t| t.tag_index == index) else { continue };
+            if named.group.trim_end() != "jpt!" {
+                continue;
+            }
+            if let Some(damage) = parse_damage(raw, space, tags, part + PART_REFERENCE)? {
+                if !out.iter().any(|d| d.tag_index == damage.tag_index) {
+                    out.push(damage);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn parse_projectile(raw: &Raw, space: &Space, tags: &[TagInstance], off: usize) -> Result<Option<Projectile>> {
     let Some(tag) = referenced(raw, tags, off, "proj")? else { return Ok(None) };
     let p = space.resolve(tag.base_address, PROJECTILE_SIZE)?;
+    let mut detonation_damage = Vec::new();
+    parse_effect_damages(raw, space, tags, p + PROJ_EFFECT, &mut detonation_damage)?;
+    let (responses, first_response) = space.block(raw, p + PROJ_MATERIAL_RESPONSES, SZ_MATERIAL_RESPONSE)?;
+    for i in 0..responses {
+        let at = first_response + i * SZ_MATERIAL_RESPONSE + MR_DETONATION_EFFECT;
+        parse_effect_damages(raw, space, tags, at, &mut detonation_damage)?;
+    }
+    let mut super_detonation_damage = Vec::new();
+    parse_effect_damages(raw, space, tags, p + PROJ_SUPER_DETONATION, &mut super_detonation_damage)?;
     Ok(Some(Projectile {
         flags: raw.u32(p + PROJ_FLAGS)?,
         detonation_timer_starts: raw.i16(p + PROJ_DETONATION_TIMER_STARTS)?,
@@ -675,9 +758,14 @@ fn parse_projectile(raw: &Raw, space: &Space, tags: &[TagInstance], off: usize) 
         minimum_velocity: raw.f32(p + PROJ_MINIMUM_VELOCITY)?,
         maximum_range: raw.f32(p + PROJ_MAXIMUM_RANGE)?,
         air_gravity_scale: raw.f32(p + PROJ_AIR_GRAVITY_SCALE)?,
+        air_damage_range_lower: raw.f32(p + PROJ_AIR_DAMAGE_RANGE_LOWER)?,
+        air_damage_range_upper: raw.f32(p + PROJ_AIR_DAMAGE_RANGE_UPPER)?,
         initial_velocity: raw.f32(p + PROJ_INITIAL_VELOCITY)?,
         final_velocity: raw.f32(p + PROJ_FINAL_VELOCITY)?,
         impact_damage: parse_damage(raw, space, tags, p + PROJ_IMPACT_DAMAGE)?,
+        detonation_damage,
+        super_detonation_damage,
+        attached_damage: parse_damage(raw, space, tags, p + PROJ_ATTACHED_DETONATION_DAMAGE)?,
     }))
 }
 
@@ -713,6 +801,20 @@ fn animation_frames(
     sets_offset: usize,
     kind: usize,
 ) -> Result<i16> {
+    animation_field(raw, space, tags, reference, sets_offset, kind, ANIM_FRAME_COUNT)
+}
+
+/// A field (`field`, an offset in the animation) of the animation of kind
+/// `kind`, as [`animation_frames`] finds it.
+fn animation_field(
+    raw: &Raw,
+    space: &Space,
+    tags: &[TagInstance],
+    reference: usize,
+    sets_offset: usize,
+    kind: usize,
+    field: usize,
+) -> Result<i16> {
     let Some(graph) = referenced(raw, tags, reference, "antr")? else { return Ok(0) };
     let g = space.resolve(graph.base_address, ANIMATION_GRAPH_SIZE)?;
     let (n, sets) = space.block(raw, g + sets_offset, SZ_ANIMATION_SET)?;
@@ -729,7 +831,7 @@ fn animation_frames(
     if animation < 0 || animation as usize >= animations {
         return Ok(0);
     }
-    raw.i16(first + animation as usize * SZ_ANIMATION + ANIM_FRAME_COUNT)
+    raw.i16(first + animation as usize * SZ_ANIMATION + field)
 }
 
 fn parse_weapon(raw: &Raw, space: &Space, tags: &[TagInstance], tag: &TagInstance) -> Result<Weapon> {
@@ -764,6 +866,7 @@ fn parse_weapon(raw: &Raw, space: &Space, tags: &[TagInstance], tag: &TagInstanc
             minimum_rounds_loaded_per_shot: raw.i16(t + 0x24)?,
             charging_time: raw.f32(t + 0x48)?,
             charged_time: raw.f32(t + 0x4C)?,
+            overcharged_action: raw.i16(t + 0x50)?,
             spew_time: raw.f32(t + 0x58)?,
             overloading_time: raw.f32(t + 0xC4)?,
             projectiles_per_shot: raw.i16(t + 0x6E)?,
@@ -776,6 +879,31 @@ fn parse_weapon(raw: &Raw, space: &Space, tags: &[TagInstance], tag: &TagInstanc
         tag_index: (tag.tag_index & 0xFFFF) as u16,
         reload_frames: parse_reload_frames(raw, space, tags, w)?,
         recoil_frames: parse_recoil_frames(raw, space, tags, w)?,
+        melee_frames: animation_frames(
+            raw,
+            space,
+            tags,
+            w + WEAPON_FIRST_PERSON_ANIMATIONS,
+            AG_FIRST_PERSON_WEAPON_ANIMATIONS,
+            FIRST_PERSON_MELEE,
+        )?,
+        melee_key_frame: animation_field(
+            raw,
+            space,
+            tags,
+            w + WEAPON_FIRST_PERSON_ANIMATIONS,
+            AG_FIRST_PERSON_WEAPON_ANIMATIONS,
+            FIRST_PERSON_MELEE,
+            ANIM_KEY_FRAME,
+        )?,
+        shotgun_enter_frames: animation_frames(
+            raw,
+            space,
+            tags,
+            w + WEAPON_FIRST_PERSON_ANIMATIONS,
+            AG_FIRST_PERSON_WEAPON_ANIMATIONS,
+            FIRST_PERSON_SHOTGUN_ENTER,
+        )?,
         name: format!("{}.{}", tag.name, tag.group.trim_end()),
         flags: raw.u32(w + WEAPON_FLAGS)?,
         weapon_type: raw.i16(w + WEAPON_TYPE)?,
@@ -785,6 +913,10 @@ fn parse_weapon(raw: &Raw, space: &Space, tags: &[TagInstance], tag: &TagInstanc
         heat_detonation_threshold: raw.f32(w + WEAPON_HEAT_DETONATION_THRESHOLD)?,
         heat_loss_per_second: raw.f32(w + WEAPON_HEAT_LOSS_PER_SECOND)?,
         age_rate_of_fire_penalty: raw.f32(w + WEAPON_AGE_RATE_OF_FIRE_PENALTY)?,
+        age_heat_recovery_penalty: raw.f32(w + WEAPON_AGE_HEAT_RECOVERY_PENALTY)?,
+        age_misfire_start: raw.f32(w + WEAPON_AGE_MISFIRE_START)?,
+        age_misfire_chance: raw.f32(w + WEAPON_AGE_MISFIRE_CHANCE)?,
+        overheated_explosion_fraction: raw.f32(w + WEAPON_HEAT_OVERHEATED_EXPLOSION_FRACTION)?,
         magazines,
         triggers,
         melee_damage: parse_damage(raw, space, tags, w + WEAPON_MELEE_ATTACK_DAMAGE)?,

@@ -181,8 +181,8 @@ unsigned long halo_large_refusal(char *buffer, unsigned long size);
 unsigned long halo_large_vitals(unsigned long player, float *out);
 unsigned long halo_large_loadout(unsigned long player, unsigned long *out);
 unsigned long halo_large_weapon_name(unsigned long tag_index, char *buffer, unsigned long size);
-unsigned long halo_large_report_hit(unsigned long target, unsigned long weapon, long material, float ox, float oy,
-	float oz, float tx, float ty, float tz);
+unsigned long halo_large_report_hit(unsigned long target, unsigned long damage, long material, float scale, float ox,
+	float oy, float oz, float tx, float ty, float tz);
 unsigned long halo_large_hits(unsigned long *out);
 
 /* the local player's life, halo_large_life's first number */
@@ -1381,8 +1381,6 @@ boolean large_mode_damage_deals(
 	short material_index)
 {
 	long slot;
-	struct unit_datum *shooter;
-	long weapon_definition = NONE;
 	real_point3d position;
 	unsigned long reported;
 
@@ -1396,22 +1394,15 @@ boolean large_mode_damage_deals(
 	{
 		return FALSE;
 	}
-	/* a shot of the local player's weapon at another player */
-	shooter = (struct unit_datum *)object_try_and_get_and_verify_type(damage->owner_object_index, _object_mask_unit);
-	if (shooter && shooter->unit.current_weapon_index != NONE)
-	{
-		long weapon_index = unit_inventory_get_weapon(damage->owner_object_index,
-			(word)shooter->unit.current_weapon_index);
-
-		if (weapon_index != NONE)
-			weapon_definition = weapon_get(weapon_index)->definition_index;
-	}
-	if (weapon_definition == NONE)
+	/* a hit of the local player's weapon at another player: the damage's tag says what hurt the player (a bullet,
+	an explosion, a blow) and so which weapon it was of, and the scale is the one the engine dealt it at (how far
+	a bullet had flown, how far the player was from the blast, how fast the blow was struck) */
+	if (damage->definition_index == NONE)
 		return FALSE;
 	object_get_origin(object_index, &position);
 	reported = halo_large_report_hit((unsigned long)(large_remote_data.remote_of_object[slot] - 1),
-		(unsigned long)DATUM_INDEX_TO_ABSOLUTE_INDEX(weapon_definition), (long)material_index, damage->origin.x,
-		damage->origin.y, damage->origin.z, position.x, position.y, position.z);
+		(unsigned long)DATUM_INDEX_TO_ABSOLUTE_INDEX(damage->definition_index), (long)material_index, damage->scale,
+		damage->origin.x, damage->origin.y, damage->origin.z, position.x, position.y, position.z);
 	if (large.reports_logged < 5)
 	{
 		large.reports_logged++;

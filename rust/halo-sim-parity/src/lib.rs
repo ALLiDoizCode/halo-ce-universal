@@ -397,7 +397,8 @@ fn fighter_bytes(combat: &MemoryCombat, id: u16) -> Vec<u8> {
     out
 }
 
-/// A crowd that fights: the players fire pistols at the weapon's real rate, with a random damage between two
+/// A crowd that fights: the players fire pistols (and shotguns, rocket launchers and plasma rifles, by who they are: their
+/// pellets, explosions, melee blows, projectiles that slow down and batteries that run out) at the weapon's real rate, with a random damage between two
 /// bounds, and report hits (good ones, and every kind of bad one: a weapon not owned, a target elsewhere,
 /// a report too old or from the future, a hit on oneself or a body, numbers that are not numbers), which
 /// `halo_sim::combat::resolve` judges and deals; the deaths go to the game's rules, which respawn the players
@@ -417,6 +418,19 @@ pub fn run_fight(seed: u64, ticks: u32) -> Vec<u8> {
         damage.upper = 32.0;
         weapon.clone()
     };
+    // the weapons the crowd carries, one each by who they are (and what each of their hits is of)
+    let weapons = [
+        pistol.clone(),
+        halo_sim::fixtures::shotgun(),
+        halo_sim::fixtures::rocket_launcher(),
+        halo_sim::fixtures::plasma_rifle(),
+    ];
+    map.combat.weapons.extend(weapons[1..].iter().cloned());
+    let weapon_of = |id: u16| &weapons[id as usize % weapons.len()];
+    let hit_damage = |weapon: &halo_map::combat::Weapon| {
+        let projectile = weapon.triggers[0].projectile.as_ref().unwrap();
+        projectile.impact_damage.or(projectile.detonation_damage.first().copied()).unwrap().tag_index
+    };
     let mut rules = if seed & 1 == 0 { Rules::slayer() } else { Rules::team_slayer() };
     rules.score_limit = 0;
     rules.respawn_ticks = 30;
@@ -426,7 +440,7 @@ pub fn run_fight(seed: u64, ticks: u32) -> Vec<u8> {
     let mut combat = MemoryCombat::new();
     let mut trails = Trails::new();
     let mut rng = Rng::seeded(seed);
-    let mut hands: Vec<Hands> = (0..PLAYERS).map(|_| Hands::new(&pistol)).collect();
+    let mut hands: Vec<Hands> = (0..PLAYERS).map(|id| Hands::new(weapon_of(id))).collect();
     for id in 0..PLAYERS {
         enter(&mut game, id, (id % 2) as u8, 0);
     }
@@ -440,34 +454,42 @@ pub fn run_fight(seed: u64, ticks: u32) -> Vec<u8> {
         for &id in &alive {
             // the trigger is held in stretches
             let held = !(tick / 20 + id as u64).is_multiple_of(3);
-            let shot = hands[id as usize].update(&pistol, held);
+            let weapon = weapon_of(id);
+            let shot = hands[id as usize].update_with(weapon, held, &mut || rng.next_f32());
             if !shot.fired {
                 continue;
             }
             counts[14] += 1;
             let target = all[rng.next_u32() as usize % all.len()];
             let at = store.player(target).map_or([0.0; 3], |p| p.position);
-            let mut report = HitReport {
-                target,
-                weapon: pistol.tag_index,
-                material: (rng.next_u32() % 5) as i16 - 1,
-                host_tick: tick.saturating_sub(rng.next_u32() as u64 % 5) as u32,
-                origin: [at[0], at[1], at[2] + 0.3],
-                target_position: at,
-            };
-            match rng.next_u32() % 40 {
-                0 => report.weapon = 999,
-                1 => report.target_position[1] += 9.0,
-                2 => report.host_tick = tick.saturating_sub(200) as u32,
-                3 => report.host_tick = tick as u32 + 50,
-                4 => report.origin[2] += 40.0,
-                5 => report.target = id,
-                6 => report.origin[0] = f32::NAN,
-                7 => report.target = PLAYERS + 3,
-                8 => report.target_position[0] += 80.0,
-                _ => {}
+            // a pellet for each the shot made, an explosion for a rocket (made where the target is, to everyone
+            // near it), and now and then a blow of the weapon's in melee in place of the shot
+            let blow = rng.next_u32().is_multiple_of(9) && weapon.melee_damage.is_some();
+            let pellets = if blow { 1 } else { shot.projectiles.max(1) };
+            for _ in 0..pellets {
+                let mut report = HitReport {
+                    target,
+                    damage: if blow { weapon.melee_damage.unwrap().tag_index } else { hit_damage(weapon) },
+                    material: (rng.next_u32() % 5) as i16 - 1,
+                    scale: (rng.next_u32() % 1_300) as f32 / 1_000.0,
+                    host_tick: tick.saturating_sub(rng.next_u32() as u64 % 5) as u32,
+                    origin: [at[0], at[1], at[2] + 0.3],
+                    target_position: at,
+                };
+                match rng.next_u32() % 40 {
+                    0 => report.damage = 999,
+                    1 => report.target_position[1] += 9.0,
+                    2 => report.host_tick = tick.saturating_sub(200) as u32,
+                    3 => report.host_tick = tick as u32 + 50,
+                    4 => report.origin[2] += 40.0,
+                    5 => report.target = id,
+                    6 => report.origin[0] = f32::NAN,
+                    7 => report.target = PLAYERS + 3,
+                    8 => report.target_position[0] += 80.0,
+                    _ => {}
+                }
+                reports.push((id, report));
             }
-            reports.push((id, report));
         }
         // (a player who is dead reports too, and one report comes twice)
         if let Some(dead) = game.contestants().iter().find(|c| !c.is_alive()) {
@@ -519,7 +541,11 @@ pub fn run_fight(seed: u64, ticks: u32) -> Vec<u8> {
             match_event_bytes(event, &mut bytes);
             if let GameEvent::Spawned { player, .. } = event {
                 halo_sim::combat::spawn(&mut combat, &mut trails, &map, *player, tick);
-                hands[*player as usize] = Hands::new(&pistol);
+                let weapon = weapon_of(*player);
+                let mut fighter = combat.fighter(*player).unwrap();
+                fighter.loadout = halo_sim::combat::Loadout::with(weapon.tag_index);
+                combat.set_fighter(fighter);
+                hands[*player as usize] = Hands::new(weapon);
             }
         }
         chain.bytes(&bytes);

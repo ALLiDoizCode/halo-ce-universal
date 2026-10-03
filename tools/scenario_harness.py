@@ -45,11 +45,13 @@ COMBAT_QUANTITIES = {
     "stun": "ticks of the target's shield stun",
     "life": "1 where the target's death differs",
     "hit": "1 where the part of the target that was hit differs",
+    "shots": "shots the weapon has fired",
+    "age": "of the weapon's age",
 }
 ALL_QUANTITIES = {**QUANTITIES, **COMBAT_QUANTITIES}
 TRACE_COLUMNS = ("tick", "x", "y", "z", "vx", "vy", "vz", "yaw", "pitch", "state")
-COMBAT_COLUMNS = ("rounds", "total", "heat", "shield", "body", "stun", "dead", "hit")
-INPUT_KEYS = ("forward", "strafe", "yaw", "pitch", "jump", "crouch", "fire", "part")
+COMBAT_COLUMNS = ("rounds", "total", "heat", "shield", "body", "stun", "dead", "hit", "shots", "age")
+INPUT_KEYS = ("forward", "strafe", "yaw", "pitch", "jump", "crouch", "fire", "melee", "part")
 
 
 class HarnessError(Exception):
@@ -90,7 +92,7 @@ class Scenario:
         """The inputs of every tick: what the game is given for it."""
         ticks = [
             {"forward": 0.0, "strafe": 0.0, "yaw": self.start_yaw, "pitch": 0.0, "jump": 0.0, "crouch": 0.0,
-             "fire": 0.0, "part": 1.0}
+             "fire": 0.0, "melee": 0.0, "part": 1.0}
             for _ in range(self.ticks)
         ]
         for first, end, values in self.inputs:
@@ -250,7 +252,7 @@ def row_differences(a: tuple[float, ...], b: tuple[float, ...]) -> dict[str, flo
         "state": float(bin(int(a[9]) ^ int(b[9])).count("1")),
     }
     if len(a) > 10 and len(b) > 10:
-        # (rounds, total, heat, shield, body, stun, dead, hit)
+        # (rounds, total, heat, shield, body, stun, dead, hit, shots, age)
         differences.update({
             "rounds": float(max(abs(a[10] - b[10]), abs(a[11] - b[11]))),
             "heat": abs(a[12] - b[12]),
@@ -259,6 +261,8 @@ def row_differences(a: tuple[float, ...], b: tuple[float, ...]) -> dict[str, flo
             "stun": abs(a[15] - b[15]),
             "life": float(a[16] != b[16]),
             "hit": float(a[17] != b[17]),
+            "shots": abs(a[18] - b[18]),
+            "age": abs(a[19] - b[19]),
         })
     return differences
 

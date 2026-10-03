@@ -42,13 +42,26 @@ fn main() {
             w.magazines.len(),
             w.triggers.len()
         );
+        println!(
+            "   age: heat recovery penalty {} rate penalty {} misfire {} chance {}, explosion fraction {}, secondary mode {}",
+            w.age_heat_recovery_penalty,
+            w.age_rate_of_fire_penalty,
+            w.age_misfire_start,
+            w.age_misfire_chance,
+            w.overheated_explosion_fraction,
+            w.secondary_trigger_mode
+        );
+        println!(
+            "   frames: reload {} recoil {} melee {} (key {}) shotgun enter {}",
+            w.reload_frames, w.recoil_frames, w.melee_frames, w.melee_key_frame, w.shotgun_enter_frames
+        );
         for (i, mag) in w.magazines.iter().enumerate() {
             println!("   magazine {i}: {mag:?}");
         }
         for (i, t) in w.triggers.iter().enumerate() {
             println!(
                 "   trigger {i}: flags {:#x} rof {} -> {} accel {} decel {} mag {} per shot {} min {} proj/shot {} \
-                 charge {} heat {}",
+                 charge {} charged {} (action {}) spew {} overload {} heat {} age {}",
                 t.flags,
                 t.initial_rate_of_fire,
                 t.final_rate_of_fire,
@@ -59,7 +72,12 @@ fn main() {
                 t.minimum_rounds_loaded_per_shot,
                 t.projectiles_per_shot,
                 t.charging_time,
-                t.heat_generated_per_round
+                t.charged_time,
+                t.overcharged_action,
+                t.spew_time,
+                t.overloading_time,
+                t.heat_generated_per_round,
+                t.age_generated_per_round
             );
             if let Some(p) = &t.projectile {
                 println!(
@@ -74,7 +92,37 @@ fn main() {
                 if let Some(d) = &p.impact_damage {
                     println!("      material modifiers {:?}", d.material_modifiers);
                 }
+                println!("      air damage range {}..{}", p.air_damage_range_lower, p.air_damage_range_upper);
+                let line = |what: &str, d: &halo_map::combat::Damage| {
+                    println!(
+                        "      {what} #{} flags {:#x} effect flags {:#x} radius {}..{} (scale {}) core {} damage {} {}..{}",
+                        d.tag_index,
+                        d.flags,
+                        d.effect_flags,
+                        d.falloff_radius,
+                        d.cutoff_radius,
+                        d.cutoff_scale,
+                        d.core_radius,
+                        d.minimum,
+                        d.lower,
+                        d.upper
+                    )
+                };
+                if let Some(d) = &p.impact_damage {
+                    line("impact", d);
+                }
+                p.detonation_damage.iter().for_each(|d| line("detonation", d));
+                p.super_detonation_damage.iter().for_each(|d| line("super detonation", d));
+                if let Some(d) = &p.attached_damage {
+                    line("attached", d);
+                }
             }
+        }
+        if let Some(d) = &w.melee_damage {
+            println!(
+                "   melee #{} flags {:#x} damage {} {}..{} radius {}..{}",
+                d.tag_index, d.flags, d.minimum, d.lower, d.upper, d.falloff_radius, d.cutoff_radius
+            );
         }
     }
 }

@@ -138,8 +138,11 @@ symbols in this file:
 #include "units/units.h"
 #include "units/vehicles.h"
 
-/* port/linux/game/scenario_harness.c's: the part of a unit a hit is on, for the trace */
-void scenario_harness_damage(long object_index, short material_index);
+/* port/linux/game/scenario_harness.c's: a unit's own update of its damage has begun, for the order of a tick's hits */
+void scenario_harness_damage_update(long object_index);
+/* port/linux/game/scenario_harness.c's: a hit on a unit (the part it is on, what it deals), for the trace */
+void scenario_harness_damage(long object_index, short material_index, struct damage_data const *damage,
+	real total_damage);
 /* port/linux/game/large_mode.c's: whether this machine deals the damage (the large-scale mode's
 server does, and is told of the hits the local player's weapon makes) */
 boolean large_mode_damage_deals(struct damage_data const *damage, long object_index, short material_index);
@@ -1397,7 +1400,6 @@ void object_cause_damage(
 	}
 	if (!large_mode_damage_deals(damage, object_index, material_index))
 		return;
-	scenario_harness_damage(object_index, material_index);
 
 	damage_effect = damage_effect_definition_get(damage->definition_index);
 	damage_definition = &damage_effect->damage;
@@ -1610,6 +1612,9 @@ void object_cause_damage(
 
 			current_object_index = damaged_object_indices[damaged_object_count];
 			current_object = object_get(current_object_index);
+			/* (the damage reaches an object a hit was on, and the parents of it: those, by no part of their own) */
+			scenario_harness_damage(current_object_index, damaged_object_count == 0 ? material_index : NONE, damage,
+				total_damage);
 			current_definition = object_definition_get(current_object->definition_index);
 			collision_model_index = current_definition->object.collision_model.index;
 			shield_damage = 0.f;
@@ -1879,6 +1884,8 @@ void area_of_effect_cause_damage(
 void object_damage_update(
 	long object_index)
 {
+	scenario_harness_damage_update(object_index);
+
 	struct object_datum *object = object_get(object_index);
 	struct object_definition *object_definition =
 		object_definition_get(object->definition_index);

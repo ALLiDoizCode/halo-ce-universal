@@ -13,7 +13,7 @@ use halo_map::{flag_type, game_type, HaloMap, MapError};
 const TAG_BASE: u32 = 0x803A_6000;
 const BSP_BASE: u32 = 0x4000_0000;
 const HEADER: usize = 0x800;
-const TAG_DATA_SIZE: usize = 0x3200;
+const TAG_DATA_SIZE: usize = 0x3400;
 const BSP_DATA_SIZE: usize = 0x1000;
 
 /// The map's inflated image, header included.
@@ -96,6 +96,10 @@ const T_MATERIALS: usize = 0x2E00;
 const T_STARTING: usize = 0x2F00;
 const T_ITEM_COLLECTION: usize = 0x3000;
 const T_PERMUTATIONS: usize = 0x3080;
+// the bullet's detonation effect: one event of two parts, a damage effect and something else
+const T_EFFECT: usize = 0x3100;
+const T_EFFECT_EVENT: usize = 0x3140;
+const T_EFFECT_PARTS: usize = 0x3190;
 const NONE: u32 = 0xFFFF_FFFF;
 
 /// Offsets within the structure BSP data.
@@ -129,9 +133,9 @@ fn build() -> Image {
     let t = HEADER;
     m.u32(t, TAG_BASE + T_INSTANCES as u32);
     m.u32(t + 4, tag_id(0));
-    m.u32(t + 0xC, 11);
+    m.u32(t + 0xC, 12);
     m.code(t + 0x20, b"tags");
-    let tags: [(&[u8; 4], &str); 11] = [
+    let tags: [(&[u8; 4], &str); 12] = [
         (b"scnr", "levels\\synth\\synth"),
         (b"itmc", "item collections\\pistol"),
         (b"vehi", "vehicles\\warthog\\warthog"),
@@ -143,6 +147,7 @@ fn build() -> Image {
         (b"proj", "weapons\\pistol\\bullet"),
         (b"jpt!", "weapons\\pistol\\bullet"),
         (b"antr", "weapons\\pistol\\fp"),
+        (b"effe", "weapons\\pistol\\bullet hit"),
     ];
     let mut name_at = T_NAMES;
     for (i, (group, name)) in tags.iter().enumerate() {
@@ -163,6 +168,7 @@ fn build() -> Image {
         (8, T_PROJECTILE),
         (9, T_DAMAGE_EFFECT),
         (10, T_ANIMATION_GRAPH),
+        (11, T_EFFECT),
     ] {
         m.u32(t + T_INSTANCES + index * 0x20 + 0x14, TAG_BASE + at as u32);
     }
@@ -268,6 +274,16 @@ fn build() -> Image {
     m.i16(tr + 0x6E, 1);
     m.tag_ref(tr + 0x94, 8);
     let pr = t + T_PROJECTILE;
+    // (no super detonation and no attached damage: the references say none)
+    for at in [0x18C, 0x214] {
+        m.u32(pr + at + 0xC, NONE);
+    }
+    m.tag_ref(pr + 0x1AC, 11);
+    m.f32s(pr + 0x1D0, &[20.0, 50.0]);
+    m.tag_block(t + T_EFFECT + 0x34, 1, T_EFFECT_EVENT);
+    m.tag_block(t + T_EFFECT_EVENT + 0x2C, 2, T_EFFECT_PARTS);
+    m.tag_ref(t + T_EFFECT_PARTS + 0x18, 9); // a damage effect
+    m.tag_ref(t + T_EFFECT_PARTS + 0x68 + 0x18, 7); // a weapon, which no effect makes
     m.f32(pr + 0x1C8, 40.0);
     m.f32s(pr + 0x1E4, &[10.0, 10.0]);
     m.tag_ref(pr + 0x224, 9);
@@ -275,6 +291,9 @@ fn build() -> Image {
     m.i16(d + 0x1C6, 2);
     m.u32(d + 0x1C8, 2);
     m.f32s(d + 0x1D0, &[25.0, 25.0, 25.0]);
+    m.f32s(d, &[0.5, 2.0, 0.25]); // radii of an explosion: full to 0.5, none beyond 2
+    m.u32(d + 0xC, 1);
+    m.f32(d + 0x1CC, 0.6);
     m.f32(d + 0x200 + 4 * 21, 1.5);
     m.f32(d + 0x200 + 4 * 22, 1.0);
 
@@ -453,6 +472,15 @@ fn the_weapons_and_the_players_body_are_read_from_the_tags() {
     assert_eq!((p.maximum_range, p.initial_velocity), (40.0, 10.0));
     let d = p.impact_damage.expect("the projectile has an impact damage");
     assert_eq!((d.category, d.flags, d.minimum, d.lower, d.upper), (2, 2, 25.0, 25.0, 25.0));
+    assert_eq!(d.tag_index, 9);
+    assert_eq!(
+        (d.falloff_radius, d.cutoff_radius, d.cutoff_scale, d.effect_flags, d.core_radius),
+        (0.5, 2.0, 0.25, 1, 0.6)
+    );
+    assert_eq!((p.air_damage_range_lower, p.air_damage_range_upper), (20.0, 50.0));
+    // the damage effect the projectile's detonation effect makes, once, and nothing of the part that is not one
+    assert_eq!(p.detonation_damage.iter().map(|d| d.tag_index).collect::<Vec<_>>(), [9]);
+    assert!(p.super_detonation_damage.is_empty() && p.attached_damage.is_none());
     assert_eq!((d.material_modifiers[21], d.material_modifiers[22], d.material_modifiers[0]), (1.5, 1.0, 0.0));
 
     let r = &c.resistance;

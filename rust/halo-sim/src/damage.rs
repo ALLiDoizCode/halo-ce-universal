@@ -117,6 +117,12 @@ pub fn roll(damage: &Damage, scale: f32, multiplier: f32, rng: &mut Rng) -> f32 
     ((1.0 - scale) * damage.minimum + random * scale) * multiplier
 }
 
+/// The least and the most [`roll`] can give for a damage at this scale (and a multiplier of 1).
+pub fn roll_bounds(damage: &Damage, scale: f32) -> (f32, f32) {
+    let at = |random: f32| (1.0 - scale) * damage.minimum + random * scale;
+    (at(damage.lower.min(damage.upper)), at(damage.lower.max(damage.upper)))
+}
+
 impl Vitals {
     /// A player at full health and shields (`object_initialize_vitality`).
     pub fn full(res: &Resistance) -> Vitals {
