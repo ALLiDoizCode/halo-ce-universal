@@ -63,6 +63,11 @@ pub trait Store {
     fn remove_player(&mut self, id: PlayerId) -> bool;
     /// The ids of all players in ascending order.
     fn player_ids(&self) -> Vec<PlayerId>;
+    /// Every player, in ascending id order (a store that can read them all
+    /// at once may do it better than one by one).
+    fn players(&self) -> Vec<Player> {
+        self.player_ids().into_iter().filter_map(|id| self.player(id)).collect()
+    }
     /// Ticks since the player's last accepted move (at least 1; 1 for a
     /// player who moved last tick). A move may cover that many ticks' worth of
     /// the speed bound, up to [`crate::MAX_CATCH_UP_TICKS`], so that a player

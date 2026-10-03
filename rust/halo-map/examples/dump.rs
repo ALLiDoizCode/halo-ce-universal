@@ -18,6 +18,22 @@ fn main() {
     println!("{} netgame flags, first: {:?}", m.netgame_flags.len(), m.netgame_flags.first());
     println!("equipment: {:?}", &m.netgame_equipment[..m.netgame_equipment.len().min(3)]);
     println!("vehicles: {:?}", &m.vehicles[..m.vehicles.len().min(3)]);
+    let it = &m.items;
+    println!("player reach {:?}", it.player);
+    for d in &it.defs {
+        println!("item {:?}", d);
+    }
+    for p in &it.placements {
+        let names: Vec<String> = p
+            .permutations
+            .iter()
+            .map(|(w, t)| format!("{w} x {}", it.def(*t).map_or("?", |d| d.name.as_str())))
+            .collect();
+        println!(
+            "placement at {:?} flags {} types {:?} spawn {}s collection {}s -> {names:?}",
+            p.position, p.flags, p.game_types, p.spawn_time, p.collection_spawn_time
+        );
+    }
     let c = &m.combat;
     println!("resistance {:?}", c.resistance);
     for s in &c.starting_equipment {

@@ -12,6 +12,8 @@ use crate::map::MapData;
 
 mod combat;
 pub use combat::*;
+mod items;
+pub use items::*;
 
 /// Half the side of [`flat_floor_map`]'s floor, in world units.
 pub const FLOOR_HALF_SIZE: f32 = 50.0;
@@ -140,6 +142,7 @@ fn map_of(collision: CollisionBsp) -> MapData {
         movement: movement(),
         starts: Vec::new(),
         combat: combat_fixture(),
+        items: Default::default(),
     }
 }
 
