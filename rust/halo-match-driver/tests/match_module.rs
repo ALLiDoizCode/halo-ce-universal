@@ -177,10 +177,10 @@ fn rejected_moves_are_counted_and_visible_per_player() {
     client.start();
 
     const ROUNDS: u64 = 4;
-    let mut last_submitted_at = 0;
-    for _ in 0..ROUNDS {
-        let seen = client.next_tick(WAIT).unwrap();
-        last_submitted_at = seen.marker.tick;
+    // (each round's batch is waited for before the next is sent: two batches that wait for the same
+    // tick are collapsed to each player's newest input, so a busy machine would count fewer rounds)
+    let mut seen = client.next_tick(WAIT).unwrap();
+    for round in 0..ROUNDS {
         let p = |id: u16| seen.players[&id].clone();
         let inputs = [
             // 0 stays put, which is valid
@@ -193,9 +193,14 @@ fn rejected_moves_are_counted_and_visible_per_player() {
             PlayerInput { player: 7, position: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, flags: 0 },
         ];
         client.submit(&inputs);
+        // the batch is taken by some tick: the one that counts its three rejections
+        seen = loop {
+            let next = client.next_tick(WAIT).unwrap();
+            if next.marker.rejected_total >= 3 * (round + 1) {
+                break next;
+            }
+        };
     }
-    // the last batch is applied by the next tick
-    let seen = client.wait_for_tick(last_submitted_at + 1, WAIT);
     let rows = &seen.players;
 
     assert_eq!(rows[&0].rejected_moves, 0);
