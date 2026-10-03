@@ -128,7 +128,7 @@ fn a_game_without_teams_uses_every_start_whatever_its_team() {
 
 #[test]
 fn players_are_never_put_on_top_of_one_another() {
-    // 4 starts for 60 players: waves, and beside the starts
+    // 4 starts for 60 players: beside the starts, and waves
     let mut m = Match::new(floor_with(4), Rules::slayer());
     for id in 0..60 {
         m.join(id, (id % 2) as u8);
@@ -237,33 +237,59 @@ fn a_spawned_player_can_be_moved_by_the_step_from_where_they_were_put() {
 
 // ---- waves
 
-#[test]
-fn when_no_start_is_free_players_wait_and_are_told_for_which_wave() {
-    let mut m = Match::new(floor_with(2), Rules::slayer());
-    for id in 0..5 {
+/// A match on one start, with so many players that every spot beside it is taken too. Returns the
+/// match, the players who spawned on the first tick, and those left waiting.
+fn crowded() -> (Match, Vec<u16>, Vec<u16>) {
+    let mut m = Match::new(floor_with(1), Rules::slayer());
+    for id in 0..80 {
         m.join(id, 0);
     }
     let events = m.tick(&[], &[]);
-    assert_eq!(spawned(&events).len(), 2, "the two starts are taken, by two players");
-    let waiting: Vec<(u16, u64)> = events
-        .iter()
-        .filter_map(|e| match e {
-            GameEvent::Waiting { player, wave_at } => Some((*player, *wave_at)),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(waiting.len(), 3);
+    let placed = spawned(&events);
+    let waiting: Vec<u16> = (0..80).filter(|id| !placed.contains(id)).collect();
+    (m, placed, waiting)
+}
+
+#[test]
+fn a_dead_player_whose_timer_runs_out_off_a_wave_spawns_at_once_beside_a_start() {
+    let mut m = Match::new(floor_with(1), Rules::slayer());
+    m.join(1, 0);
+    m.join(2, 0);
+    m.run(1);
+    assert!(m.alive(1) && m.alive(2), "the second is beside the one start, not waiting for a wave");
+    m.tick(&[kill(2, 1)], &[]);
+    let due = match m.c(2).life {
+        Life::Dead { due } => due,
+        other => panic!("{other:?}"),
+    };
+    assert!(!m.game.game().is_wave(due), "the timer runs out between waves");
+    let events = m.run(due - m.tick - 1);
+    assert!(events.is_empty());
+    let events = m.tick(&[], &[]);
+    assert_eq!(m.tick, due);
+    let start = m.map.starts[0].position;
+    assert!(m.alive(2));
+    let position = m.store.player(2).unwrap().position;
+    assert!(distance(position, start) > 0.5, "beside the start, which player 1 holds");
+    assert!(events.iter().any(|e| matches!(e, GameEvent::Spawned { player: 2, wave: false, .. })), "{events:?}");
+    assert!(!events.iter().any(|e| matches!(e, GameEvent::Waiting { .. })));
+}
+
+#[test]
+fn when_not_even_a_spot_beside_a_start_is_free_players_wait_and_are_told_for_which_wave() {
+    let (mut m, placed, waiting) = crowded();
+    assert!(placed.len() > 10 && !waiting.is_empty(), "{} placed", placed.len());
     let wave = 5 * TICKS_PER_SECOND as u64;
-    assert!(waiting.iter().all(|(_, at)| *at == wave), "the next wave is at tick {wave}: {waiting:?}");
-    for (id, _) in &waiting {
+    for id in &waiting {
         assert_eq!(m.c(*id).life, Life::Waiting { wave });
         assert!(!m.alive(*id));
     }
 
-    // nothing happens until the wave
+    // somebody beside the start leaves (nobody is free at the start itself: in a game without teams everyone is an enemy): nothing happens until the wave
+    assert!(leave(&mut m.game, placed[1]));
     let events = m.run(wave - m.tick - 1);
     assert!(spawned(&events).is_empty() && events.is_empty());
-    // and then they spawn, in the wave, beside the starts
+    // and then the one who has waited longest spawns, in the wave
     let events = m.tick(&[], &[]);
     assert_eq!(m.tick, wave);
     let in_wave: Vec<u16> = events
@@ -273,10 +299,11 @@ fn when_no_start_is_free_players_wait_and_are_told_for_which_wave() {
             _ => None,
         })
         .collect();
-    let mut waited: Vec<u16> = waiting.iter().map(|(id, _)| *id).collect();
-    waited.sort_unstable();
-    assert_eq!(in_wave, waited);
-    assert!((0..5).all(|id| m.alive(id)));
+    assert_eq!(in_wave, [waiting[0]], "one place was free");
+    assert!(!events.iter().any(|e| matches!(e, GameEvent::Spawned { wave: false, .. })));
+    let still: Vec<&GameEvent> = events.iter().filter(|e| matches!(e, GameEvent::Waiting { .. })).collect();
+    assert_eq!(still.len(), waiting.len() - 1);
+    assert!(still.iter().all(|e| matches!(e, GameEvent::Waiting { wave_at, .. } if *wave_at == 2 * wave)));
 }
 
 #[test]
@@ -294,27 +321,27 @@ fn a_wave_that_cannot_place_a_player_leaves_them_for_the_next() {
 
 #[test]
 fn the_players_of_a_wave_are_placed_in_the_order_they_waited() {
-    let mut m = Match::new(floor_with(1), Rules::slayer());
-    m.join(7, 0);
-    m.tick(&[], &[]);
-    // the one start is taken: these wait for the wave at tick 150, those who joined first first
-    for id in [5u16, 4] {
-        m.join(id, 0);
-    }
-    m.tick(&[], &[]);
-    m.join(2, 0);
-    m.tick(&[], &[]);
+    let (mut m, placed, waiting) = crowded();
     let wave = 5 * TICKS_PER_SECOND as u64;
+    // room for several: the ones who waited come first, though a dead player is due just as the wave is
+    for id in &placed[1..8] {
+        assert!(leave(&mut m.game, *id));
+    }
+    m.join(500, 0);
     m.run(wave - m.tick - 1);
     let events = m.tick(&[], &[]);
-    let order: Vec<u16> = events
+    let order: Vec<(u16, bool)> = events
         .iter()
         .filter_map(|e| match e {
-            GameEvent::Spawned { player, wave: true, .. } => Some(*player),
+            GameEvent::Spawned { player, wave, .. } => Some((*player, *wave)),
             _ => None,
         })
         .collect();
-    assert_eq!(order, [2, 4, 5], "by the tick they were due: all the same wave, so by id");
+    assert!(order.len() >= 3, "{order:?}");
+    let waited = order.iter().take_while(|(_, wave)| *wave).count();
+    let first: Vec<(u16, bool)> = waiting[..waited].iter().map(|id| (*id, true)).collect();
+    assert_eq!(order[..waited], first, "by the tick they were due: all the same wave, so by id");
+    assert!(order[waited..].iter().all(|(id, wave)| *id == 500 && !wave), "the one who was only due comes after");
 }
 
 // ---- deaths and score
@@ -681,23 +708,24 @@ fn a_player_placed_by_the_caller_is_alive_and_can_die_and_respawn() {
 }
 
 #[test]
-fn players_who_join_one_at_a_time_before_the_first_tick_wait_for_the_wave() {
+fn players_who_join_one_at_a_time_before_the_first_tick_wait_for_the_wave_when_no_spot_is_left() {
     let mut m = Match::new(floor_with(1), Rules::slayer());
-    for id in 0..4 {
+    for id in 0..80 {
         m.join(id, (id % 2) as u8);
         let events = spawn_due(&mut m.store, &mut m.game, &m.map, &mut m.rng, 0);
-        assert_eq!(spawned(&events).len(), (id == 0) as usize, "player {id}");
+        let waits = events.iter().any(|e| matches!(e, GameEvent::Waiting { .. }));
+        assert_eq!(spawned(&events).len(), !waits as usize, "player {id}");
+        assert_eq!(m.c(id).is_alive(), !waits);
     }
-    assert_eq!(m.c(1).life, Life::Waiting { wave: 150 });
+    assert!(m.alive(1), "beside the start, at once");
+    assert_eq!(m.c(79).life, Life::Waiting { wave: 150 });
 }
 
 #[test]
 fn beginning_the_game_again_moves_the_waves_a_player_waits_for_onto_the_new_clock() {
-    let mut m = Match::new(floor_with(1), Rules::slayer());
-    m.join(0, 0);
-    m.join(1, 0);
-    m.run(3);
-    assert_eq!(m.c(1).life, Life::Waiting { wave: 150 });
+    let (mut m, _, waiting) = crowded();
+    let id = waiting[0];
+    assert_eq!(m.c(id).life, Life::Waiting { wave: 150 });
     begin(&mut m.game, m.tick);
-    assert_eq!(m.c(1).life, Life::Waiting { wave: m.tick + 150 });
+    assert_eq!(m.c(id).life, Life::Waiting { wave: m.tick + 150 });
 }

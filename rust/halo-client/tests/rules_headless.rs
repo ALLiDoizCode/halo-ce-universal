@@ -1,7 +1,7 @@
 //! The headless C client in a Slayer match run by `halo-server` on the real
 //! Blood Gulch, with simulated players seated beside it: the server spawns the
-//! game's player (told that no starting location is free, it waits for a
-//! wave and then spawns in it), a death the server decides on is the game's
+//! game's player (when no starting location is free it is put beside one at
+//! once; only a crowd past that waits for a wave), a death the server decides on is the game's
 //! player's death and respawn, the scores are the server's, the match ends at
 //! its score limit with a final scoreboard that lists every player (the ones
 //! out of range too), and the server moves on to its next match. It covers
@@ -10,8 +10,8 @@
 //! It needs the game's own data, so it skips itself (and says why) without all
 //! of the variables `headless.rs` lists (`HALO_STDB_BIN`, `HALO_MAP_DIR`,
 //! `HALO_GAME_BIN`, `HALO_DATA_ROOT`). With `HALO_SCREENSHOT_DIR` (and
-//! `HALO_SCREENSHOT_EVERY`) the game saves frames, which show the scoreboard
-//! and the wave message; `HALO_HEADLESS_LOG` keeps the game's log.
+//! `HALO_SCREENSHOT_EVERY`) the game saves frames, which show the scoreboard,
+//! and `HALO_HEADLESS_LOG` keeps the game's log.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -30,9 +30,7 @@ use halo_server::servers::Log;
 fn simulated_count() -> usize {
     std::env::var("HALO_HEADLESS_PLAYERS").ok().and_then(|n| n.parse().ok()).unwrap_or(40)
 }
-/// Seconds between the match being announced and the first wave of players
-/// told that no starting location is free: the game has to start, load Blood
-/// Gulch and join before it, to be told to wait for it.
+/// Seconds between the waves of the fallback (the crowd here never needs one).
 const WAVE_SECONDS: u32 = 30;
 const END_SECONDS: u32 = 14;
 const GAME_SECONDS: u32 = 100;
@@ -80,7 +78,7 @@ fn triple_after(text: &str, marker: &str) -> Option<[f32; 3]> {
 }
 
 #[test]
-fn the_game_is_spawned_by_the_server_told_to_wait_for_a_wave_killed_and_respawned_and_sees_the_match_end() {
+fn the_game_is_spawned_by_the_server_killed_and_respawned_and_sees_the_match_end() {
     let (Some(stdb_dir), Some(maps), Some(game), Some(data)) =
         (stdb_bin_dir(), env_path("HALO_MAP_DIR"), env_path("HALO_GAME_BIN"), env_path("HALO_DATA_ROOT"))
     else {
@@ -91,7 +89,7 @@ fn the_game_is_spawned_by_the_server_told_to_wait_for_a_wave_killed_and_respawne
         return;
     };
 
-    // the server: Blood Gulch, Slayer to 3 kills, waves, and a long final scoreboard
+    // the server: Blood Gulch, Slayer to 3 kills, and a long final scoreboard
     let dir = scratch("rules-headless");
     let stdb = Stdb::start(&stdb_dir);
     let url = stdb.uri();
@@ -142,8 +140,8 @@ seconds = 0
     let began = Instant::now();
     assert_eq!(row.capacity, 500, "Blood Gulch's own cap, as none was configured");
 
-    // simulated players take seats: the first 16 spawn at the starting locations, the rest are
-    // told to wait for the wave
+    // simulated players take seats: the first 16 spawn at the starting locations, the rest beside
+    // them, at once
     let owner = MatchClient::connect_as(&url, &row.database, Some(&stdb.owner().token));
     let admin = Admin::new(&url).unwrap();
     let simulated: Vec<(PlayerClient, halo_server::admin::Account)> = (0..simulated_count())
@@ -158,11 +156,11 @@ seconds = 0
     let at_a_start = owner.standings().values().filter(|s| s.state == 0).count();
     let waiting = owner.standings().values().filter(|s| s.state == 2).count();
     println!(
-        "{at_a_start} of the {} simulated players spawned at a starting location, {waiting} wait for the wave",
+        "{at_a_start} of the {} simulated players spawned at once, {waiting} wait for the wave",
         simulated_count()
     );
-    assert_eq!(at_a_start + waiting, simulated_count());
-    assert!(waiting >= simulated_count() - 16 && at_a_start <= 16, "Blood Gulch has 16 starting locations for Slayer");
+    assert_eq!(at_a_start, simulated_count(), "beside a starting location, with 16 of them for Slayer");
+    assert_eq!(waiting, 0);
 
     // the game
     let work = std::env::temp_dir().join(format!("halo-rules-headless-{}", std::process::id()));
@@ -203,7 +201,7 @@ seconds = 0
             .expect("start the game"),
     );
 
-    // the game takes a seat; no starting location is free, so the server tells it to wait for the wave
+    // the game takes a seat; the 16 starting locations are taken, so the server puts it beside one at once
     let me = wait_for("the game's seat", 60, || {
         let mine: Vec<u16> = owner
             .seats()
@@ -214,21 +212,16 @@ seconds = 0
         mine.first().copied()
     });
     println!("the game is player {me}, {:.1} s after the match began", began.elapsed().as_secs_f32());
-    wait_for("the game to be told to wait", 30, || (owner.standings().get(&me)?.state == 2).then_some(()));
-    let wave_at = owner.standings()[&me].due_tick;
-    println!("the server tells it to wait for the wave at tick {wave_at}");
-    wait_for("the log to say it waits", 30, || {
-        read(&log_path).contains("the server says the local player is waiting").then_some(())
-    });
+    wait_for("the game to be spawned", 30, || (owner.standings().get(&me)?.state == 0).then_some(()));
     assert!(
-        !read(&log_path).contains("the local unit is where the server has the player"),
-        "the game placed a unit before the server had spawned the player"
+        !read(&log_path).contains("the server says the local player is waiting"),
+        "the game was told to wait for a wave"
     );
-
-    // the wave spawns it (beside a starting location, at least a pill's width from everyone)
-    wait_for("the wave", 60, || (owner.standings().get(&me)?.state == 0).then_some(()));
     let spawn = owner.standings()[&me].clone();
-    println!("spawned in the wave at ({:.2} {:.2} {:.2}), spawn {}", spawn.x, spawn.y, spawn.z, spawn.spawns);
+    println!(
+        "spawned beside a starting location at ({:.2} {:.2} {:.2}), spawn {}",
+        spawn.x, spawn.y, spawn.z, spawn.spawns
+    );
     assert_eq!(spawn.spawns, 1);
     let first_unit = wait_for("the unit to be put where the server spawned the player", 20, || {
         triple_after(&read(&log_path), "the local unit is where the server has the player")

@@ -218,7 +218,7 @@ pub extern "C" fn parity_output() -> *const u8 {
 // ---- the game's rules
 
 /// Kinds of [`GameEvent`] counted by [`run_match`], in the order of
-/// [`match_event_counts`]: died, scored, death refused, spawned at a start,
+/// [`match_event_counts`]: died, scored, death refused, spawned at a start or beside one,
 /// spawned in a wave, told to wait, over.
 pub const MATCH_EVENT_KINDS: usize = 7;
 
@@ -253,19 +253,15 @@ fn match_event_bytes(event: &GameEvent, out: &mut Vec<u8>) -> usize {
     kind as usize
 }
 
-/// A match of the game's rules on a flat floor with six starting locations: 40
-/// players who spawn, wait for waves, kill one another, betray, fall, leave
+/// A match of the game's rules on a flat floor with two starting locations: 80
+/// players who spawn at a start or beside one, now and then wait for a wave, kill one another, betray, fall, leave
 /// and join, in a game with teams or without (by the seed's lowest bit), with
 /// a score limit that ends it, restarted every 300 ticks while over. Returns
 /// the final state of the step's store and the game, then the hash that
 /// chains every tick's events and states, then the counts of each kind of
 /// event.
 pub fn run_match(seed: u64, ticks: u32) -> Vec<u8> {
-    let starts: Vec<_> = (0..6)
-        .map(|i| {
-            halo_sim::fixtures::start_at((i % 3) as f32 * 14.0 - 14.0, (i / 3) as f32 * 14.0 - 7.0, (i % 2) as i16)
-        })
-        .collect();
+    let starts: Vec<_> = (0..2).map(|i| halo_sim::fixtures::start_at(i as f32 * 14.0 - 7.0, 0.0, i as i16)).collect();
     let map = halo_sim::fixtures::with_starts(flat_floor_map(), &starts);
     let mut rules = if seed & 1 == 0 { Rules::slayer() } else { Rules::team_slayer() };
     rules.score_limit = 8;
@@ -276,10 +272,10 @@ pub fn run_match(seed: u64, ticks: u32) -> Vec<u8> {
     let mut store = MemoryStore::new();
     let mut game = MemoryGame::new(rules);
     let mut rng = Rng::seeded(seed);
-    for id in 0..40u16 {
+    for id in 0..80u16 {
         enter(&mut game, id, (id % 2) as u8, 0);
     }
-    let mut next_id = 40u16;
+    let mut next_id = 80u16;
 
     let mut chain = Fnv(0xCBF2_9CE4_8422_2325);
     let mut counts = [0u32; MATCH_EVENT_KINDS];
