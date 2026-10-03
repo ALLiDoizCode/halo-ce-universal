@@ -310,7 +310,7 @@ impl Respawns {
             let due = out.due.unwrap_or(out.since).max(out.since);
             let at_a_start =
                 starts.iter().any(|s| (s[0] - seen.spawn[0]).abs() < 0.05 && (s[1] - seen.spawn[1]).abs() < 0.05);
-            let path = if out.waited || seen.spawned_tick > due {
+            let path = if out.waited {
                 Path::Wave
             } else if at_a_start {
                 Path::FreeStart
@@ -386,6 +386,15 @@ mod tests {
         assert_eq!(r.respawns[2].timer, secs(150.0), "the timer is not the wave's wait");
         assert_eq!(r.respawns[2].after, secs(100.0));
         assert_eq!((r.by_path(Path::FreeStart), r.by_path(Path::BesideStart), r.by_path(Path::Wave)), (1, 1, 1));
+    }
+
+    #[test]
+    fn a_late_respawn_is_only_a_wave_if_the_player_was_seen_waiting_for_one() {
+        let mut r = Respawns::default();
+        r.observe(100, standing(1, 250, 1, 0, [0.0; 3]), &STARTS);
+        r.observe(300, standing(0, 0, 2, 300, [0.6, 0.0, 0.0]), &STARTS);
+        assert_eq!(r.respawns[0].path, Path::BesideStart, "not told to wait: something else delayed it");
+        assert!(r.respawns[0].after > 1.0);
     }
 
     #[test]
