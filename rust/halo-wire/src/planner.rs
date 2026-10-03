@@ -270,10 +270,9 @@ impl Planner {
             let mut weight = if d2 <= near2 {
                 1.0
             } else {
-                {
-                    let q = cfg.near_radius / d2.sqrt();
-                    (q * q.sqrt()).max(cfg.far_floor)
-                }
+                // (near_radius / distance)^1.5
+                let q = cfg.near_radius / d2.sqrt();
+                (q * q.sqrt()).max(cfg.far_floor)
             };
             let ahead = d[0] * forward[0] + d[1] * forward[1] + d[2] * forward[2];
             if d2 <= 0.0 || (ahead > 0.0 && ahead * ahead >= cone2 * d2) {
