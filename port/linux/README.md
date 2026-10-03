@@ -384,8 +384,8 @@ sounds each causes; and a hundred players in view (the frame rate, with
 `HALO_FPS_FLOOR`).
 
 `rust/halo-client/tests/combat_headless.rs` runs real games: the game
-shoots a simulated player until it dies, with the pistol, the plasma rifle and
-the plasma pistol (tapped and charged); simulated players shoot the game's player (shield down, recharge,
+shoots a simulated player until it dies, with the pistol, the plasma rifle, the
+plasma pistol (tapped and charged), the rocket launcher and the needler; simulated players shoot the game's player (shield down, recharge,
 death, respawn); a bystander watches one simulated player kill another. Run it as `headless` above, with
 `--test combat_headless -- --test-threads=1`.
 

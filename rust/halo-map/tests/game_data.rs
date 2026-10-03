@@ -240,6 +240,21 @@ fn every_map_has_every_weapon_of_the_game_as_the_tags_have_it() {
         assert_eq!(projectile(pistol, 1).impact_damage.unwrap().upper, 70.0, "{name}");
         assert_eq!((pistol.weapon_type, pistol.secondary_trigger_mode), (3, 0), "{name}");
 
+        // a rocket launcher's rocket makes an explosion (and no damage where it hits)
+        let rocket = projectile(weapon("rocket launcher\\rocket launcher"), 0);
+        assert!(rocket.impact_damage.is_none(), "{name}");
+        let blast =
+            rocket.detonation_damage.iter().find(|d| d.upper > 300.0).unwrap_or_else(|| panic!("{name}: a blast"));
+        assert_eq!((blast.falloff_radius, blast.cutoff_radius, blast.core_radius), (0.5, 2.0, 0.6), "{name}");
+        assert_eq!(rocket.maximum_range, 128.0, "{name}");
+
+        // a needler's needle does nothing where it hits, hurts what it sticks to, and many make a blast together
+        let needle = projectile(weapon("needler\\needler"), 0);
+        assert_eq!(needle.impact_damage.unwrap().upper, 0.0, "{name}");
+        assert_eq!(needle.attached_damage.unwrap().upper, 10.0, "{name}");
+        assert!(needle.flags & halo_map::combat::projectile_flags::SUPER_COMBINING_EXPLOSION != 0, "{name}");
+        assert!(needle.super_detonation_damage.iter().any(|d| d.upper == 60.0 && d.cutoff_radius == 1.0), "{name}");
+
         // every weapon has a melee blow, and the first-person animation it is timed by
         for w in [
             "assault rifle\\assault rifle",

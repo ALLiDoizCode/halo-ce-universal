@@ -21,9 +21,10 @@ use halo_match_driver::{FighterRow, MatchClient, PlayerClient};
 use halo_sim::combat::HitReport;
 use halo_sim::damage::{Vitals, DEAD};
 use halo_sim::fixtures::{
-    combat_fixture, flat_floor_map, plasma_pistol, plasma_rifle, shotgun, sniper_rifle, start_at, with_starts, PISTOL,
-    PISTOL_DAMAGE, PLASMA_PISTOL, PLASMA_PISTOL_CHARGED_DAMAGE, PLASMA_PISTOL_DAMAGE, PLASMA_RIFLE,
-    PLASMA_RIFLE_DAMAGE, SHOTGUN, SHOTGUN_DAMAGE, SNIPER_RIFLE, SNIPER_RIFLE_DAMAGE,
+    combat_fixture, flat_floor_map, needler, plasma_pistol, plasma_rifle, rocket_launcher, shotgun, sniper_rifle,
+    start_at, with_starts, NEEDLER, NEEDLER_ATTACHED_DAMAGE, NEEDLER_BLAST, PISTOL, PISTOL_DAMAGE, PLASMA_PISTOL,
+    PLASMA_PISTOL_CHARGED_DAMAGE, PLASMA_PISTOL_DAMAGE, PLASMA_RIFLE, PLASMA_RIFLE_DAMAGE, ROCKET_BLAST,
+    ROCKET_LAUNCHER, SHOTGUN, SHOTGUN_DAMAGE, SNIPER_RIFLE, SNIPER_RIFLE_DAMAGE,
 };
 use halo_sim::rules::Rules;
 use halo_sim::TICKS_PER_SECOND;
@@ -344,7 +345,14 @@ fn armed_fight(name: &str, weapon: u16, vitality: f32) -> Option<Fight> {
 /// ... with the players `gap` apart.
 fn armed_fight_apart(name: &str, gap: f32, weapon: u16, vitality: f32) -> Option<Fight> {
     let f = fight_apart(name, gap, |map| {
-        map.combat.weapons.extend([shotgun(), sniper_rifle(), plasma_rifle(), plasma_pistol()]);
+        map.combat.weapons.extend([
+            shotgun(),
+            sniper_rifle(),
+            plasma_rifle(),
+            plasma_pistol(),
+            rocket_launcher(),
+            needler(),
+        ]);
         map.combat.resistance.maximum_shield_vitality *= vitality;
         map.combat.resistance.maximum_body_vitality *= vitality;
     })?;
@@ -439,4 +447,41 @@ fn a_plasma_pistols_two_triggers_each_deal_their_own_damage_and_the_charged_one_
     wait_until("the verdicts", || f.fighter(TARGET).hurt_count as u64 + f.rejected_hits() == 12);
     let rejected = f.rejected_hits();
     assert!((4..=6).contains(&rejected), "about 5 of 10 pass: {rejected} were rejected");
+}
+
+/// The report of the explosion `damage` on the target where it stands: at the target's feet, a little below the
+/// middle of it, at the scale the engine would give it.
+fn blast_on_target(f: &Fight, damage: u16, scale: f32) -> HitReport {
+    let at = f.position(TARGET);
+    HitReport { damage, scale, material: -1, origin: [at[0], at[1], at[2] + 0.2], ..f.hit_on_target() }
+}
+
+#[test]
+fn a_rockets_blast_kills_the_target_it_reaches_and_one_it_does_not_reach_is_refused() {
+    let Some(f) = armed_fight_apart("hit-rocket", 6.0, ROCKET_LAUNCHER, 1.0) else { return };
+    // an explosion half a unit off the target's middle, the width of a body: all 300 of it (a player has 150)
+    f.report(&[blast_on_target(&f, ROCKET_BLAST, 1.0)]);
+    wait_until("the death", || f.owner.standings()[&TARGET].state == STATE_DEAD);
+    assert_eq!(f.owner.standings()[&SHOOTER].score, 1, "the kill is the shooter's");
+    assert_eq!(f.rejected_hits(), 0);
+    // ... and one whose epicentre is nowhere near is no hit
+    wait_until("the respawn", || f.owner.standings()[&TARGET].state == STATE_ALIVE);
+    let mut far = blast_on_target(&f, ROCKET_BLAST, 1.0);
+    far.origin[0] += 5.0;
+    f.report(&[far]);
+    wait_until("the refusal", || f.rejected_hits() == 1);
+    assert_eq!(f.fighter(TARGET).hurt_count, 0);
+}
+
+#[test]
+fn a_needler_needle_stuck_to_a_target_hurts_it_and_seven_make_a_blast_of_sixty() {
+    let Some(f) = armed_fight_apart("hit-needler", 6.0, NEEDLER, 1.0) else { return };
+    f.report(&[HitReport { damage: NEEDLER_ATTACHED_DAMAGE, material: -1, scale: 1.0, ..f.hit_on_target() }]);
+    wait_until("the needle", || f.fighter(TARGET).hurt_count == 1);
+    assert!((f.fighter(TARGET).shield - (1.0 - 10.0 / 75.0)).abs() < 1.0e-5);
+    f.report(&[blast_on_target(&f, NEEDLER_BLAST, 1.0)]);
+    wait_until("the blast", || f.fighter(TARGET).hurt_count == 2);
+    // 60 more of the 65 that are left of the shield
+    assert!((f.fighter(TARGET).shield - 5.0 / 75.0).abs() < 1.0e-4, "{}", f.fighter(TARGET).shield);
+    assert_eq!(f.rejected_hits(), 0);
 }

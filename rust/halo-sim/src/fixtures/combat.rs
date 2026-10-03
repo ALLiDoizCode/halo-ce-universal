@@ -120,6 +120,13 @@ pub const ROCKET_MELEE: u16 = 1113;
 /// The tag indices of [`sniper_rifle`], its bullet's damage effect and its melee blow's.
 pub const SNIPER_RIFLE: u16 = 1172;
 pub const SNIPER_RIFLE_DAMAGE: u16 = 1219;
+/// The tag indices of [`needler`]: its needle's damage effect (which deals nothing), what a needle stuck to a
+/// player does to them, and the two damages of the blast that seven or more make together.
+pub const NEEDLER: u16 = 1508;
+pub const NEEDLER_IMPACT_DAMAGE: u16 = 1567;
+pub const NEEDLER_ATTACHED_DAMAGE: u16 = 1566;
+pub const NEEDLER_BLAST: u16 = 1557;
+pub const NEEDLER_SHOCK: u16 = 1556;
 /// The tag indices of [`plasma_pistol`], its bolt's damage effect, its overcharged bolt's and its melee blow's.
 pub const PLASMA_PISTOL: u16 = 1281;
 pub const PLASMA_PISTOL_DAMAGE: u16 = 1317;
@@ -342,6 +349,54 @@ pub fn plasma_pistol() -> Weapon {
     };
     weapon.triggers.push(second);
     weapon
+}
+
+/// The multiplayer needler, as the tags of the maps have it: a rate of fire that comes up from 3 a second to 10,
+/// twenty needles loaded at a time, a needle that does nothing where it hits but sticks and explodes in 0.75 s (10
+/// damage to what it is stuck to), and, when seven or more are stuck to one, a blast of 60 within a unit.
+pub fn needler() -> Weapon {
+    let mut attached = damage(NEEDLER_ATTACHED_DAMAGE, 10.0, 10.0, 10.0);
+    attached.flags = 0;
+    let mut blast = damage(NEEDLER_BLAST, 40.0, 60.0, 60.0);
+    blast.flags = 0x20;
+    blast.falloff_radius = 0.5;
+    blast.cutoff_radius = 1.0;
+    let mut shock = damage(NEEDLER_SHOCK, 0.0, 0.0, 0.0);
+    shock.falloff_radius = 2.0;
+    shock.cutoff_radius = 4.0;
+    let mut needle = projectile(
+        0.133_333_34,
+        0.133_333_34,
+        20.0,
+        (0.0, 100.0),
+        Some(damage(NEEDLER_IMPACT_DAMAGE, 0.0, 0.0, 0.0)),
+        Vec::new(),
+    );
+    needle.timer_lower_bound = 0.75;
+    needle.timer_upper_bound = 0.75;
+    needle.flags = halo_map::combat::projectile_flags::SUPER_COMBINING_EXPLOSION;
+    needle.super_detonation_damage = Vec::from([shock, blast]);
+    needle.attached_damage = Some(attached);
+    let trigger = Trigger {
+        initial_rate_of_fire: 3.0,
+        final_rate_of_fire: 10.0,
+        rate_of_fire_acceleration: 0.066_666_67,
+        rate_of_fire_deceleration: 0.222_222_22,
+        projectile: Some(needle),
+        ..pistol().triggers.remove(0)
+    };
+    let magazine = Magazine {
+        rounds_total_initial: 80,
+        rounds_total_maximum: 80,
+        rounds_loaded_maximum: 20,
+        reload_time: 1.0,
+        rounds_reloaded: 20,
+        ..pistol().magazines.remove(0)
+    };
+    Weapon {
+        weapon_type: 2,
+        ..weapon_like_the_pistol(NEEDLER, "weapons\\needler\\needler.weap", trigger, magazine, melee(1523), (70, 48, 6))
+    }
 }
 
 /// The multiplayer sniper rifle, as the tags of the maps have it: a shot twice a second, one a press of
