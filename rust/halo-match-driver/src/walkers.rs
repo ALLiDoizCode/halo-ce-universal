@@ -9,6 +9,8 @@
 //! The copy runs the same `halo_sim::step` on the same inputs, so after each
 //! tick it must equal the server's tables exactly.
 
+use std::collections::BTreeMap;
+
 use halo_sim::walk::{settled, walk, Body, Controls};
 use halo_sim::{step, Event, MapData, MemoryStore, Player, PlayerInput, Rng, Store};
 
@@ -41,6 +43,35 @@ pub struct Walkers {
     ticks: u64,
     /// Per walker, how hard they push ahead (1 unless [`Walkers::set_throttle`] says).
     throttles: Vec<f32>,
+    /// The tick of each player's last accepted move, as the module's `updated_tick` holds it
+    /// (the speed bound grows with the ticks since).
+    moved_at: BTreeMap<u16, u64>,
+}
+
+/// The copy's store, told how long ago each player last moved, as the module's store is.
+struct Timed<'a> {
+    store: &'a mut MemoryStore,
+    moved_at: &'a BTreeMap<u16, u64>,
+    tick: u64,
+}
+
+impl Store for Timed<'_> {
+    fn player(&self, id: u16) -> Option<Player> {
+        self.store.player(id)
+    }
+    fn set_player(&mut self, player: Player) {
+        self.store.set_player(player)
+    }
+    fn remove_player(&mut self, id: u16) -> bool {
+        self.store.remove_player(id)
+    }
+    fn player_ids(&self) -> Vec<u16> {
+        self.store.player_ids()
+    }
+    fn ticks_since_move(&self, id: u16) -> u32 {
+        let since = self.tick.saturating_sub(self.moved_at.get(&id).copied().unwrap_or(0));
+        since.clamp(1, u32::MAX as u64) as u32
+    }
 }
 
 impl Walkers {
@@ -97,6 +128,7 @@ impl Walkers {
                 acrobatics: false,
                 ticks: 0,
                 throttles: vec![1.0; players as usize],
+                moved_at: BTreeMap::new(),
             },
             spawn,
         )
@@ -197,6 +229,7 @@ impl Walkers {
             }
             let position = [row.x, row.y, row.z];
             self.mirror.set_player(Player::new(row.id, position, row.yaw, row.pitch));
+            self.moved_at.insert(row.id, row.updated_tick);
             // (a walker the server has somewhere else than they thought is put there, at rest: for
             // an acrobat, whose jump and fall are in the speed the body carries, only when it is
             // somewhere else than the inputs still on their way account for)
@@ -216,8 +249,12 @@ impl Walkers {
     /// A walker whose move was rejected turns to a new heading, and starts
     /// again from where they are, instead of pushing on.
     pub fn apply(&mut self, inputs: &[PlayerInput], tick: u64) -> Vec<Event> {
-        let events = step(&mut self.mirror, inputs, &self.map, &mut Rng::seeded(tick));
+        let mut store = Timed { store: &mut self.mirror, moved_at: &self.moved_at, tick };
+        let events = step(&mut store, inputs, &self.map, &mut Rng::seeded(tick));
         for event in &events {
+            if let Event::MoveAccepted { player } = event {
+                self.moved_at.insert(*player, tick);
+            }
             if let Event::MoveRejected { player, .. } = event {
                 // ids are 0..players, so a player's id is its index
                 if let Some(heading) = self.headings.get_mut(*player as usize) {
