@@ -448,7 +448,7 @@ fn units_without_an_engine_player_have_a_name_a_team_and_a_contact() {
     };
     // (more than the engine's records hold, and enough of them in the motion sensor's range: 500
     // have about 250 within 25 world units of a player, from the 500-player check)
-    let others: u16 = std::env::var("HALO_HEADLESS_PLAYERS").ok().and_then(|n| n.parse().ok()).unwrap_or(400);
+    let others: u16 = std::env::var("HALO_HEADLESS_PLAYERS").ok().and_then(|n| n.parse().ok()).unwrap_or(500);
     assert!(others > ENGINE_PLAYERS, "HALO_HEADLESS_PLAYERS must be more than the {ENGINE_PLAYERS} records");
     let halo_map = halo_map::HaloMap::from_path(maps.join("bloodgulch.map")).expect("Blood Gulch");
     let anchors: Vec<[f32; 3]> = halo_map.player_starts.iter().map(|s| s.position).collect();

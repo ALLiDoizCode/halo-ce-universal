@@ -896,6 +896,7 @@ void hud_autosave(
 	return;
 }
 
+/* port: by the unit, as the large-scale mode's remote units with no player have none to go by */
 static void hud_draw_friendly_indicator(
 	long unit_index)
 {
@@ -958,7 +959,7 @@ which the HUD takes the team and name of from the adapter's record of the unit *
 boolean large_mode_active(void);
 boolean large_mode_bare_remote_unit(long unit_index, long *team, wchar_t *name, long name_size);
 
-/* the next of them from an iterator over the units (name: 12 characters, as a player's) */
+/* port: the next of them from an iterator over the units (name: 12 characters, as a player's) */
 static boolean hud_next_bare_remote_unit(
 	struct object_iterator *iterator,
 	long *team,
@@ -1006,6 +1007,7 @@ static void hud_draw_players(
 			teammate_index < teammate_count;
 			teammate_index++)
 		{
+			/* (port: the unit, not the player) */
 			hud_draw_friendly_indicator(player_get(teammate_indices[teammate_index])->unit_index);
 		}
 
@@ -1156,9 +1158,10 @@ static real hud_player_name_enemy_range(
 	return MIN(range, MAXIMUM_ENEMY_NAME_RANGE);
 }
 
-/* the characters of a player's name (struct player_datum's) */
+/* port: the characters of a player's name (struct player_datum's) */
 #define PLAYER_NAME_LENGTH 12
 
+/* (by the unit and the name, so that a unit with no player is drawn by the same rules) */
 static void hud_draw_player_name(
 	long unit_index,
 	wchar_t const *player_name,

@@ -2848,7 +2848,7 @@ static long find_closest_player_index(
 			real target_angle;
 
 			if ((candidate->unit.active_camouflage < 1.0f ||
-				player->player_display_index == target_id_from_unit_index(candidate_object_index)) &&
+				player->player_display_index == target_id_from_unit_index(candidate_object_index)) && /* port */
 				autoaim_compute_target(
 					object_indices[object_index],
 					&camera_position,
@@ -2868,7 +2868,7 @@ static long find_closest_player_index(
 	}
 
 	if (best_object_index != NONE)
-		best_object_index = target_id_from_unit_index(best_object_index);
+		best_object_index = target_id_from_unit_index(best_object_index); /* port: or a unit with no player */
 
 	return best_object_index;
 }
@@ -7643,6 +7643,7 @@ static void internal_rasterize_target_name(
 
 		if (hold_time >= 10)
 			hold_time = 10;
+		/* port: a target may be a unit with no player */
 		if (target_name_from_id(player->player_display_index, target_name, NUMBEROF(target_name)))
 		{
 			alpha = linear_to_non_linear_alpha(hold_time * 0.1f) * 0.5f;
