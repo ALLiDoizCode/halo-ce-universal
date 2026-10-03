@@ -131,6 +131,45 @@ tick's inputs are the player's controls for it, in place of the controller's
 (the engine's own conversion of facing and throttle to movement applies, as for
 a person).
 
+## Firing scenarios
+
+A scenario can give the player a weapon and a target to shoot, and compare
+the weapon's rate of fire, the damage of its hits and the target's shields.
+
+```
+weapon weapons/pistol/pistol   # the weapon tag's name (the rest of the line)
+target 81.0 -166.2 0.32 3.14159265   # x y z yaw of a second unit that stands still
+flight 6                             # ticks a projectile flies, for a weapon whose hits are not instant
+input 0 160 pitch=-0.13              # aim at the target's body
+input 60 100 fire=1                  # the trigger is held
+```
+
+- `weapon <name>`: the player's only weapon (the engine's own starting
+  equipment is removed). It names a weapon tag of the map, so a scenario of
+  another weapon (`rifle_burst.scn`, the assault rifle) needs no code: the
+  simulation reads the weapon's data from the same tags.
+- `target <x> <y> <z> <yaw>`: a unit with the multiplayer body's health and
+  shields. Without it the target columns of the trace are zero.
+- Keys `fire` (1 while the trigger is held) and `part` (the target's material
+  the shots are to hit, for the simulation: 0 head, 1 body; the default is
+  1). The engine's own hits land where its aim takes them (`pitch`).
+- Quantities (besides the walking ones): `rounds` (loaded and in reserve),
+  `heat`, `shield`, `body`, `stun` (ticks of the target's shield stun), `life`
+  (whether the target is dead) and `hit` (the part of the target hit this
+  tick). The
+  scenarios `pistol_kill`, `pistol_magazine`, `pistol_shield` and `rifle_burst`
+  compare all of them with tolerance 0.
+
+The part of the body a bullet hits in the engine depends on the frame's
+timing and the machine's load, though the weapon's own timing does not. So a
+comparison of the simulation with the engine replays the hits the engine
+made: the engine's trace is the input of `halo-scenario --hits <engine trace>`
+(tick and part of each hit), and the simulation deals the same hits at the
+same ticks in the engine's order of a tick (the weapon updates, the target
+ticks, then the hits). The gate of this is
+`test_the_simulation_matches_the_engine_on_a_scenario_of_firing` in
+`tools/test_scenario_harness.py`, which runs the engine.
+
 ## Trace format
 
 A text file, tab separated, one line a tick. The C engine writes it; the Rust
@@ -162,3 +201,10 @@ tick	x	y	z	vx	vy	vz	yaw	pitch	state
   | `vx`, `vy`, `vz` | its velocity, world units a second (the engine's units a tick times 30) |
   | `yaw`, `pitch` | where it aims, radians: yaw from -pi to pi, 0 along +x, turning towards +y; pitch up positive |
   | `state` | the movement state, a sum of bits: 1 airborne (not on the ground), 2 crouching |
+
+A trace of a scenario of firing is `# halo-trace 2`: the columns above, then
+`rounds total heat shield body stun dead hit` (the weapon's rounds loaded and
+in reserve, its heat, the target's shield and health as fractions of full,
+the ticks of shield stun left, 1 when the target is dead, and the target's
+material hit this tick, -1 for none). With no target the target's columns are zero.
+`compare` refuses a version 1 trace against a version 2 one.

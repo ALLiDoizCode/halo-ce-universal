@@ -8288,7 +8288,10 @@ void game_engine_postspawn_player_update(
 			fragmentation_grenade_count;
 		long starting_plasma_grenade_count = 0;
 
-		if (!TEST_FLAG(global_variant.universal_variant.flags, _game_variant_generic_starting_equipment_bit))
+		/* port: in the large-scale mode the server says what a player carries
+		(large_mode.c gives the unit that weapon), not the map's starting equipment */
+		if (!TEST_FLAG(global_variant.universal_variant.flags, _game_variant_generic_starting_equipment_bit) &&
+			!large_mode_active())
 		{
 			handle_custom_starting_equipment(
 				unit_index,

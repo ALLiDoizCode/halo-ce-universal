@@ -81,6 +81,11 @@ impl Local {
         self.map.get().and_then(|r| r.as_ref().err().cloned())
     }
 
+    /// The map, once it is in: what the player's body is and the weapons' tags, for the fighting.
+    pub fn map(&self) -> Option<&MapData> {
+        self.map.get().and_then(|r| r.as_ref().ok())
+    }
+
     /// The map is in and movement will be computed.
     pub fn ready(&self) -> bool {
         matches!(self.map.get(), Some(Ok(_)))

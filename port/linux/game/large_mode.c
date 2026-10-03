@@ -90,6 +90,20 @@ bans the player, or is full, says so on the console. The identity is kept in
 the save root (u/large_identity), one file for each SpacetimeDB, and the name
 the player chose (large.name) goes with it to every server's roster.
 
+Fighting: the player's own engine fires the weapon and sees what it hits; it
+reports a hit on another player to the server (large_mode_damage_deals, from
+object_cause_damage: the engine deals no damage to a player's unit in this mode,
+the server does), which checks the report and deals the damage. What the server
+says of each player's health and shields (the library's halo_large_vitals) is
+put into the engine's unit of the player every tick (large_mode_show_vitals), so
+that the HUD's shield and health bars, and the flash of a shield that is hit and
+the effects of one that goes down and comes back, are the engine's own. A player
+the server says has been killed by a hit is killed in the engine too (the unit's
+death plays, and its body stays as a body does). The local player holds the
+weapon the server says they carry (large_mode_equip_local). With large.autofire
+the local player aims at the nearest other player in the world and holds the
+trigger, for the automated tests' shooter.
+
 Without HALO_LARGE_MODE (the Android build, or a desktop build made without
 the library) the mode is not there: large_mode_active() is FALSE.
 */
@@ -99,8 +113,12 @@ the library) the mode is not there: large_mode_active() is FALSE.
 #include "game/game_engine.h"
 #include "game/game_globals.h"
 #include "game/players.h"
+#include "items/weapons.h"
+#include "items/weapon_definitions.h"
+#include "objects/damage.h"
 #include "objects/objects.h"
 #include "scenario/scenario.h"
+#include "tag_files/tag_groups.h"
 #include "text/unicode.h"
 #include "units/bipeds.h"
 #include "units/unit_control_data.h"
@@ -160,6 +178,12 @@ unsigned long halo_large_browse_find(const char *id);
 unsigned long halo_large_browse_message(char *buffer, unsigned long size);
 unsigned long halo_large_identity(char *buffer, unsigned long size);
 unsigned long halo_large_refusal(char *buffer, unsigned long size);
+unsigned long halo_large_vitals(unsigned long player, float *out);
+unsigned long halo_large_loadout(unsigned long player, unsigned long *out);
+unsigned long halo_large_weapon_name(unsigned long tag_index, char *buffer, unsigned long size);
+unsigned long halo_large_report_hit(unsigned long target, unsigned long weapon, long material, float ox, float oy,
+	float oz, float tx, float ty, float tz);
+unsigned long halo_large_hits(unsigned long *out);
 
 /* the local player's life, halo_large_life's first number */
 enum
@@ -263,6 +287,17 @@ static struct
 	long killed_unit;
 	long life_logged;
 	boolean scoreboard_always;
+
+	/* fighting: the player the server says the local player is, the unit that has been given the
+	weapon the server says it carries, how many hits had hurt the local player when it was last
+	logged, and large.autofire */
+	unsigned long player_id;
+	long equipped_unit;
+	unsigned long hurts_logged;
+	long equip_weapon;
+	boolean vitals_short;
+	long reports_logged;
+	boolean autofire;
 } large;
 
 static void large_mode_read_settings(
@@ -279,6 +314,7 @@ static void large_mode_read_settings(
 		snprintf(large.spacetimedb, sizeof(large.spacetimedb), "%s", config_string("large.spacetimedb"));
 		large.log_players = config_boolean("large.log_players") != 0;
 		large.scoreboard_always = config_boolean("large.scoreboard") != 0;
+		large.autofire = config_boolean("large.autofire") != 0;
 		if (large.root[0])
 		{
 			large.browser_mode = TRUE;
@@ -293,6 +329,7 @@ static void large_mode_read_settings(
 	snprintf(large.database, sizeof(large.database), "%s", config_string("large.database"));
 	large.log_players = config_boolean("large.log_players") != 0;
 	large.scoreboard_always = config_boolean("large.scoreboard") != 0;
+	large.autofire = config_boolean("large.autofire") != 0;
 	if (!large.database[0])
 	{
 		platform_log("large mode: large.database names the match's database and cannot be missing: the game is "
@@ -334,6 +371,7 @@ static void large_mode_log_error(
 static void large_mode_forget_remotes(void);
 static void large_mode_log_remotes(void);
 static void large_mode_local_after_objects(void);
+static void large_mode_show_vitals(long unit_index, unsigned long player);
 
 /* the player's own copy of the match's map, for the local player's movement
 (the library reads it on a thread of its own; call after a session has started,
@@ -365,6 +403,11 @@ void large_mode_new_game(
 	large.spawn_seen = 0xFFFFFFFFUL;
 	large.killed_unit = NONE;
 	large.life_logged = NONE;
+	large.equipped_unit = NONE;
+	large.equip_weapon = NONE;
+	large.hurts_logged = 0;
+	large.vitals_short = FALSE;
+	large.reports_logged = 0;
 	large_mode_forget_remotes();
 	/* (with a server list the session is the player's join's, which started it) */
 	if (large.browser_mode)
@@ -534,6 +577,21 @@ static void large_mode_take_player(
 		return;
 	network_player_detach_unit(remote->player_index);
 	large_remote_data.player_is_remote[DATUM_INDEX_TO_ABSOLUTE_INDEX(remote->player_index)] = FALSE;
+	/* (a player whose name is up over the one that is gone, as the player in the crosshair's is, shows nobody) */
+	{
+		struct data_iterator iterator;
+		struct player_datum *other;
+
+		data_iterator_new(&iterator, player_data);
+		while ((other = (struct player_datum *)data_iterator_next(&iterator)) != NULL)
+		{
+			if (other->player_display_index == remote->player_index)
+			{
+				other->player_display_index = NONE;
+				other->player_display_count = 0;
+			}
+		}
+	}
 	datum_delete(player_data, remote->player_index);
 	remote->player_index = NONE;
 	large_remote_data.players--;
@@ -557,6 +615,40 @@ static void large_mode_remove_remote(
 	large_remote_data.removed++;
 	if (large.log_players)
 		platform_log("large mode: player %lu is out of range: unit deleted", id);
+}
+
+/* a player the server says a hit has killed: the engine's unit dies as a unit does (its physics, which the
+adapter suspended, goes on from where it is) and stays as a body, which the engine takes away in time; the
+adapter forgets it, as it does one that is out of range, and the player is made afresh when they spawn */
+static void large_mode_kill_remote(
+	unsigned long id)
+{
+	struct large_remote *remote = &large_remote_data.remotes[id];
+
+	large_mode_take_player(remote);
+	large_remote_data.remote_of_object[DATUM_INDEX_TO_ABSOLUTE_INDEX(remote->unit_index)] = 0;
+	if (object_try_and_get_and_verify_type(remote->unit_index, _object_mask_unit))
+	{
+		unit_scripting_suspended(remote->unit_index, FALSE);
+		unit_kill(remote->unit_index);
+	}
+	remote->present = FALSE;
+	large_remote_data.count--;
+	large_remote_data.removed++;
+	platform_log("large mode: player %lu was killed: its unit dies", id);
+}
+
+/* a player who is no longer in the world: a body if the server's say of their health is that a hit
+killed them, or else they are out of range or gone, and their unit goes */
+static void large_mode_lose_remote(
+	unsigned long id)
+{
+	float vitals[6];
+
+	if (halo_large_vitals(id, vitals) && ((long)(vitals[3] + 0.5f) & 2) != 0)
+		large_mode_kill_remote(id);
+	else
+		large_mode_remove_remote(id);
 }
 
 /* a unit for a player the gateway has sent, where it is, once the match's
@@ -783,7 +875,7 @@ static void large_mode_update_remotes_work(
 	for (id = 0; id < LARGE_MAXIMUM_REMOTES; id++)
 	{
 		if (large_remote_data.remotes[id].present && !seen[id])
-			large_mode_remove_remote((unsigned long)id);
+			large_mode_lose_remote((unsigned long)id);
 	}
 	if (large_remote_data.count <= 0)
 		return;
@@ -799,7 +891,10 @@ static void large_mode_update_remotes_work(
 	for (id = 0; id < LARGE_MAXIMUM_REMOTES; id++)
 	{
 		if (large_remote_data.remotes[id].present)
+		{
 			large_mode_drive_remote(&large_remote_data.remotes[id], information);
+			large_mode_show_vitals(large_remote_data.remotes[id].unit_index, (unsigned long)id);
+		}
 	}
 }
 
@@ -935,6 +1030,48 @@ static void large_mode_log(
 		"undecoded %lu inputs %lu | gateway tick %lu, %lu players",
 		game_time_get(), joined ? 1 : 0, status[0], status[1], status[6], status[2], status[3], status[4], status[5],
 		status[7], tick, count);
+	if (large.log_players)
+	{
+		long unit_index;
+		struct unit_datum *unit = large_mode_local_unit(&unit_index);
+		short slot;
+
+		for (slot = 0; unit && slot < MAXIMUM_WEAPONS_PER_UNIT; slot++)
+		{
+			struct weapon_datum *weapon = unit->unit.weapon_object_indices[slot] != NONE ?
+				weapon_try_and_get(unit->unit.weapon_object_indices[slot]) : NULL;
+
+			if (weapon)
+			{
+				struct weapon_magazine const *magazine = &weapon->weapon.magazines[0];
+
+				platform_log("large mode: the local unit has %s in slot %d%s (rounds %d of %d, heat %.2f, state %d)",
+					tag_get_name(weapon->definition_index), slot, slot == unit->unit.current_weapon_index ? ", in hand" : "",
+					magazine->rounds_loaded, magazine->rounds_total, weapon->weapon.heat, weapon->weapon.state);
+			}
+		}
+	}
+	{
+		unsigned long hits[2];
+		float vitals[6];
+
+		if (halo_large_hits(hits) && hits[0])
+			platform_log("large mode: %lu hits reported in %lu calls", hits[0], hits[1]);
+		/* the local player's health and shields, while a hit has left them short, and once when they are
+		whole again */
+		if (halo_large_vitals(status[6], vitals))
+		{
+			boolean whole = vitals[0] >= 1.0f && vitals[1] >= 1.0f;
+
+			if (!whole || large.vitals_short || (unsigned long)vitals[4] != large.hurts_logged)
+			{
+				large.hurts_logged = (unsigned long)vitals[4];
+				large.vitals_short = !whole;
+				platform_log("large mode: the local player's shield is %.3f and health %.3f (%lu hits have hurt them, "
+					"last by player %ld)", vitals[0], vitals[1], large.hurts_logged, (long)vitals[5]);
+			}
+		}
+	}
 	if (!large.log_players)
 		return;
 	for (index = 0; index < count; index++)
@@ -1070,6 +1207,220 @@ static void large_mode_local_after_objects(void)
 			large.local_state[5], ((struct unit_datum *)object)->unit.throttle.i,
 			((struct unit_datum *)object)->unit.throttle.j, large.local_airborne ? 1 : 0);
 	}
+}
+
+/* ---------- fighting */
+
+/* the server's say of a player's health and shields, put into the engine's unit of the player: the engine's
+HUD (the local player's) and the effects of the shields (everyone's) read the unit's vitality. A shield or
+health that has gone down since the last tick flashes the shield's bubble as a hit does (the engine's
+own decay then takes it away again) */
+static void large_mode_show_vitals(
+	long unit_index,
+	unsigned long player)
+{
+	float vitals[6];
+	struct damage_network_state state;
+	struct object_datum *object = (struct object_datum *)object_try_and_get_and_verify_type(unit_index,
+		_object_mask_unit);
+	real shield_before;
+	real body_before;
+	long flags;
+
+	if (!object || !halo_large_vitals(player, vitals))
+		return;
+	damage_get_network_state(unit_index, &state);
+	shield_before = state.shield_vitality;
+	body_before = state.body_vitality;
+	flags = (long)(vitals[3] + 0.5f);
+	state.shield_depleted = (flags & 1) != 0;
+	state.shield_charging = (flags & 8) != 0;
+	state.shield_over_charging = (flags & 4) != 0;
+	state.shield_vitality = vitals[0];
+	/* (a player who is dead is killed as the engine kills one, not by a health below nothing) */
+	state.body_vitality = MAX(vitals[1], 0.0f);
+	if (state.shield_vitality < shield_before)
+	{
+		state.current_shield_damage = 1.0f;
+		state.recent_shield_damage = MIN(state.recent_shield_damage + (shield_before - state.shield_vitality), 1.0f);
+		object->object.shield_damage_decay_timer = 0;
+	}
+	if (state.body_vitality < body_before)
+	{
+		state.current_body_damage = MIN(state.current_body_damage + (body_before - state.body_vitality), 1.0f);
+		state.recent_body_damage = MIN(state.recent_body_damage + (body_before - state.body_vitality), 1.0f);
+		object->object.body_damage_decay_timer = 0;
+	}
+	damage_set_network_state(unit_index, &state);
+}
+
+/* the local player's unit holds the weapon the server says the player carries, in place of what the
+engine gave it (its biped's own, whatever the game's starting equipment is: the server's choice is not the
+engine's). The weapon is given first, and the player's controls are told to hold it; the others are taken
+out of the inventory once it is in hand. FALSE while it is to be tried again: the server has not said
+yet, the map is not in, or the weapon is not in hand yet */
+static boolean large_mode_equip_local(
+	long unit_index)
+{
+	unsigned long weapons[2];
+	char name[160];
+	char *dot;
+	long definition_index;
+	long weapon_index;
+	struct object_placement_data placement;
+	struct unit_datum *unit = (struct unit_datum *)object_try_and_get_and_verify_type(unit_index, _object_mask_unit);
+
+	if (!unit)
+		return FALSE;
+	if (large.equip_weapon != NONE)
+	{
+		/* given: once it is the one in hand, the others go */
+		short slot;
+
+		if (!object_try_and_get_and_verify_type(large.equip_weapon, _object_mask_weapon))
+			return TRUE;
+		if (unit->unit.current_weapon_index == NONE ||
+			unit->unit.weapon_object_indices[unit->unit.current_weapon_index] != large.equip_weapon)
+		{
+			return FALSE;
+		}
+		for (slot = 0; slot < MAXIMUM_WEAPONS_PER_UNIT; slot++)
+		{
+			long other = unit->unit.weapon_object_indices[slot];
+
+			if (other != NONE && other != large.equip_weapon)
+			{
+				object_delete(other);
+				unit->unit.weapon_object_indices[slot] = NONE;
+			}
+		}
+		large.equip_weapon = NONE;
+		return TRUE;
+	}
+	if (!halo_large_loadout(large.player_id, weapons))
+		return FALSE;
+	if (weapons[0] == 0xFFFFUL)
+		return TRUE;
+	if (!halo_large_weapon_name(weapons[0], name, sizeof(name)))
+		return FALSE;
+	/* (the engine finds a tag by its name without the group's extension) */
+	dot = strrchr(name, '.');
+	if (dot)
+		*dot = 0;
+	definition_index = tag_loaded(WEAPON_DEFINITION_TAG, name);
+	if (definition_index == NONE)
+	{
+		platform_log("large mode: the server's weapon %s is not a tag of the game", name);
+		return TRUE;
+	}
+	object_placement_data_new(&placement, definition_index, unit_index);
+	weapon_index = object_new(&placement);
+	if (weapon_index == NONE || !unit_add_weapon_to_inventory(unit_index, weapon_index, _unit_add_weapon_starting))
+	{
+		if (weapon_index != NONE)
+			object_delete(weapon_index);
+		platform_log("large mode: the local unit could not be given %s", name);
+		return TRUE;
+	}
+	large.equip_weapon = weapon_index;
+	platform_log("large mode: the local unit is given %s", name);
+	return FALSE;
+}
+
+/* large.autofire: the local player looks at the nearest other player in the world, from the eye to the
+middle of the body, and holds the trigger */
+static void large_mode_autofire(
+	struct unit_datum *unit)
+{
+	struct large_remote const *nearest = NULL;
+	real nearest_distance = 0.0f;
+	long id;
+	real_vector3d aim;
+	real dx, dy, dz, length;
+
+	for (id = 0; id < LARGE_MAXIMUM_REMOTES; id++)
+	{
+		struct large_remote const *remote = &large_remote_data.remotes[id];
+		real distance;
+
+		if (!remote->present)
+			continue;
+		distance = (remote->state[0] - unit->object.position.x) * (remote->state[0] - unit->object.position.x) +
+			(remote->state[1] - unit->object.position.y) * (remote->state[1] - unit->object.position.y);
+		if (!nearest || distance < nearest_distance)
+		{
+			nearest = remote;
+			nearest_distance = distance;
+		}
+	}
+	if (!nearest)
+		return;
+	dx = nearest->state[0] - unit->object.position.x;
+	dy = nearest->state[1] - unit->object.position.y;
+	dz = (nearest->state[2] + 0.2f) - (unit->object.position.z + 0.6f);
+	length = (real)sqrt(dx * dx + dy * dy + dz * dz);
+	if (length < 0.01f)
+		return;
+	aim.i = dx / length;
+	aim.j = dy / length;
+	aim.k = dz / length;
+	player_control_set_facing(0, &aim);
+	SET_FLAG(unit->unit.control_flags, _unit_control_weapon_primary_trigger_bit, TRUE);
+	unit->unit.primary_trigger = 1.0f;
+}
+
+/* whether the engine deals this damage (object_cause_damage asks): not to a player's unit in this mode,
+whose health and shields are the server's. A hit of the local player's weapon on another player is
+reported to the server, which checks it and deals the damage; everything else that would hurt a player
+is nothing here (the server decides falls and deaths). The server's own kills of the local player (the
+unit_kill of large_mode_game_tick) and everything that is no player's unit (scenery, items) go on as the
+engine has them. */
+boolean large_mode_damage_deals(
+	struct damage_data const *damage,
+	long object_index,
+	short material_index)
+{
+	long slot;
+	struct unit_datum *shooter;
+	long weapon_definition = NONE;
+	real_point3d position;
+	unsigned long reported;
+
+	if (!large.started || TEST_FLAG(damage->flags, _damage_kill_instantly_bit))
+		return TRUE;
+	if (!object_try_and_get_and_verify_type(object_index, _object_mask_biped))
+		return TRUE;
+	slot = DATUM_INDEX_TO_ABSOLUTE_INDEX(object_index);
+	if (damage->owner_player_index == NONE || damage->owner_player_index != local_player_get_player_index(0) ||
+		slot < 0 || slot >= HALO_PORT_MAXIMUM_OBJECTS_PER_MAP || large_remote_data.remote_of_object[slot] <= 0)
+	{
+		return FALSE;
+	}
+	/* a shot of the local player's weapon at another player */
+	shooter = (struct unit_datum *)object_try_and_get_and_verify_type(damage->owner_object_index, _object_mask_unit);
+	if (shooter && shooter->unit.current_weapon_index != NONE)
+	{
+		long weapon_index = unit_inventory_get_weapon(damage->owner_object_index,
+			(word)shooter->unit.current_weapon_index);
+
+		if (weapon_index != NONE)
+			weapon_definition = weapon_get(weapon_index)->definition_index;
+	}
+	if (weapon_definition == NONE)
+		return FALSE;
+	object_get_origin(object_index, &position);
+	reported = halo_large_report_hit((unsigned long)(large_remote_data.remote_of_object[slot] - 1),
+		(unsigned long)DATUM_INDEX_TO_ABSOLUTE_INDEX(weapon_definition), (long)material_index, damage->origin.x,
+		damage->origin.y, damage->origin.z, position.x, position.y, position.z);
+	if (large.reports_logged < 5)
+	{
+		large.reports_logged++;
+		platform_log("large mode: a hit on player %ld (part %ld) is reported%s: impact (%.3f %.3f %.3f), the player at "
+			"(%.3f %.3f %.3f)", (long)(large_remote_data.remote_of_object[slot] - 1), (long)material_index,
+			reported ? "" : " (not sent)", damage->origin.x, damage->origin.y, damage->origin.z, position.x,
+			position.y, position.z);
+	}
+	return FALSE;
 }
 
 /* ---------- the server's say of the local player's life, and the scoreboard */
@@ -1299,6 +1650,12 @@ void large_mode_game_tick(
 
 	unit = large_mode_local_unit(&unit_index);
 	have_life = halo_large_life(life, life_position) != 0;
+	{
+		unsigned long status[8];
+
+		halo_large_status(status);
+		large.player_id = status[6];
+	}
 	if (have_life)
 		large_mode_log_life(life);
 	if (have_life && life[0] != _large_life_alive)
@@ -1306,6 +1663,7 @@ void large_mode_game_tick(
 		/* dead, or waiting for a wave: the server says. A unit the engine still has is killed
 		(once), and the engine's own respawn is gated (large_mode_player_spawn) */
 		large.local_moving = FALSE;
+		large.equip_weapon = NONE;
 		if (unit && large.killed_unit != unit_index)
 		{
 			large.killed_unit = unit_index;
@@ -1351,6 +1709,18 @@ void large_mode_game_tick(
 		{
 			large_mode_move_local(unit_index, unit);
 		}
+		/* the weapon the server says the player carries, and their health and shields */
+		if (large.equipped_unit != unit_index)
+		{
+			if (large_mode_equip_local(unit_index))
+			{
+				large.equipped_unit = unit_index;
+				platform_log("large mode: the local unit holds the server's weapon");
+			}
+		}
+		large_mode_show_vitals(unit_index, large.player_id);
+		if (large.autofire)
+			large_mode_autofire(unit);
 	}
 
 	large_mode_update_remotes();
@@ -1793,6 +2163,14 @@ boolean large_mode_console_command(
 void large_mode_game_tick_after_objects(
 	void)
 {
+}
+
+boolean large_mode_damage_deals(
+	struct damage_data const *damage,
+	long object_index,
+	short material_index)
+{
+	return TRUE;
 }
 
 boolean large_mode_remote_player(

@@ -154,3 +154,36 @@ fn blood_gulch_has_both_bases_and_its_warthogs() {
     assert!(teams.contains(&0) && teams.contains(&1));
     assert!(map.vehicles.iter().any(|v| v.tag_name.contains("warthog")), "{:?}", map.vehicles);
 }
+
+#[test]
+fn every_map_has_the_pistol_and_the_players_body_as_the_tags_have_them() {
+    let Some(maps) = load_all() else { return };
+    for (name, map) in &maps {
+        let c = &map.combat;
+        let pistol = c.weapons.iter().find(|w| w.name == "weapons\\pistol\\pistol.weap").unwrap_or_else(|| {
+            panic!("{name}: no pistol among {:?}", c.weapons.iter().map(|w| &w.name).collect::<Vec<_>>())
+        });
+        let t = &pistol.triggers[0];
+        assert_eq!((t.initial_rate_of_fire, t.final_rate_of_fire), (3.5, 3.5), "{name}: the pistol's rate of fire");
+        assert_eq!(pistol.magazines[t.magazine_index as usize].rounds_loaded_maximum, 12, "{name}");
+        println!("{name}: pistol reload frames {} recoil frames {}", pistol.reload_frames, pistol.recoil_frames);
+        assert!(pistol.reload_frames > 0, "{name}: the pistol's reload animation");
+        let d =
+            t.projectile.as_ref().and_then(|p| p.impact_damage).unwrap_or_else(|| panic!("{name}: no pistol damage"));
+        assert_eq!((d.lower, d.upper), (25.0, 25.0), "{name}: what a pistol hit deals");
+        assert!(d.flags & halo_map::combat::damage_flags::CAN_CAUSE_HEADSHOTS != 0, "{name}");
+
+        let r = &c.resistance;
+        assert_eq!(
+            (r.maximum_body_vitality, r.maximum_shield_vitality),
+            (75.0, 75.0),
+            "{name}: the player's health and shield"
+        );
+        assert_eq!((r.shield_stun_time, r.shield_recharge_time), (6.0, 4.0), "{name}");
+        assert!(r.shield_recharge_velocity > 0.0 && r.shield_recharge_velocity < 0.1, "{name}");
+        assert!(r.materials.iter().any(|m| m.flags & halo_map::combat::MATERIAL_HEAD != 0), "{name}: a head");
+
+        // what the byte form carries
+        assert_eq!(&halo_map::combat::Combat::from_bytes(&c.to_bytes()).unwrap(), c, "{name}");
+    }
+}

@@ -10,6 +10,9 @@ use halo_map::Movement;
 
 use crate::map::MapData;
 
+mod combat;
+pub use combat::*;
+
 /// Half the side of [`flat_floor_map`]'s floor, in world units.
 pub const FLOOR_HALF_SIZE: f32 = 50.0;
 
@@ -131,7 +134,13 @@ fn world_bounds() -> [f32; 6] {
 }
 
 fn map_of(collision: CollisionBsp) -> MapData {
-    MapData { collision, world_bounds: world_bounds(), movement: movement(), starts: Vec::new() }
+    MapData {
+        collision,
+        world_bounds: world_bounds(),
+        movement: movement(),
+        starts: Vec::new(),
+        combat: combat_fixture(),
+    }
 }
 
 /// `map` with `starts` for its player starting locations.

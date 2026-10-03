@@ -458,7 +458,7 @@ impl ServerRun {
     }
 }
 
-/// One line of the log: tick time, player count, bandwidth, rejected moves.
+/// One line of the log: tick time, player count, bandwidth, rejected moves and rejected hit reports.
 pub fn format_report(report: &Report, sessions: usize, elapsed: Duration, step: &Rotation) -> String {
     let tick = match report.tick_ms {
         Some((whole, module)) => format!("tick {whole:.2} ms (module {module:.2}) x{:.0}", report.ticks),
@@ -473,7 +473,7 @@ pub fn format_report(report: &Report, sessions: usize, elapsed: Duration, step: 
     };
     format!(
         "{tick} | players {}/{} ({} on UDP) | out {:.2} MB/s ({per_player:.1} KB/s a player) | rejected moves {} (+{} in {:.0} s) | \
-         inputs late {} unbound {} | gateway ticks missed {}, send p50 {:.2} max {:.2} ms | {left}",
+         rejected hits {} (+{}) | inputs late {} unbound {} | gateway ticks missed {}, send p50 {:.2} max {:.2} ms | {left}",
         report.players,
         report.capacity,
         sessions,
@@ -481,6 +481,8 @@ pub fn format_report(report: &Report, sessions: usize, elapsed: Duration, step: 
         report.rejected_total,
         report.rejected,
         report.seconds,
+        report.rejected_hits_total,
+        report.rejected_hits,
         report.inputs_late,
         report.inputs_unbound,
         report.ticks_missed,

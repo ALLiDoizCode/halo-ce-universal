@@ -7,6 +7,11 @@
 //! - [`planner`]: each tick, turns every player's state into the datagrams one
 //!   recipient is sent, highest priority first, within a byte budget.
 //!
+//! Hit reports are not here: a hit lost to UDP loss is a kill lost, so a client
+//! sends them over its own reliable SpacetimeDB connection (the module's
+//! `report_hits`, records of `halo_sim::wire::HIT_SIZE` bytes), not through the
+//! gateway.
+//!
 //! The crate does no I/O and reads no clock. The gateway uses all of it; the
 //! client library uses [`datagram`] and [`unit`] to read what it is sent.
 

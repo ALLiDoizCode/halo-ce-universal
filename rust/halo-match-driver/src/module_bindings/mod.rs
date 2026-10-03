@@ -10,8 +10,11 @@ pub mod add_players_reducer;
 pub mod ban_type;
 pub mod begin_game_reducer;
 pub mod clear_ban_reducer;
+pub mod fighter_row_type;
+pub mod fighter_table;
 pub mod game_state_row_type;
 pub mod game_state_table;
+pub mod hit_report_row_type;
 pub mod input_batch_type;
 pub mod join_reducer;
 pub mod leave_reducer;
@@ -29,6 +32,7 @@ pub mod player_row_type;
 pub mod player_table;
 pub mod remove_players_reducer;
 pub mod report_death_reducer;
+pub mod report_hits_reducer;
 pub mod reset_reducer;
 pub mod roster_row_type;
 pub mod roster_table;
@@ -39,8 +43,10 @@ pub mod set_ban_reducer;
 pub mod set_capacity_reducer;
 pub mod set_game_reducer;
 pub mod set_gateway_reducer;
+pub mod set_loadout_reducer;
 pub mod set_name_reducer;
 pub mod set_spawn_points_reducer;
+pub mod shooter_row_type;
 pub mod spawn_point_type;
 pub mod standing_row_type;
 pub mod standing_table;
@@ -53,8 +59,11 @@ pub use add_players_reducer::add_players;
 pub use ban_type::Ban;
 pub use begin_game_reducer::begin_game;
 pub use clear_ban_reducer::clear_ban;
+pub use fighter_row_type::FighterRow;
+pub use fighter_table::*;
 pub use game_state_row_type::GameStateRow;
 pub use game_state_table::*;
+pub use hit_report_row_type::HitReportRow;
 pub use input_batch_type::InputBatch;
 pub use join_reducer::join;
 pub use leave_reducer::leave;
@@ -72,6 +81,7 @@ pub use player_row_type::PlayerRow;
 pub use player_table::*;
 pub use remove_players_reducer::remove_players;
 pub use report_death_reducer::report_death;
+pub use report_hits_reducer::report_hits;
 pub use reset_reducer::reset;
 pub use roster_row_type::RosterRow;
 pub use roster_table::*;
@@ -82,8 +92,10 @@ pub use set_ban_reducer::set_ban;
 pub use set_capacity_reducer::set_capacity;
 pub use set_game_reducer::set_game;
 pub use set_gateway_reducer::set_gateway;
+pub use set_loadout_reducer::set_loadout;
 pub use set_name_reducer::set_name;
 pub use set_spawn_points_reducer::set_spawn_points;
+pub use shooter_row_type::ShooterRow;
 pub use spawn_point_type::SpawnPoint;
 pub use standing_row_type::StandingRow;
 pub use standing_table::*;
@@ -121,6 +133,9 @@ pub enum Reducer {
         victim: u16,
         killer: u16,
     },
+    ReportHits {
+        batch: Vec<u8>,
+    },
     Reset,
     SetAwayGrace {
         ticks: u64,
@@ -143,6 +158,11 @@ pub enum Reducer {
     },
     SetGateway {
         gateway: __sdk::Identity,
+    },
+    SetLoadout {
+        player: u16,
+        weapon_0: u16,
+        weapon_1: u16,
     },
     SetName {
         identity: __sdk::Identity,
@@ -173,12 +193,14 @@ impl __sdk::Reducer for Reducer {
             Reducer::LoadMap { .. } => "load_map",
             Reducer::RemovePlayers { .. } => "remove_players",
             Reducer::ReportDeath { .. } => "report_death",
+            Reducer::ReportHits { .. } => "report_hits",
             Reducer::Reset => "reset",
             Reducer::SetAwayGrace { .. } => "set_away_grace",
             Reducer::SetBan { .. } => "set_ban",
             Reducer::SetCapacity { .. } => "set_capacity",
             Reducer::SetGame { .. } => "set_game",
             Reducer::SetGateway { .. } => "set_gateway",
+            Reducer::SetLoadout { .. } => "set_loadout",
             Reducer::SetName { .. } => "set_name",
             Reducer::SetSpawnPoints { .. } => "set_spawn_points",
             Reducer::Start => "start",
@@ -207,6 +229,9 @@ impl __sdk::Reducer for Reducer {
                 victim: victim.clone(),
                 killer: killer.clone(),
             }),
+            Reducer::ReportHits { batch } => {
+                __sats::bsatn::to_vec(&report_hits_reducer::ReportHitsArgs { batch: batch.clone() })
+            }
             Reducer::Reset => __sats::bsatn::to_vec(&reset_reducer::ResetArgs {}),
             Reducer::SetAwayGrace { ticks } => {
                 __sats::bsatn::to_vec(&set_away_grace_reducer::SetAwayGraceArgs { ticks: ticks.clone() })
@@ -238,6 +263,13 @@ impl __sdk::Reducer for Reducer {
             Reducer::SetGateway { gateway } => {
                 __sats::bsatn::to_vec(&set_gateway_reducer::SetGatewayArgs { gateway: gateway.clone() })
             }
+            Reducer::SetLoadout { player, weapon_0, weapon_1 } => {
+                __sats::bsatn::to_vec(&set_loadout_reducer::SetLoadoutArgs {
+                    player: player.clone(),
+                    weapon_0: weapon_0.clone(),
+                    weapon_1: weapon_1.clone(),
+                })
+            }
             Reducer::SetName { identity, name } => {
                 __sats::bsatn::to_vec(&set_name_reducer::SetNameArgs { identity: identity.clone(), name: name.clone() })
             }
@@ -258,6 +290,7 @@ impl __sdk::Reducer for Reducer {
 #[allow(non_snake_case)]
 #[doc(hidden)]
 pub struct DbUpdate {
+    fighter: __sdk::TableUpdate<FighterRow>,
     game_state: __sdk::TableUpdate<GameStateRow>,
     map_info: __sdk::TableUpdate<MapInfo>,
     match_tick: __sdk::TableUpdate<MatchTick>,
@@ -273,6 +306,7 @@ impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
         let mut db_update = DbUpdate::default();
         for table_update in __sdk::transaction_update_iter_table_updates(raw) {
             match &table_update.table_name[..] {
+                "fighter" => db_update.fighter.append(fighter_table::parse_table_update(table_update)?),
                 "game_state" => db_update.game_state.append(game_state_table::parse_table_update(table_update)?),
                 "map_info" => db_update.map_info.append(map_info_table::parse_table_update(table_update)?),
                 "match_tick" => db_update.match_tick.append(match_tick_table::parse_table_update(table_update)?),
@@ -298,6 +332,8 @@ impl __sdk::DbUpdate for DbUpdate {
     fn apply_to_client_cache(&self, cache: &mut __sdk::ClientCache<RemoteModule>) -> AppliedDiff<'_> {
         let mut diff = AppliedDiff::default();
 
+        diff.fighter =
+            cache.apply_diff_to_table::<FighterRow>("fighter", &self.fighter).with_updates_by_pk(|row| &row.player);
         diff.game_state =
             cache.apply_diff_to_table::<GameStateRow>("game_state", &self.game_state).with_updates_by_pk(|row| &row.id);
         diff.map_info =
@@ -317,6 +353,7 @@ impl __sdk::DbUpdate for DbUpdate {
         let mut db_update = DbUpdate::default();
         for table_rows in raw.tables {
             match &table_rows.table[..] {
+                "fighter" => db_update.fighter.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "game_state" => db_update.game_state.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "map_info" => db_update.map_info.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "match_tick" => db_update.match_tick.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
@@ -335,6 +372,7 @@ impl __sdk::DbUpdate for DbUpdate {
         let mut db_update = DbUpdate::default();
         for table_rows in raw.tables {
             match &table_rows.table[..] {
+                "fighter" => db_update.fighter.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "game_state" => db_update.game_state.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "map_info" => db_update.map_info.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "match_tick" => db_update.match_tick.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
@@ -355,6 +393,7 @@ impl __sdk::DbUpdate for DbUpdate {
 #[allow(non_snake_case)]
 #[doc(hidden)]
 pub struct AppliedDiff<'r> {
+    fighter: __sdk::TableAppliedDiff<'r, FighterRow>,
     game_state: __sdk::TableAppliedDiff<'r, GameStateRow>,
     map_info: __sdk::TableAppliedDiff<'r, MapInfo>,
     match_tick: __sdk::TableAppliedDiff<'r, MatchTick>,
@@ -371,6 +410,7 @@ impl __sdk::InModule for AppliedDiff<'_> {
 
 impl<'r> __sdk::AppliedDiff<'r> for AppliedDiff<'r> {
     fn invoke_row_callbacks(&self, event: &EventContext, callbacks: &mut __sdk::DbCallbacks<RemoteModule>) {
+        callbacks.invoke_table_row_callbacks::<FighterRow>("fighter", &self.fighter, event);
         callbacks.invoke_table_row_callbacks::<GameStateRow>("game_state", &self.game_state, event);
         callbacks.invoke_table_row_callbacks::<MapInfo>("map_info", &self.map_info, event);
         callbacks.invoke_table_row_callbacks::<MatchTick>("match_tick", &self.match_tick, event);
@@ -1032,6 +1072,7 @@ impl __sdk::SpacetimeModule for RemoteModule {
     type QueryBuilder = __sdk::QueryBuilder;
 
     fn register_tables(client_cache: &mut __sdk::ClientCache<Self>) {
+        fighter_table::register_table(client_cache);
         game_state_table::register_table(client_cache);
         map_info_table::register_table(client_cache);
         match_tick_table::register_table(client_cache);
@@ -1041,5 +1082,5 @@ impl __sdk::SpacetimeModule for RemoteModule {
         standing_table::register_table(client_cache);
     }
     const ALL_TABLE_NAMES: &'static [&'static str] =
-        &["game_state", "map_info", "match_tick", "player", "roster", "seat", "standing"];
+        &["fighter", "game_state", "map_info", "match_tick", "player", "roster", "seat", "standing"];
 }

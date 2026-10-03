@@ -23,8 +23,18 @@
 //! and waves when none is free), what a death is worth, and when the match
 //! ends. The match module calls [`rules::play`], which applies the tick's
 //! deaths, judges the moves of the players who are alive with [`step`], and
-//! spawns the players who are due. A death is a [`rules::Death`]: the weapons'
-//! hit validation produces them; nothing here deals damage.
+//! spawns the players who are due. A death is a [`rules::Death`]: the hit
+//! validation produces them.
+//!
+//! # Fighting
+//!
+//! [`combat::resolve`] judges a tick's hit reports (the shooter's weapon, rate
+//! and reach, the target's position as the server saw it) and deals the damage
+//! of those that pass to the [`damage::Vitals`] of the target, as the engine's
+//! shields and body do (`halo_map::combat` reads the weapons, damages and
+//! shield tags from the map, the same on the server and the client).
+//! [`weapon::Hands`] is a weapon's trigger, rounds, heat and reload, one tick
+//! at a time.
 //!
 //! # Determinism
 //!
@@ -39,6 +49,8 @@
 
 extern crate alloc;
 
+pub mod combat;
+pub mod damage;
 pub mod fixtures;
 mod map;
 pub mod math;
@@ -50,6 +62,7 @@ pub mod spawn;
 mod state;
 mod step;
 pub mod walk;
+pub mod weapon;
 pub mod wire;
 
 pub use map::MapData;

@@ -150,7 +150,9 @@ fn a_server_cycles_through_its_rotation_unattended_each_match_in_a_fresh_databas
 
     // what the log tells the operator
     let log = lines.lock().unwrap().join("\n");
-    for wanted in ["tick ", "players ", "out ", "rejected moves ", "is over: its time is up", "deleted"] {
+    for wanted in
+        ["tick ", "players ", "out ", "rejected moves ", "rejected hits ", "is over: its time is up", "deleted"]
+    {
         assert!(log.contains(wanted), "the log has no {wanted:?}:\n{log}");
     }
     assert!(log.contains("players 1/3"), "the player count in the log:\n{log}");

@@ -21,6 +21,13 @@ network test session on this machine alone (debug.network_test, normally
 - after the scenario's last tick, writes the trace to debug.scenario_trace
   (HALO_SCENARIO_TRACE) and ends the game.
 
+A scenario of firing (it has a weapon or a target line) also puts the named
+weapon in the player's hands in place of the ones the game gave, and a target
+beside them: a unit of the multiplayer player's kind, standing still and
+taking damage as any unit does; the "fire" input holds the player's trigger.
+The trace then has the shooter's weapon (its ammunition and heat) and the
+target (its shields, health and what hit it) after each tick too.
+
 The scenario and trace formats are in tools/scenarios/README.md.
 */
 
@@ -28,8 +35,13 @@ The scenario and trace formats are in tools/scenarios/README.md.
 #include "main/main.h"
 #include "game/game.h"
 #include "game/game_engine.h"
+#include "game/game_globals.h"
 #include "game/players.h"
+#include "items/weapons.h"
+#include "items/weapon_definitions.h"
 #include "objects/objects.h"
+#include "scenario/scenario.h"
+#include "tag_files/tag_groups.h"
 #include "units/units.h"
 
 #include <math.h>
@@ -59,6 +71,18 @@ struct scenario_record
 	float yaw;
 	float pitch;
 	int state;
+	/* a scenario of firing: the weapon's rounds loaded and left, its heat, and
+	the target's shield and health (a full shield or health is 1), the ticks its
+	shield is stunned for, whether it is dead, and the part of it (the index of
+	its collision model's materials) that was hit this tick, -1 for none */
+	int rounds_loaded;
+	int rounds_total;
+	float heat;
+	float target_shield;
+	float target_body;
+	int target_stun;
+	int target_dead;
+	int hit_part;
 };
 
 struct scenario_input
@@ -69,6 +93,7 @@ struct scenario_input
 	float pitch;
 	boolean jump;
 	boolean crouch;
+	boolean fire;
 };
 
 static struct
@@ -81,6 +106,17 @@ static struct
 	long tick_count;
 	struct scenario_input inputs[SCENARIO_MAXIMUM_TICKS];
 	const char *trace_path;
+
+	/* a scenario of firing: the weapon the player is given (a weapon tag's name,
+	such as weapons\pistol\pistol) and the target's place */
+	boolean firing;
+	char weapon[96];
+	boolean has_target;
+	float target_x, target_y, target_z, target_yaw;
+	long weapon_index;
+	long target_index;
+	/* the part of the target that was hit since the last record */
+	long hit_part;
 
 	/* running: the game's tick that is the scenario's tick 0 (NONE before),
 	and the trace so far */
@@ -131,6 +167,10 @@ static void scenario_apply(
 			input->jump = value != 0.0f;
 		else if (!strcmp(key, "crouch"))
 			input->crouch = value != 0.0f;
+		else if (!strcmp(key, "fire"))
+			input->fire = value != 0.0f;
+		else if (!strcmp(key, "part"))
+			;	/* (what the simulation takes the shot to hit: the engine's shot hits what it hits, which the trace says) */
 		else
 			scenario_fail("unknown input", key);
 	}
@@ -156,7 +196,7 @@ static char const *scenario_read_line(
 	return start;
 }
 
-static void scenario_load(
+static void scenario_harness_load(
 	char const *path)
 {
 	FILE *file = fopen(path, "r");
@@ -180,6 +220,32 @@ static void scenario_load(
 			continue;
 		if (sscanf(line, "map %63s", harness.map) == 1)
 			continue;
+		if (sscanf(line, "weapon %95[^\n]", harness.weapon) == 1)
+		{
+			char *slash;
+			long length = (long)strlen(harness.weapon);
+
+			/* (the name has spaces in it, and may end in some; the tags' own separator is a backslash) */
+			while (length > 0 && (harness.weapon[length - 1] == ' ' || harness.weapon[length - 1] == '\r' ||
+				harness.weapon[length - 1] == '\t'))
+			{
+				harness.weapon[--length] = 0;
+			}
+			for (slash = harness.weapon; *slash; slash++)
+			{
+				if (*slash == '/')
+					*slash = '\\';
+			}
+			harness.firing = TRUE;
+			continue;
+		}
+		if (sscanf(line, "target %f %f %f %f", &harness.target_x, &harness.target_y, &harness.target_z,
+			&harness.target_yaw) == 4)
+		{
+			harness.has_target = TRUE;
+			harness.firing = TRUE;
+			continue;
+		}
 		if (sscanf(line, "start %63s %f %f %f %f", name, &x, &y, &z, &yaw) == 5)
 		{
 			harness.start_x = x;
@@ -231,9 +297,12 @@ static void scenario_read_settings(
 
 	harness.checked = TRUE;
 	harness.first_game_tick = NONE;
+	harness.weapon_index = NONE;
+	harness.target_index = NONE;
+	harness.hit_part = NONE;
 	if (!path[0])
 		return;
-	scenario_load(path);
+	scenario_harness_load(path);
 	harness.trace_path = config_string("debug.scenario_trace");
 	if (!harness.trace_path[0])
 		scenario_fail("debug.scenario needs debug.scenario_trace, where the trace goes", NULL);
@@ -258,6 +327,55 @@ static struct unit_datum *scenario_unit(
 	if (player->local_player_index != 0 || player->unit_index == NONE)
 		return NULL;
 	return unit_get(player->unit_index);
+}
+
+/* the part of a unit that damage hit (object_cause_damage tells us of every
+hit): the target's, for the trace of the tick */
+void scenario_harness_damage(
+	long object_index,
+	short material_index)
+{
+	if (harness.active && harness.target_index != NONE && object_index == harness.target_index)
+		harness.hit_part = material_index;
+}
+
+/* a scenario of firing: the weapon the player is given, in place of those the
+game gave, and the target, once the player's unit is placed */
+static void scenario_start_firing(
+	long unit_index)
+{
+	if (harness.weapon[0])
+	{
+		long definition_index = tag_loaded(WEAPON_DEFINITION_TAG, harness.weapon);
+		struct object_placement_data placement;
+		long weapon_index;
+
+		if (definition_index == NONE)
+			scenario_fail("the game has no weapon", harness.weapon);
+		object_placement_data_new(&placement, definition_index, unit_index);
+		weapon_index = object_new(&placement);
+		if (weapon_index == NONE || !unit_add_weapon_to_inventory(unit_index, weapon_index, _unit_add_weapon_replace))
+			scenario_fail("cannot give the player the weapon", harness.weapon);
+		harness.weapon_index = weapon_index;
+	}
+	if (harness.has_target)
+	{
+		struct game_globals_multiplayer_information *information = TAG_BLOCK_GET_ELEMENT(
+			&scenario_get_game_globals()->multiplayer_information, 0, struct game_globals_multiplayer_information);
+		struct object_placement_data placement;
+
+		object_placement_data_new(&placement, information->unit.index, NONE);
+		placement.position.x = harness.target_x;
+		placement.position.y = harness.target_y;
+		placement.position.z = harness.target_z;
+		placement.forward.i = (real)cos(harness.target_yaw);
+		placement.forward.j = (real)sin(harness.target_yaw);
+		placement.forward.k = 0.0f;
+		placement.up = *global_up3d;
+		harness.target_index = object_new(&placement);
+		if (harness.target_index == NONE)
+			scenario_fail("cannot make the target", NULL);
+	}
 }
 
 /* at the start of a tick's player update (players_update_before_game): the
@@ -295,6 +413,8 @@ void scenario_harness_control(
 		unit->object.translational_velocity.j = 0.0f;
 		unit->object.translational_velocity.k = 0.0f;
 		harness.first_game_tick = game_time_get();
+		if (harness.firing)
+			scenario_start_firing(unit_index);
 		platform_log("scenario: starting at game tick %ld", harness.first_game_tick);
 	}
 	tick = game_time_get() - harness.first_game_tick;
@@ -310,7 +430,9 @@ void scenario_harness_control(
 	action->throttle.j = input->strafe;
 	action->desired_facing.yaw = input->yaw;
 	action->desired_facing.pitch = input->pitch;
-	action->primary_trigger = 0.0f;
+	if (input->fire)
+		SET_FLAG(action->control_flags, _unit_control_weapon_primary_trigger_bit, TRUE);
+	action->primary_trigger = input->fire ? 1.0f : 0.0f;
 }
 
 /* after a tick's update of the objects: its trace line, and the end of the
@@ -339,6 +461,20 @@ void scenario_harness_record(
 	if (!unit)
 		scenario_fail("the player's unit is gone", harness.name);
 
+	if (tick == 10)
+	{
+		/* (what the game gave the player to hold, for the scenario's author) */
+		short slot;
+
+		for (slot = 0; slot < MAXIMUM_WEAPONS_PER_UNIT; slot++)
+		{
+			long held = unit->unit.weapon_object_indices[slot];
+			struct weapon_datum *weapon = held != NONE ? weapon_try_and_get(held) : NULL;
+
+			if (weapon)
+				platform_log("scenario: the player holds %s (slot %d)", tag_get_name(weapon->definition_index), slot);
+		}
+	}
 	aim = unit->unit.aiming_vector;
 	if (!TEST_FLAG(unit->object.flags, _object_on_ground_bit))
 		state |= SCENARIO_STATE_AIRBORNE;
@@ -357,6 +493,42 @@ void scenario_harness_record(
 		record->yaw = (float)atan2(aim.j, aim.i);
 		record->pitch = (float)asin(PIN(aim.k, -1.0f, 1.0f));
 		record->state = state;
+		if (harness.firing)
+		{
+			struct weapon_datum *weapon = harness.weapon_index != NONE ? weapon_try_and_get(harness.weapon_index) : NULL;
+			struct object_datum *target = harness.target_index != NONE ?
+				(struct object_datum *)object_try_and_get_and_verify_type(harness.target_index, _object_mask_unit) : NULL;
+
+			if (weapon)
+			{
+				record->rounds_loaded = weapon->weapon.magazines[0].rounds_loaded;
+				record->rounds_total = weapon->weapon.magazines[0].rounds_total;
+				record->heat = weapon->weapon.heat;
+			}
+			else
+			{
+				record->rounds_loaded = 0;
+				record->rounds_total = 0;
+				record->heat = 0.0f;
+			}
+			if (target)
+			{
+				record->target_shield = target->object.shield_vitality;
+				record->target_body = target->object.body_vitality;
+				record->target_stun = target->object.shield_stun_ticks;
+				record->target_dead = TEST_FLAG(target->object.damage_flags, _object_dead_bit) ? 1 : 0;
+			}
+			else
+			{
+				/* (a target the engine has deleted: it was dead) */
+				record->target_shield = 0.0f;
+				record->target_body = 0.0f;
+				record->target_stun = 0;
+				record->target_dead = harness.has_target ? 1 : 0;
+			}
+			record->hit_part = harness.hit_part;
+			harness.hit_part = NONE;
+		}
 	}
 	harness.recorded++;
 
@@ -366,16 +538,24 @@ void scenario_harness_record(
 
 		if (!file)
 			scenario_fail("cannot write the trace", harness.trace_path);
-		fprintf(file, "# halo-trace 1\n# scenario %s\n# map %s\n# source c-engine\n"
-			"tick\tx\ty\tz\tvx\tvy\tvz\tyaw\tpitch\tstate\n", harness.name, harness.map);
+		fprintf(file, "# halo-trace %d\n# scenario %s\n# map %s\n# source c-engine\n"
+			"tick\tx\ty\tz\tvx\tvy\tvz\tyaw\tpitch\tstate%s\n", harness.firing ? 2 : 1, harness.name, harness.map,
+			harness.firing ? "\trounds\ttotal\theat\tshield\tbody\tstun\tdead\thit" : "");
 		for (tick = 0; tick < harness.tick_count; tick++)
 		{
 			struct scenario_record const *record = &harness.records[tick];
 
-			fprintf(file, "%ld\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%d\n", tick,
+			fprintf(file, "%ld\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%d", tick,
 				record->position[0], record->position[1], record->position[2],
 				record->velocity[0], record->velocity[1], record->velocity[2],
 				record->yaw, record->pitch, record->state);
+			if (harness.firing)
+			{
+				fprintf(file, "\t%d\t%d\t%.8f\t%.8f\t%.8f\t%d\t%d\t%d", record->rounds_loaded, record->rounds_total,
+					record->heat, record->target_shield, record->target_body, record->target_stun,
+					record->target_dead, record->hit_part);
+			}
+			fprintf(file, "\n");
 		}
 		fclose(file);
 		platform_log("scenario: %s done, %ld ticks written to %s", harness.name, harness.recorded, harness.trace_path);

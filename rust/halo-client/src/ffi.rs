@@ -560,6 +560,142 @@ pub unsafe extern "C" fn halo_large_scoreboard_row(index: u32, out: *mut u32, na
     })
 }
 
+/// A player's health and shields, as the server says (the match's `fighter`
+/// table, with the shield's recharge since counted: see `halo_sim::damage`):
+/// `out` has six `float`s,
+///
+/// | index | |
+/// |---|---|
+/// | 0 | the shield, as a fraction of a full one (above 1 is an overshield) |
+/// | 1 | the health, as a fraction of full health (below 0 is dead) |
+/// | 2 | ticks the shield will not recharge for (a hit stuns it) |
+/// | 3 | flags: 1 the shield is down, 2 dead, 4 overcharging, 8 recharging |
+/// | 4 | how many hits have hurt the player since they spawned: a change is a hit |
+/// | 5 | the player who last hurt them, or -1 for none |
+///
+/// Returns 1, or 0 when the server has no fighter for the player (they are
+/// not in the world, or it has not said yet).
+///
+/// # Safety
+/// `out` points to six writable `float`s.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_vitals(player: u32, out: *mut f32) -> u32 {
+    guard(0, || {
+        let g = global();
+        if out.is_null() {
+            return 0;
+        }
+        let Some(session) = &g.session else { return 0 };
+        let Some(fighter) = u16::try_from(player).ok().and_then(|p| session.fighter(p)) else { return 0 };
+        let vitals = match g.local.as_ref().and_then(|l| l.map()) {
+            Some(map) => fighter.vitals_at(map, u64::from(session.server_tick())),
+            None => fighter.vitals,
+        };
+        let by = if fighter.hurt_count == 0 { -1.0 } else { f32::from(fighter.hurt_by) };
+        unsafe { std::slice::from_raw_parts_mut(out, 6) }.copy_from_slice(&[
+            vitals.shield,
+            vitals.body,
+            f32::from(vitals.shield_stun_ticks),
+            f32::from(vitals.flags),
+            fighter.hurt_count as f32,
+            by,
+        ]);
+        1
+    })
+}
+
+/// The weapons a player carries, as the server says, by their tag index in
+/// the map (65535 for none): `out` has two `unsigned long`s. Returns 1, or 0
+/// when the server has no fighter for the player.
+///
+/// # Safety
+/// `out` points to two writable `unsigned long`s.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_loadout(player: u32, out: *mut u32) -> u32 {
+    guard(0, || {
+        let g = global();
+        if out.is_null() {
+            return 0;
+        }
+        let Some(fighter) = u16::try_from(player).ok().and_then(|p| g.session.as_ref()?.fighter(p)) else { return 0 };
+        unsafe { std::slice::from_raw_parts_mut(out, 2) }
+            .copy_from_slice(&[u32::from(fighter.loadout.weapons[0]), u32::from(fighter.loadout.weapons[1])]);
+        1
+    })
+}
+
+/// The name of a weapon of the map by its tag index, as the tags have it
+/// (`weapons\pistol\pistol.weap`), NUL-terminated and cut to `size`: what the
+/// engine finds the weapon's tag by. Returns its length, or 0 when the map is
+/// not in yet or has no such weapon.
+///
+/// # Safety
+/// `buffer` points to `size` writable `char`s.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_weapon_name(tag_index: u32, buffer: *mut c_char, size: u32) -> u32 {
+    guard(0, || {
+        let g = global();
+        let Some(map) = g.local.as_ref().and_then(|l| l.map()) else { return 0 };
+        let Some(weapon) = u16::try_from(tag_index).ok().and_then(|t| map.combat.weapon(t)) else { return 0 };
+        unsafe { copy_text(&weapon.name, buffer, size) }
+    })
+}
+
+/// Report a hit the engine saw the local player's weapon make: `target` is the
+/// player hit, `weapon` the weapon's tag index in the map, `material` the part
+/// of the target that was hit (an index of the player's body's materials, -1
+/// for none), `ox oy oz` where the shot hit and `tx ty tz` where the engine
+/// has the target (world units). The report goes to the server over the direct
+/// connection, which does not lose it (the server's `report_hits`), made at the
+/// newest server tick the client has heard of; the server checks it and deals
+/// the damage (the client deals none). Returns 1 when the report is on its way,
+/// 0 without a session, a seat, or word from the gateway yet.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn halo_large_report_hit(
+    target: u32,
+    weapon: u32,
+    material: i32,
+    ox: f32,
+    oy: f32,
+    oz: f32,
+    tx: f32,
+    ty: f32,
+    tz: f32,
+) -> u32 {
+    guard(0, || {
+        let (Ok(target), Ok(weapon), Ok(material)) =
+            (u16::try_from(target), u16::try_from(weapon), i16::try_from(material))
+        else {
+            return 0;
+        };
+        match &global().session {
+            Some(session) => session.report_hit(target, weapon, material, [ox, oy, oz], [tx, ty, tz]) as u32,
+            None => 0,
+        }
+    })
+}
+
+/// How many hits have been reported, and in how many calls to the server:
+/// `out` has two `unsigned long`s. Returns 1, or 0 with no session.
+///
+/// # Safety
+/// `out` points to two writable `unsigned long`s.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_hits(out: *mut u32) -> u32 {
+    guard(0, || {
+        let g = global();
+        if out.is_null() {
+            return 0;
+        }
+        let Some(session) = &g.session else { return 0 };
+        let counters = session.counters();
+        unsafe { std::slice::from_raw_parts_mut(out, 2) }
+            .copy_from_slice(&[counters.hits_reported as u32, counters.hit_calls as u32]);
+        1
+    })
+}
+
 /// Tell the gateway where the local player is now: this tick's input. Does
 /// nothing until the gateway has welcomed the player.
 #[no_mangle]

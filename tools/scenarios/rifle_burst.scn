@@ -1,0 +1,25 @@
+# A weapon added by its data and nothing else: the assault rifle, fifteen
+# rounds a second at ten damage a round, held for a second on a target three
+# units away. Each round that hits is the engine's own (its spread puts some
+# on other parts of the body); the shield takes its seven and a half, the body
+# the rest.
+scenario rifle_burst
+map bloodgulch
+start flat_field 77.9 -166.2 0.32 0.0
+target 81.0 -166.2 0.32 3.14159265
+weapon weapons/assault rifle/assault rifle
+ticks 200
+input 0 200 pitch=-0.13
+input 60 90 fire=1
+
+tolerance position 0
+tolerance velocity 0
+tolerance facing 0
+tolerance state 0
+tolerance rounds 0
+tolerance heat 0
+tolerance shield 0
+tolerance body 0
+tolerance stun 0
+tolerance life 0
+tolerance hit 0
