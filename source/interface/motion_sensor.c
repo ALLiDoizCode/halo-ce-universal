@@ -893,6 +893,34 @@ static char blip_type_get(
 	return blip_type;
 }
 
+/* port: what the motion sensor makes of a unit for a local player, as its scan does: whether the
+unit is within its reach (in multiplayer, as the scan tests it, height ignored), and the type of its
+blip. The large-scale mode's log asks it of every remote unit, with an engine player or without. */
+boolean motion_sensor_probe_unit(
+	long unit_index,
+	short local_player_index,
+	char *blip_type)
+{
+	long player_index = local_player_get_player_index(local_player_index);
+	long local_unit_index = player_index == NONE ? NONE : player_get(player_index)->unit_index;
+	real_point3d camera_position;
+	real_point3d center;
+	real object_radius;
+	real_vector3d displacement;
+
+	if (local_unit_index == NONE || !unit_try_and_get(unit_index))
+		return FALSE;
+	unit_get_camera_position(local_unit_index, &camera_position);
+	object_get_bounding_sphere(unit_index, &center, &object_radius);
+	displacement.i = center.x - camera_position.x;
+	displacement.j = center.y - camera_position.y;
+	displacement.k = game_engine_running() ? 0.0f : center.z - camera_position.z;
+	*blip_type = blip_type_get(unit_index, local_player_index);
+
+	return magnitude_squared3d(&displacement) <=
+		hud_globals->defaults.motion_sensor_range * hud_globals->defaults.motion_sensor_range;
+}
+
 static void motion_sensor_blip_set_type_and_size(
 	struct motion_sensor_blip *blip,
 	long unit_index,

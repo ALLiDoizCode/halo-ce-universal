@@ -37,7 +37,6 @@ use std::time::{Duration, Instant};
 use halo_gateway::harness::{Crowd, Impairment, Rig, RigSetup, Truth};
 use halo_match_driver::server::{build_module, stdb_bin_dir};
 use halo_sim::MapData;
-use halo_wire::unit::Bounds;
 
 /// Players seated and walking beside the game's, which takes the next seat
 /// (`HALO_HEADLESS_PLAYERS` says another number, such as 500 for the adapter's
@@ -68,6 +67,11 @@ impl Drop for Game {
         let _ = self.0.wait();
     }
 }
+
+/// How far from the position of a player's state the game may draw them (the log has the drawn
+/// position, which is where the state would have taken the player by now): the state's age is at most
+/// the extrapolation's limit of 15 ticks, at the fastest legal speed of 4 units a second, and a little over.
+const EXTRAPOLATED: f32 = 2.2;
 
 /// What one log line of the game says about one player.
 #[derive(Debug, Clone, PartialEq)]
@@ -140,7 +144,6 @@ fn the_logged_players_are_the_ones_the_server_sent() {
     let halo_map = halo_map::HaloMap::from_path(maps.join("bloodgulch.map")).expect("Blood Gulch");
     let anchors: Vec<[f32; 3]> = halo_map.player_starts.iter().map(|s| s.position).collect();
     let map = MapData::from(halo_map);
-    let bounds = Bounds::from_world(map.world_bounds);
     let wasm = build_module();
     let mut rig = Rig::start(
         &stdb,
@@ -249,7 +252,7 @@ fn the_logged_players_are_the_ones_the_server_sent() {
         let want = at.positions[l.player as usize].expect("a state of a player the server has");
         for (axis, held) in want.iter().enumerate() {
             // the packing's resolution, and the log's four decimals
-            let step = (bounds.max[axis] - bounds.min[axis]) / 65535.0 + 0.0001;
+            let step = EXTRAPOLATED;
             assert!(
                 (l.position[axis] - held).abs() <= step,
                 "tick {}, player {}, axis {axis}: logged {} but the server held {}",
@@ -285,7 +288,7 @@ fn the_logged_players_are_the_ones_the_server_sent() {
         let Some(at) = truth.ticks.get(&d.tick) else { continue };
         let want = at.positions[d.player as usize].expect("a state of a player the server has");
         for (axis, held) in want.iter().enumerate() {
-            let step = (bounds.max[axis] - bounds.min[axis]) / 65535.0 + 0.0001;
+            let step = EXTRAPOLATED;
             assert!(
                 (d.position[axis] - held).abs() <= step,
                 "tick {}, player {}, axis {axis}: drawn at {} but the server held {}",
@@ -307,7 +310,7 @@ fn the_logged_players_are_the_ones_the_server_sent() {
         if let Some(state) = held.get(&(d.player, d.tick)) {
             for (axis, held) in state.iter().enumerate() {
                 assert!(
-                    (d.position[axis] - held).abs() <= 0.00011,
+                    (d.position[axis] - held).abs() <= EXTRAPOLATED,
                     "tick {}, player {}, axis {axis}: drawn at {} but the library held {}",
                     d.tick,
                     d.player,
@@ -382,6 +385,193 @@ fn the_logged_players_are_the_ones_the_server_sent() {
 
     let rejected = rig.client.players()[&me].rejected_moves;
     println!("the game's player had {rejected} moves rejected");
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+/// What one `hud` line says about one remote unit: what the HUD makes of it for the local player.
+#[derive(Debug, Clone, PartialEq)]
+struct HudLine {
+    player: u16,
+    /// The local player's team.
+    mine: u8,
+    /// The unit has no engine player of its own.
+    bare: bool,
+    /// The team the HUD takes from the adapter's record of a bare unit (-1: it does not).
+    bare_team: i32,
+    /// The motion sensor's scan reaches the unit.
+    in_range: bool,
+    /// The type of the unit's motion sensor contact: 1 friend, 2 enemy.
+    blip: u8,
+    /// Aiming at the unit shows a name, and this one.
+    named: bool,
+    name: String,
+}
+
+/// `large mode: hud 7 mine 0 bare 1 bare_team 1 sensor 1 blip 2 named 1 name Foo`
+fn parse_hud_line(line: &str) -> Option<HudLine> {
+    let rest = line.split("large mode: hud ").nth(1)?;
+    let (numbers, name) = rest.split_once(" name ").or_else(|| rest.strip_suffix(" name").map(|n| (n, "")))?;
+    let mut words = numbers.split_whitespace();
+    let player = words.next()?.parse().ok()?;
+    let mut field = |key: &str| -> Option<i32> {
+        words.next().filter(|w| *w == key)?;
+        words.next()?.parse().ok()
+    };
+    Some(HudLine {
+        player,
+        mine: field("mine")? as u8,
+        bare: field("bare")? == 1,
+        bare_team: field("bare_team")?,
+        in_range: field("sensor")? == 1,
+        blip: field("blip")? as u8,
+        named: field("named")? == 1,
+        name: name.to_string(),
+    })
+}
+
+/// The name as the engine holds it (11 characters, anything but ASCII a question mark).
+fn engine_name(name: &str) -> String {
+    name.chars().take(11).map(|c| if c.is_ascii() { c } else { '?' }).collect()
+}
+
+/// With more remote players than the engine has player records for, the units with none show a
+/// name, a team and a motion sensor contact as the ones with one do: for every remote unit the
+/// game logs what its HUD makes of it (`large mode: hud ...`, from the same calls the HUD makes),
+/// and this checks each against the roster the server holds.
+#[test]
+fn units_without_an_engine_player_have_a_name_a_team_and_a_contact() {
+    let (Some(stdb), Some(maps), Some(game), Some(data)) =
+        (stdb_bin_dir(), env_path("HALO_MAP_DIR"), env_path("HALO_GAME_BIN"), env_path("HALO_DATA_ROOT"))
+    else {
+        eprintln!(
+            "HALO_STDB_BIN, HALO_MAP_DIR, HALO_GAME_BIN and HALO_DATA_ROOT are not all set: skipping, \
+             this test needs the game's own data and a game built with the library"
+        );
+        return;
+    };
+    // (more than the engine's records hold, and enough of them in the motion sensor's range: 500
+    // have about 250 within 25 world units of a player, from the 500-player check)
+    let others: u16 = std::env::var("HALO_HEADLESS_PLAYERS").ok().and_then(|n| n.parse().ok()).unwrap_or(500);
+    assert!(others > ENGINE_PLAYERS, "HALO_HEADLESS_PLAYERS must be more than the {ENGINE_PLAYERS} records");
+    let halo_map = halo_map::HaloMap::from_path(maps.join("bloodgulch.map")).expect("Blood Gulch");
+    let anchors: Vec<[f32; 3]> = halo_map.player_starts.iter().map(|s| s.position).collect();
+    let map = MapData::from(halo_map);
+    let wasm = build_module();
+    let mut rig = Rig::start(
+        &stdb,
+        &wasm,
+        RigSetup { name: "headless-hud", map, anchors: &anchors, players: others, budget: 90_000 },
+        |_| {},
+    );
+    rig.client.set_capacity(others + 1).unwrap();
+    let crowd = Crowd::connect(rig.gateway.local_addr(), 0..others, Impairment::none(), others as usize + 1, false);
+    crowd.join_all(Duration::from_secs(20)).unwrap();
+
+    let work = std::env::temp_dir().join(format!("halo-headless-hud-{}", std::process::id()));
+    std::fs::create_dir_all(&work).unwrap();
+    let log_path = work.join("game.log");
+    let log = std::fs::File::create(&log_path).unwrap();
+    let mut game_process = Game(
+        Command::new(&game)
+            .current_dir(game.parent().unwrap())
+            .env("HALO_DATA_ROOT", &data)
+            .env("HALO_SAVE_ROOT", work.join("saves"))
+            .env("HALO_LARGE_MAP", "bloodgulch")
+            .env("HALO_LARGE_GATEWAY", rig.gateway.local_addr().to_string())
+            .env("HALO_LARGE_SPACETIMEDB", rig.server.uri())
+            .env("HALO_LARGE_DATABASE", "headless-hud")
+            .env("HALO_LARGE_LOG", "1")
+            .env("HALO_NET_ONLINE", "0")
+            .env("HALO_FULLSCREEN", "0")
+            .env("HALO_NO_VSYNC", "1")
+            .env("HALO_NO_AUDIO", "1")
+            .env("HALO_HIDDEN_WINDOW", "1")
+            .env("HALO_UPDATE_ANSWER", "no")
+            .env("HALO_EXIT_AFTER", GAME_SECONDS.to_string())
+            .stdout(Stdio::from(log.try_clone().unwrap()))
+            .stderr(Stdio::from(log))
+            .spawn()
+            .expect("start the game"),
+    );
+    let mut exit = None;
+    let until = Instant::now() + Duration::from_secs(GAME_SECONDS as u64 + 40);
+    while exit.is_none() && Instant::now() < until {
+        let Some(seen) = rig.client.next_tick(Duration::from_secs(10)) else { panic!("no tick for 10 s") };
+        rig.walkers.sync_with_server(seen.players.values());
+        crowd.send_inputs(&rig.walkers.next_inputs());
+        exit = game_process.0.try_wait().unwrap();
+    }
+    let output = std::fs::read_to_string(&log_path).unwrap_or_default();
+    if let Some(keep) = env_path("HALO_HEADLESS_LOG") {
+        let _ = std::fs::write(keep, &output);
+    }
+    let tail = || output.lines().rev().take(15).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+    assert!(exit.is_some_and(|s| s.success()), "the game did not exit by itself; the end of its log:\n{}", tail());
+
+    let roster = rig.client.roster();
+    // each second's lines, as the log gives them: they follow the summary of the remote units
+    let mut seconds: Vec<Vec<HudLine>> = Vec::new();
+    for line in output.lines() {
+        if line.contains(" remote units, ") {
+            seconds.push(Vec::new());
+        } else if let (Some(hud), Some(current)) = (parse_hud_line(line), seconds.last_mut()) {
+            current.push(hud);
+        }
+    }
+    let lines: Vec<&HudLine> = seconds.iter().flatten().collect();
+    assert!(lines.len() > 1000, "only {} hud lines:\n{}", lines.len(), tail());
+
+    let (mut bare_enemy_named, mut bare_friend_named, mut record_named) = (0, 0, 0);
+    let (mut bare_enemy_contacts, mut bare_friend_contacts) = (0, 0);
+    for l in &lines {
+        let member = &roster[&l.player];
+        let enemy = member.team != l.mine;
+        // the contact: of the right type, whether or not the unit has a player
+        assert_eq!(
+            l.blip,
+            if enemy { 2 } else { 1 },
+            "player {} (team {}, local team {}, bare {}) has a contact of type {}",
+            l.player,
+            member.team,
+            l.mine,
+            l.bare,
+            l.blip
+        );
+        // the name aiming at it shows: the roster's
+        assert!(l.named, "aiming at player {} (bare {}) shows no name", l.player, l.bare);
+        assert_eq!(l.name, engine_name(&member.name), "aiming at player {} shows another name", l.player);
+        if l.bare {
+            // the team the HUD takes from the adapter is the roster's
+            assert_eq!(l.bare_team, member.team as i32, "player {} is told to the HUD in another team", l.player);
+            match (enemy, l.in_range) {
+                (true, true) => bare_enemy_contacts += 1,
+                (false, true) => bare_friend_contacts += 1,
+                _ => {}
+            }
+            if enemy {
+                bare_enemy_named += 1;
+            } else {
+                bare_friend_named += 1;
+            }
+        } else {
+            assert_eq!(l.bare_team, -1, "player {} has an engine player and is told to the HUD as bare", l.player);
+            record_named += 1;
+        }
+    }
+    // the second with the most units in the motion sensor's range
+    let in_range = seconds.iter().map(|s| s.iter().filter(|l| l.in_range).count()).max().unwrap();
+    let bare_in_range = seconds.iter().map(|s| s.iter().filter(|l| l.in_range && l.bare).count()).max().unwrap();
+    println!(
+        "{} hud lines of {others} remote players over {} seconds: {bare_enemy_named} of bare enemies and \
+         {bare_friend_named} of bare friends named, {record_named} of units with players; contacts of bare units in \
+         range: {bare_enemy_contacts} enemy, {bare_friend_contacts} friend; at most {in_range} units in the motion \
+         sensor's range at once, {bare_in_range} of them without players",
+        lines.len(),
+        seconds.len()
+    );
+    assert!(in_range > ENGINE_PLAYERS as usize, "at most {in_range} units were in the motion sensor's range");
+    assert!(bare_enemy_contacts > 0 && bare_friend_contacts > 0, "no bare units of both kinds in range");
+    assert!(bare_enemy_named > 0 && bare_friend_named > 0 && record_named > 0);
     let _ = std::fs::remove_dir_all(&work);
 }
 

@@ -44,7 +44,9 @@
 //! download per player against the budget, ticks missed, how old a tick was on
 //! arrival, update rates and longest gaps by distance, and how stale any
 //! player's state got; the fight (hits sent and refused, kills, deaths); and
-//! the final scoreboard.
+//! the final scoreboard; the rules in force; and the time out of the world, with a respawn after a
+//! death split into its timer and the wait after it, how each was placed (a free start, beside
+//! one, a wave) and how many starting locations were free for each team.
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::ToSocketAddrs;
@@ -56,10 +58,11 @@ use halo_match_driver::module_bindings::report_hits as _;
 use halo_match_driver::walkers::Walkers;
 use halo_match_driver::{FighterRow, MatchClient, PlayerClient, SeenTick, StandingRow};
 use halo_server::admin::Admin;
-use halo_server::loadgen::{Contact, Gunner};
+use halo_server::loadgen::{free_starts, spread, Contact, Gunner, Path, Respawns, Seen};
 use halo_server::nav::{Nav, DEFAULT_CELL};
 use halo_server::root::Root;
 use halo_sim::combat::HitReport;
+use halo_sim::spawn::Occupant;
 use halo_sim::wire::encode_hits;
 use halo_sim::{MapData, TICKS_PER_SECOND};
 use spacetimedb_sdk::Identity;
@@ -173,10 +176,14 @@ fn main() {
     // refused moves, by how long after the player spawned they were refused (ticks): 0-3, 4-30, later
     let mut refused_after_spawn = [0u64; 3];
     let mut refusals_seen: HashMap<u16, u64> = HashMap::new();
-    // how long players wait to be in the world: since when each is out of it, and the waits
-    // that ended, for a joining player's first spawn and for the respawns after
-    let mut out_since: HashMap<u16, u64> = HashMap::new();
-    let (mut first_waits, mut later_waits): (Vec<f64>, Vec<f64>) = (Vec::new(), Vec::new());
+    // how long players wait to be in the world: for a joining player's first spawn, and for the
+    // respawns after a death, split into the respawn timer and the wait after it
+    let mut respawns = Respawns::default();
+    let starts: Vec<[f32; 3]> = walkers.map.starts.iter().map(|s| s.position).collect();
+    // starting locations free for each team, sampled once a second: (red, blue) of each sample
+    let mut free_samples: Vec<[usize; 2]> = Vec::new();
+    let mut next_sample = 0u64;
+    let mut rules_in_force = None;
     let mut fired = 0u64;
     let mut ended_at: Option<Instant> = None;
     let started = Instant::now();
@@ -197,6 +204,9 @@ fn main() {
             seen = newer;
         }
         let game = watcher.game();
+        if rules_in_force.is_none() {
+            rules_in_force = game.clone();
+        }
         if game.as_ref().is_some_and(|g| g.ending != 0) && ended_at.is_none() {
             ended_at = Some(Instant::now());
             say(&format!("the game has ended at tick {}; the final scoreboard is up", seen.marker.tick));
@@ -207,17 +217,21 @@ fn main() {
         let standings = watcher.standings();
         let fighters = watcher.fighters();
         for standing in standings.values() {
-            match (standing.state == 0, out_since.get(&standing.player).copied()) {
-                (false, None) => {
-                    out_since.insert(standing.player, seen.marker.tick);
-                }
-                (true, Some(since)) => {
-                    out_since.remove(&standing.player);
-                    let waited = seen.marker.tick.saturating_sub(since) as f64 / TICKS_PER_SECOND as f64;
-                    if standing.spawns <= 1 { &mut first_waits } else { &mut later_waits }.push(waited);
-                }
-                _ => {}
-            }
+            let spawn = [standing.x, standing.y, standing.z];
+            let (player, state, due_tick, spawns, spawned_tick) =
+                (standing.player, standing.state, standing.due_tick, standing.spawns, standing.spawned_tick);
+            respawns.observe(seen.marker.tick, Seen { player, state, due_tick, spawns, spawned_tick, spawn }, &starts);
+        }
+        if seen.marker.tick >= next_sample && ended_at.is_none() {
+            next_sample = seen.marker.tick + TICKS_PER_SECOND as u64;
+            let others: Vec<Occupant> = standings
+                .values()
+                .filter(|s| s.state == 0)
+                .filter_map(|s| {
+                    seen.players.get(&s.player).map(|p| Occupant { position: [p.x, p.y, p.z], team: s.team })
+                })
+                .collect();
+            free_samples.push(free_starts(&walkers.map, teams, &others));
         }
         for row in seen.players.values() {
             let before = refusals_seen.insert(row.id, row.rejected_moves).unwrap_or(0);
@@ -318,22 +332,74 @@ fn main() {
     }
 
     scoreboard(&watcher, &mut line);
-    for (what, waits) in
-        [("a joining player's first spawn", &mut first_waits), ("a respawn after a death", &mut later_waits)]
-    {
-        if waits.is_empty() {
-            continue;
-        }
-        waits.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let at = |q: f64| waits[((waits.len() - 1) as f64 * q) as usize];
+    if let Some(g) = &rules_in_force {
+        let secs = |t: u32| t as f64 / TICKS_PER_SECOND as f64;
         line(format!(
-            "time out of the world, {what}: {} waits, median {:.1} s  p90 {:.1}  p99 {:.1}  longest {:.1} s",
-            waits.len(),
-            at(0.5),
-            at(0.9),
-            at(0.99),
-            waits[waits.len() - 1]
+            "rules in force: respawn time {:.1} s (growth {:.1} s), suicide penalty {:.1} s, wave interval {:.1} s, \
+             score limit {}, time limit {:.0} s, {}",
+            secs(g.respawn_ticks),
+            secs(g.respawn_growth_ticks),
+            secs(g.suicide_penalty_ticks),
+            secs(g.wave_ticks),
+            g.score_limit,
+            secs(g.time_limit_ticks),
+            if g.teams { "teams" } else { "no teams" }
         ));
+    }
+    if let Some([median, p90, p99, longest]) = spread(&mut respawns.first) {
+        line(format!(
+            "time out of the world, a joining player's first spawn: {} waits, median {median:.1} s  p90 {p90:.1}  p99 {p99:.1}  longest {longest:.1} s",
+            respawns.first.len()
+        ));
+    }
+    let mut totals: Vec<f64> = respawns.respawns.iter().map(|r| r.timer + r.after).collect();
+    let mut timers: Vec<f64> = respawns.respawns.iter().map(|r| r.timer).collect();
+    let mut afters: Vec<f64> = respawns.respawns.iter().map(|r| r.after).collect();
+    for (what, values) in [
+        ("whole, from death to spawn", &mut totals),
+        ("the respawn timer, with any penalty", &mut timers),
+        ("the wait after the timer ran out", &mut afters),
+    ] {
+        if let Some([median, p90, p99, longest]) = spread(values) {
+            line(format!(
+                "respawn after a death, {what}: {} respawns, median {median:.2} s  p90 {p90:.2}  p99 {p99:.2}  longest {longest:.2} s",
+                values.len()
+            ));
+        }
+    }
+    if !respawns.respawns.is_empty() {
+        line(format!(
+            "respawns by how they were placed: at a free start {}, beside a start at once {}, in a wave {}",
+            respawns.by_path(Path::FreeStart),
+            respawns.by_path(Path::BesideStart),
+            respawns.by_path(Path::Wave)
+        ));
+        let mut longest: Vec<_> = respawns.respawns.iter().filter(|r| r.after > 1.0).collect();
+        longest.sort_by(|a, b| b.after.partial_cmp(&a.after).unwrap());
+        let unaccounted = longest.iter().filter(|r| r.path != Path::Wave).count();
+        line(format!(
+            "respawns that waited over 1 s after the timer: {}, of which not in a wave {unaccounted}",
+            longest.len()
+        ));
+    }
+    if !free_samples.is_empty() {
+        let n = free_samples.len() as f64;
+        let of = |team: usize| {
+            let counts: Vec<usize> = free_samples.iter().map(|s| s[team]).collect();
+            (
+                counts.iter().sum::<usize>() as f64 / n,
+                counts.iter().min().copied().unwrap(),
+                counts.iter().max().copied().unwrap(),
+            )
+        };
+        let total = walkers.map.starts.iter().filter(|s| s.is_for_slayer()).count();
+        for (team, name) in ["red", "blue"].into_iter().enumerate() {
+            let (mean, low, high) = of(team);
+            line(format!(
+                "starting locations free for {name}, of {total}, sampled each second ({} samples): mean {mean:.1}  least {low}  most {high}",
+                free_samples.len()
+            ));
+        }
     }
     line(format!(
         "refused moves by the ticks since the player spawned: 0 to 3 {}, 4 to 30 {}, later {}",
@@ -444,13 +510,15 @@ fn progress(
     *moved_from = watcher.players().values().map(|p| (p.id, [p.x, p.y])).collect();
     say(&format!("      moved at least a unit in the last 10 s: {moving}"));
     say(&format!(
-        "{:>4.0} s  tick {}  players {}  alive {alive}  armed {armed}  shooting at someone {engaged}  red {} blue {}  hits sent {fired}  refused {}  moves refused {}",
+        "{:>4.0} s  tick {}  players {}  alive {alive}  armed {armed}  shooting at someone {engaged}  red {} blue {}  hits sent {fired}  accepted {}  refused {} (as target not where seen {})  moves refused {}",
         elapsed.as_secs_f64(),
         marker.tick,
         marker.players,
         game.red_score,
         game.blue_score,
+        marker.hits_total,
         marker.rejected_hits_total,
+        marker.rejected_not_where_seen_total,
         marker.rejected_total
     ));
 }
@@ -516,9 +584,9 @@ fn scoreboard(watcher: &MatchClient, line: &mut impl FnMut(String)) {
     let kills: i64 = standings.values().map(|s| s.score as i64).sum();
     let deaths: u64 = standings.values().map(|s| s.deaths as u64).sum();
     line(format!(
-        "final: ending {} (0 not ended, 1 score limit, 2 time), winner kind {} id {}; red {} blue {}; score limit {}; {} players, {} deaths in all, sum of scores {kills}; hits refused {} of the tick markers, moves refused {}",
+        "final: ending {} (0 not ended, 1 score limit, 2 time), winner kind {} id {}; red {} blue {}; score limit {}; {} players, {} deaths in all, sum of scores {kills}; hits accepted {}, refused {} (as target not where seen {}) of the tick markers, moves refused {}",
         game.ending, game.winner_kind, game.winner, game.red_score, game.blue_score, game.score_limit, standings.len(), deaths,
-        marker.rejected_hits_total, marker.rejected_total
+        marker.hits_total, marker.rejected_hits_total, marker.rejected_not_where_seen_total, marker.rejected_total
     ));
     let mut moves: BTreeMap<&str, (u32, u64)> = BTreeMap::new();
     for p in watcher.players().values().filter(|p| p.rejected_moves > 0) {

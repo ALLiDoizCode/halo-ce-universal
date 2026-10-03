@@ -473,7 +473,7 @@ pub fn format_report(report: &Report, sessions: usize, elapsed: Duration, step: 
     };
     format!(
         "{tick} | players {}/{} ({} on UDP) | out {:.2} MB/s ({per_player:.1} KB/s a player) | rejected moves {} (+{} in {:.0} s) | \
-         rejected hits {} (+{}) | inputs late {} unbound {} | gateway ticks missed {}, send p50 {:.2} max {:.2} ms | {left}",
+         rejected hits {} (+{}) | hits accepted {}, refused as target-not-where-seen {} | inputs late {} unbound {} | gateway ticks missed {}, send p50 {:.2} max {:.2} ms | {left}",
         report.players,
         report.capacity,
         sessions,
@@ -483,6 +483,8 @@ pub fn format_report(report: &Report, sessions: usize, elapsed: Duration, step: 
         report.seconds,
         report.rejected_hits_total,
         report.rejected_hits,
+        report.hits_total,
+        report.not_where_seen_total,
         report.inputs_late,
         report.inputs_unbound,
         report.ticks_missed,

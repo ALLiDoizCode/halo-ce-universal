@@ -1,5 +1,5 @@
 //! The game's rules in the match module, against a real local SpacetimeDB: how
-//! players spawn when they join, what a death is worth, the waves, the end,
+//! players spawn when they join, what a death is worth, the waves (the fallback), the end,
 //! and what the public tables say of them (`standing`, `game_state`). The rules
 //! themselves are tested at the step in `rust/halo-sim/tests/rules.rs`; these
 //! check that the module keeps them in its tables and ticks them.
@@ -143,32 +143,50 @@ fn only_the_owner_may_set_the_game_or_report_a_death() {
     assert!(owner.set_game(&Rules { wave_ticks: 0, ..Rules::slayer() }).is_err());
 }
 
-#[test]
-fn when_no_starting_location_is_free_a_player_waits_and_is_told_which_wave() {
-    // (a wave every six seconds: long enough to see them wait)
-    let rules = Rules { wave_ticks: 6 * TICKS_PER_SECOND, ..quick() };
-    let Some((server, owner)) = started_match("wave", 1, rules) else { return };
-    let _players = seat_players(&server, "wave", &owner, 4);
-    wait_until("the standings", || owner.standings().len() == 4);
-    // the one start holds one player; the others wait for the wave
-    let waiting: Vec<StandingRow> = owner.standings().into_values().filter(|s| s.state == WAITING).collect();
-    assert!(!waiting.is_empty(), "somebody had no start: {:?}", owner.standings());
-    let wave = 6 * TICKS_PER_SECOND as u64;
-    for s in &waiting {
-        assert_eq!(s.due_tick % wave, 0, "the wave is a multiple of {wave} ticks: {}", s.due_tick);
-    }
-    // and then they spawn, beside the start
-    wait_until("the wave", || owner.standings().values().all(|s| s.state == ALIVE));
-    let rows = owner.players();
-    assert_eq!(rows.len(), 4);
-    let mut points: Vec<[f32; 3]> = rows.values().map(|r| [r.x, r.y, r.z]).collect();
-    points.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    for (i, a) in points.iter().enumerate() {
-        for b in &points[i + 1..] {
+/// No two of the players in `rows` are within a pill's width of one another.
+fn assert_apart(rows: &[[f32; 3]]) {
+    for (i, a) in rows.iter().enumerate() {
+        for b in &rows[i + 1..] {
             let d = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt();
             assert!(d >= 0.4, "two players {d} apart");
         }
     }
+}
+
+#[test]
+fn when_no_starting_location_is_free_a_player_is_put_beside_one_at_once() {
+    let Some((server, owner)) = started_match("beside", 1, quick()) else { return };
+    let _players = seat_players(&server, "beside", &owner, 4);
+    // the one start holds one player; the others are beside it, not waiting for a wave
+    wait_until("all four to be in the world", || {
+        owner.standings().len() == 4 && owner.standings().values().all(|s| s.state == ALIVE)
+    });
+    let rows = owner.players();
+    assert_eq!(rows.len(), 4);
+    let points: Vec<[f32; 3]> = rows.values().map(|r| [r.x, r.y, r.z]).collect();
+    assert_apart(&points);
+}
+
+#[test]
+fn when_not_even_a_spot_beside_a_start_is_free_a_player_waits_and_is_told_which_wave() {
+    // (a wave every six seconds: long enough to see them wait; one start, and more players than
+    // the places around it)
+    let rules = Rules { wave_ticks: 6 * TICKS_PER_SECOND, ..quick() };
+    let Some((server, owner)) = started_match("wave", 1, rules) else { return };
+    let _players = seat_players(&server, "wave", &owner, 60);
+    wait_until("the standings", || owner.standings().len() == 60);
+    let waiting: Vec<StandingRow> = owner.standings().into_values().filter(|s| s.state == WAITING).collect();
+    assert!(!waiting.is_empty(), "somebody had no place: {:?}", owner.standings());
+    let wave = 6 * TICKS_PER_SECOND as u64;
+    for s in &waiting {
+        assert_eq!(s.due_tick % wave, 0, "the wave is a multiple of {wave} ticks: {}", s.due_tick);
+    }
+    // and the rest are in the world, apart from one another
+    let alive = owner.standings().values().filter(|s| s.state == ALIVE).count();
+    assert_eq!(alive + waiting.len(), 60);
+    wait_until("the players' rows", || owner.players().len() == alive);
+    let points: Vec<[f32; 3]> = owner.players().values().map(|r| [r.x, r.y, r.z]).collect();
+    assert_apart(&points);
 }
 
 #[test]

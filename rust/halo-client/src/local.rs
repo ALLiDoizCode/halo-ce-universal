@@ -17,7 +17,9 @@ use halo_sim::walk::{walk, Body, Controls};
 use halo_sim::weapon::Hands;
 use halo_sim::{MapData, FLAG_CROUCHED, FLAG_RELOADING};
 
-type Loaded = Arc<OnceLock<Result<MapData, String>>>;
+/// The map as the thread that reads it leaves it: set once, to the map or to why not.
+pub type MapHandle = Arc<OnceLock<Result<MapData, String>>>;
+type Loaded = MapHandle;
 
 /// What one tick of [`Local::step`] came to.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -106,6 +108,11 @@ impl Local {
     /// The map, once it is in: what the player's body is and the weapons' tags, for the fighting.
     pub fn map(&self) -> Option<&MapData> {
         self.map.get().and_then(|r| r.as_ref().ok())
+    }
+
+    /// The map as it is read or will be, to share: the other players are drawn down to its ground.
+    pub fn map_handle(&self) -> MapHandle {
+        self.map.clone()
     }
 
     /// The map is in and movement will be computed.

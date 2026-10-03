@@ -232,14 +232,33 @@ makes a biped in the team's colour, with the engine's physics suspended: each
 tick the engine is given the controls of a player running at the velocity the
 server gave, which makes it choose and play the running animation, and the unit
 is put where the server has the player, facing as it faces. The engine's player
-records hold 128 players in all, so only 127 of the remote units have a player
-(a name over the head, a team, a contact on the motion sensor, which reads the
-unit's velocity: the adapter writes the server's after the objects are
-updated). The units nearest the local player have them, and a few are swapped
-each second as players move; the others are units alone, drawn all the same.
+records hold 128 players in all, so only 127 of the remote units have a player.
+The units nearest the local player have them, and a few are swapped each second
+as players move; the others are units alone, drawn all the same. Anything else
+that reads the player records still sees the nearest 127. The HUD does not:
+for a unit with no player, it takes the name over the head and under the
+crosshair, the friendly marker and the team from the adapter's own record of
+the unit (the match's roster: `large_mode_bare_remote_unit`), so that it looks
+the same as one with a player, under the same rules of range and sight. The
+motion sensor already reads a unit's team and velocity (the adapter writes the
+server's after the objects are updated), so it shows both alike.
 A player the gateway has not sent a state of for 120 ticks is out of range, and
 one who has left the match is gone at once: the unit is deleted, and made
 afresh when the gateway sends the player again.
+
+Between the gateway's updates a player is not left where the last state put
+them: the library draws each remote player where that state would have taken
+them by now (its velocity carried forward by the ticks since it came, and
+gravity down to the map's ground for a player in the air), and the adapter puts
+the unit there and hands the engine that velocity. It goes on for at most the
+planner's staleness cap (15 ticks), after which the player is held still, with
+no velocity, so that the engine shows them standing. A state that arrives where
+the extrapolation was not leaves an offset that shrinks by 0.6 each tick; one
+more than 2 world units away is where the player is drawn at once (a respawn).
+With `large.log_players`, the game logs each new state's drawn error, the
+distance between where the player was drawn and where the state puts them
+(`large mode: drawn error player 7 tick 812 0.0123 (x y z)`); `smoothness.py`
+reports their median, p99 and largest by band.
 
 Each second, the game logs one line for the session (`large mode: tick ...`:
 whether the gateway has welcomed the player and the direct connection is
@@ -249,16 +268,20 @@ each player the gateway has sent (`large mode: player 7 tick 812 (x y z) v
 many have players, and what the adapter cost a tick over the last second).
 With `large.log_players`, a line also says where the engine has each remote
 unit (`large mode: drawn 7 tick 812 (x y z) team 1 player 3`, with the tick of
-the state it was driven from). The local player stands where the server has
-them, and tells the gateway where they are.
+the state it was driven from). Another says what the HUD makes of each (`large
+mode: hud 7 mine 0 bare 1 bare_team 1 sensor 1 blip 2 named 1 name Foo`: the
+local player's team, whether the unit has no player, whether the motion sensor
+reaches it and the type of its contact, and the name that aiming at it shows),
+which the automated test compares with the roster. The local player stands
+where the server has them, and tells the gateway where they are.
 
 ### Spawning, deaths and the score
 
 The server owns them: the game's player is only where the server has put them.
 The match module (`rust/halo-sim`'s `rules`) spawns a player who joins at a
 starting location of the map by the engine's rules, or, when none is free,
-tells the player which respawn wave they are waiting for and spawns them in
-it. The match's public tables `standing` (each player's score, deaths, whether
+beside one, at once; only a player who can be put in neither place is told which
+respawn wave they are waiting for and spawned in it. The match's public tables `standing` (each player's score, deaths, whether
 they are in the world and when they will be) and `game_state` (the game, its
 limits, the team scores and how it ended) come over the direct connection, as
 the roster does.
@@ -301,9 +324,8 @@ leaves the match and joins it again, to see the unit go and come back. With
 `HALO_SCREENSHOT_DIR` and `HALO_SCREENSHOT_EVERY` the game saves frames, and
 `HALO_HEADLESS_LOG` keeps its log. Without the data, it skips.
 A second test (`--test rules_headless`) runs a Slayer match of `halo-server` on
-the real Blood Gulch with 40 simulated players beside the game: the game is told
-to wait for a wave, spawned in it, killed and respawned by the server, and sees
-the match end at its score limit with the final scoreboard and the rotation move
+the real Blood Gulch with 40 simulated players beside the game: the game is
+spawned at once, killed and respawned by the server, and sees the match end at its score limit with the final scoreboard and the rotation move
 on.
 The library's own tests (`rust/halo-client/tests/boundary.rs` and
 `servers.rs`) need only `HALO_STDB_BIN`.
@@ -338,7 +360,9 @@ counted forward by the client and the server, so a recharge writes nothing).
   several is one), the shooter within the weapon's reach, the target near where
   the shooter saw it). A report that fails is dropped, counted against the
   shooter (the private table `shooter`) and in `match_tick.rejected_hits`, and
-  logged by `halo-server` (`rejected hits N (+M)`). A hit that passes deals the
+  logged by `halo-server` (`rejected hits N (+M)`, with `hits accepted` and how
+many were refused as `TargetNotWhereSeen`, from `match_tick.hits_total` and
+`match_tick.rejected_not_where_seen_total`). A hit that passes deals the
   damage to the target's shield and health as the engine does, rolled by the
   server at the report's scale brought down to what the server's view allows
   (`halo_sim::source::limit`); the hit that takes the last health is a death

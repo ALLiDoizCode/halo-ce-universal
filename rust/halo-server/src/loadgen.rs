@@ -284,9 +284,194 @@ impl Grid {
     }
 }
 
+/// How a respawn after a death came about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Path {
+    /// At a starting location that was free, the tick the timer ran out.
+    FreeStart,
+    /// Beside a starting location, the tick the timer ran out.
+    BesideStart,
+    /// In a wave: the player was made to wait for it.
+    Wave,
+}
+
+/// A respawn after a death, in seconds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Respawn {
+    /// The respawn timer, with any penalty: from the tick the death was seen to the tick it ran out.
+    pub timer: f64,
+    /// The time waited after the timer ran out, until the player spawned.
+    pub after: f64,
+    pub path: Path,
+}
+
+/// How long players are out of the world, from the standings the load sees: for a joining
+/// player's first spawn (the whole wait), and for each respawn after a death, split into the
+/// timer (`Died { respawn_at }`, which the standing keeps as `due_tick`) and the wait after it.
+#[derive(Default)]
+pub struct Respawns {
+    out: HashMap<u16, Out>,
+    /// The whole wait of each joining player's first spawn.
+    pub first: Vec<f64>,
+    pub respawns: Vec<Respawn>,
+}
+
+struct Out {
+    since: u64,
+    /// The tick the timer ran out (the first one seen while dead).
+    due: Option<u64>,
+    waited: bool,
+}
+
+/// What a player's standing says (the `STATE_*` codes: 0 alive, 1 dead, 2 waiting for a wave).
+#[derive(Debug, Clone, Copy)]
+pub struct Seen {
+    pub player: u16,
+    pub state: u8,
+    pub due_tick: u64,
+    pub spawns: u32,
+    pub spawned_tick: u64,
+    /// Where the player last spawned.
+    pub spawn: [f32; 3],
+}
+
+impl Respawns {
+    /// A player's standing, as of match tick `tick`. `starts` are the map's starting locations
+    /// (settled, as the server has them).
+    pub fn observe(&mut self, tick: u64, seen: Seen, starts: &[[f32; 3]]) {
+        let ticks = |n: u64| n as f64 / TICKS_PER_SECOND as f64;
+        if seen.state != 0 {
+            let out = self.out.entry(seen.player).or_insert(Out { since: tick, due: None, waited: false });
+            match seen.state {
+                1 => {
+                    out.due.get_or_insert(seen.due_tick);
+                }
+                _ => out.waited = true,
+            }
+        } else if let Some(out) = self.out.remove(&seen.player) {
+            if seen.spawns <= 1 {
+                self.first.push(ticks(seen.spawned_tick.saturating_sub(out.since)));
+                return;
+            }
+            let due = out.due.unwrap_or(out.since).max(out.since);
+            let at_a_start =
+                starts.iter().any(|s| (s[0] - seen.spawn[0]).abs() < 0.05 && (s[1] - seen.spawn[1]).abs() < 0.05);
+            let path = if out.waited {
+                Path::Wave
+            } else if at_a_start {
+                Path::FreeStart
+            } else {
+                Path::BesideStart
+            };
+            self.respawns.push(Respawn {
+                timer: ticks(due - out.since),
+                after: ticks(seen.spawned_tick.saturating_sub(due)),
+                path,
+            });
+        }
+    }
+
+    /// The respawns that took `path`.
+    pub fn by_path(&self, path: Path) -> usize {
+        self.respawns.iter().filter(|r| r.path == path).count()
+    }
+}
+
+/// Median, p90, p99 and the longest of `values` (sorted by this); `None` for none.
+pub fn spread(values: &mut [f64]) -> Option<[f64; 4]> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let at = |q: f64| values[((values.len() - 1) as f64 * q) as usize];
+    Some([at(0.5), at(0.9), at(0.99), values[values.len() - 1]])
+}
+
+/// How many of the map's Slayer starting locations are free for a player of each team (by the
+/// engine's rating: see `halo_sim::spawn::rate`) with `others` in the world. Without teams the
+/// two counts are the same.
+pub fn free_starts(map: &halo_sim::MapData, teams: bool, others: &[halo_sim::spawn::Occupant]) -> [usize; 2] {
+    let mut free = [0usize; 2];
+    for start in map.starts.iter().filter(|s| s.is_for_slayer()) {
+        for (team, count) in free.iter_mut().enumerate() {
+            if halo_sim::spawn::rate(map, teams, team as u8, &start.position, others) > 0.0 {
+                *count += 1;
+            }
+        }
+    }
+    free
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn standing(state: u8, due_tick: u64, spawns: u32, spawned_tick: u64, spawn: [f32; 3]) -> Seen {
+        Seen { player: 1, state, due_tick, spawns, spawned_tick, spawn }
+    }
+
+    const STARTS: [[f32; 3]; 1] = [[0.0, 0.0, 0.0]];
+
+    #[test]
+    fn a_respawn_is_split_into_the_timer_and_the_wait_after_it_and_told_by_how_it_came_about() {
+        let mut r = Respawns::default();
+        // dies at tick 100, timer to 250, spawns at once beside the start
+        r.observe(100, standing(1, 250, 1, 0, [0.0; 3]), &STARTS);
+        r.observe(250, standing(0, 0, 2, 250, [0.6, 0.0, 0.0]), &STARTS);
+        // dies at 300, timer to 450, spawns on the start itself
+        r.observe(300, standing(1, 450, 2, 250, [0.0; 3]), &STARTS);
+        r.observe(450, standing(0, 0, 3, 450, [0.0; 3]), &STARTS);
+        // dies at 500, timer to 650, told to wait for the wave at 750
+        r.observe(500, standing(1, 650, 3, 450, [0.0; 3]), &STARTS);
+        r.observe(650, standing(2, 750, 3, 450, [0.0; 3]), &STARTS);
+        r.observe(750, standing(0, 0, 4, 750, [0.6, 0.0, 0.0]), &STARTS);
+        let paths: Vec<Path> = r.respawns.iter().map(|x| x.path).collect();
+        assert_eq!(paths, [Path::BesideStart, Path::FreeStart, Path::Wave]);
+        let secs = |n: f64| n / TICKS_PER_SECOND as f64;
+        assert_eq!(r.respawns[0], Respawn { timer: secs(150.0), after: 0.0, path: Path::BesideStart });
+        assert_eq!(r.respawns[2].timer, secs(150.0), "the timer is not the wave's wait");
+        assert_eq!(r.respawns[2].after, secs(100.0));
+        assert_eq!((r.by_path(Path::FreeStart), r.by_path(Path::BesideStart), r.by_path(Path::Wave)), (1, 1, 1));
+    }
+
+    #[test]
+    fn a_late_respawn_is_only_a_wave_if_the_player_was_seen_waiting_for_one() {
+        let mut r = Respawns::default();
+        r.observe(100, standing(1, 250, 1, 0, [0.0; 3]), &STARTS);
+        r.observe(300, standing(0, 0, 2, 300, [0.6, 0.0, 0.0]), &STARTS);
+        assert_eq!(r.respawns[0].path, Path::BesideStart, "not told to wait: something else delayed it");
+        assert!(r.respawns[0].after > 1.0);
+    }
+
+    #[test]
+    fn a_joining_players_first_spawn_is_not_a_respawn() {
+        let mut r = Respawns::default();
+        r.observe(10, standing(1, 10, 0, 0, [0.0; 3]), &STARTS);
+        r.observe(40, standing(0, 0, 1, 40, [0.0; 3]), &STARTS);
+        assert!(r.respawns.is_empty());
+        assert_eq!(r.first, [30.0 / TICKS_PER_SECOND as f64]);
+    }
+
+    #[test]
+    fn a_start_with_an_enemy_close_by_is_not_free_for_a_team() {
+        use halo_sim::fixtures::{flat_floor_map, start_at, with_starts};
+        use halo_sim::spawn::Occupant;
+        let map = with_starts(flat_floor_map(), &[start_at(0.0, 0.0, 0), start_at(30.0, 0.0, 0)]);
+        assert_eq!(free_starts(&map, true, &[]), [2, 2]);
+        // a red player 1.2 from the first start: red may spawn there, blue may not
+        let red = Occupant { position: [1.2, 0.0, 0.0], team: 0 };
+        assert_eq!(free_starts(&map, true, &[red]), [2, 1]);
+        // without teams everyone is an enemy
+        assert_eq!(free_starts(&map, false, &[red]), [1, 1]);
+    }
+
+    #[test]
+    fn spread_gives_the_median_the_tails_and_the_longest() {
+        let mut v: Vec<f64> = (1..=100).map(f64::from).collect();
+        v.reverse();
+        assert_eq!(spread(&mut v), Some([50.0, 90.0, 99.0, 100.0]));
+        assert_eq!(spread(&mut []), None);
+    }
 
     fn at(x: f32, team: u8) -> Option<Contact> {
         Some(Contact { position: [x, 0.0, 0.0], team, alive: true })

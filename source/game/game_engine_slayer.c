@@ -583,6 +583,9 @@ static boolean slayer_engine_display_score(
 	return result;
 }
 
+/* port: the large-scale mode's switch (port/linux/game/large_mode.c) */
+boolean large_mode_active(void);
+
 static void slayer_player_update(
 	long index)
 {
@@ -638,8 +641,9 @@ static void slayer_player_update(
 		}
 
 		/* (a client of the distributed netcode has the host's targets:
-		game_engine_slayer_read_network_state) */
-		if (!network_game_distributed_client())
+		game_engine_slayer_read_network_state; in the large-scale mode the engine's players are
+		only the nearest 127 of the match, so it chooses no target from them) */
+		if (!network_game_distributed_client() && !large_mode_active())
 		{
 			if (player->unit_index != NONE &&
 				player->multiplayer_special == NONE)
@@ -655,8 +659,9 @@ static void slayer_player_update(
 		}
 	}
 
-	/* (a client ends the game when the host has) */
-	if (!network_game_distributed_client() &&
+	/* (a client ends the game when the host has; in the large-scale mode only the server does,
+	and the engine's scores are not the match's) */
+	if (!network_game_distributed_client() && !large_mode_active() &&
 		slayer_get_score(index, _get_score_team) >=
 		game_engine_get_variant()->universal_variant.score_to_win)
 	{

@@ -16,6 +16,7 @@ LINE = re.compile(
     r"out (?P<out>[\d.]+) MB/s \((?P<per>[\d.]+) KB/s a player\) \| "
     r"rejected moves (?P<rej>\d+) \(\+(?P<rejw>\d+) in (?P<win>[\d.]+) s\) \| "
     r"rejected hits (?P<hits>\d+) \(\+(?P<hitsw>\d+)\) \| "
+    r"hits accepted (?P<accepted>\d+), refused as target-not-where-seen (?P<unseen>\d+) \| "
     r"inputs late (?P<late>\d+) unbound (?P<unbound>\d+) \| "
     r"gateway ticks missed (?P<missed>\d+), send p50 (?P<sp50>[\d.]+) max (?P<smax>[\d.]+) ms"
 )
@@ -96,7 +97,8 @@ def main():
         pass
     print(
         f"rejected moves {last['rej']:.0f} (since the match began; {last['rej'] - first['rej']:.0f} while full), "
-        f"rejected hits {last['hits']:.0f}; inputs late (sum of windows) {sum(r['late'] for r in full):.0f}, "
+        f"hits accepted {last['accepted']:.0f}, rejected {last['hits']:.0f} of which as target-not-where-seen "
+        f"{last['unseen']:.0f}; inputs late (sum of windows) {sum(r['late'] for r in full):.0f}, "
         f"unbound {sum(r['unbound'] for r in full):.0f}; gateway ticks missed {sum(r['missed'] for r in full):.0f}; "
         f"gateway send time p50 up to {max(r['sp50'] for r in full):.2f} ms, max {max(r['smax'] for r in full):.2f} ms"
     )

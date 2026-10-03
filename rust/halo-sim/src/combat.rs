@@ -959,6 +959,37 @@ mod tests {
     }
 
     #[test]
+    fn a_hit_on_a_running_target_where_the_shooters_client_extrapolates_it_to_is_accepted() {
+        // The shooter's client holds a state of the target that is 4, 10 or 15 ticks old (the target is
+        // sent that seldom), draws them where the state's velocity takes them by now, and reports the
+        // hit at the newest tick it has heard of with that position: it is where the target is.
+        let per_tick = 2.2 / TICKS_PER_SECOND as f32;
+        let y_at = |tick: u64| -1.5 + per_tick * tick as f32;
+        for held_ticks_old in [4u64, 10, 15] {
+            let mut f = fight(5.0);
+            f.trails = Trails::new();
+            for t in 1..=40 {
+                f.trails.record(t, [(SHOOTER, [0.0; 3]), (TARGET, [5.0, y_at(t), 0.0])]);
+            }
+            f.store.set_player(Player::new(TARGET, [5.0, y_at(40), 0.0], 0.0, 0.0));
+            let held_at = 40 - held_ticks_old;
+            let extrapolated = y_at(held_at) + per_tick * held_ticks_old as f32;
+            let report = HitReport {
+                host_tick: 40,
+                origin: [5.0, extrapolated, 0.3],
+                target_position: [5.0, extrapolated, 0.0],
+                ..f.report()
+            };
+            let outcome = f.shoot(report);
+            assert!(
+                matches!(outcome.events[..], [HitEvent::Hit { .. }]),
+                "a state {held_ticks_old} ticks old: {:?}",
+                outcome.events
+            );
+        }
+    }
+
+    #[test]
     fn a_target_the_server_has_no_history_of_is_checked_against_where_it_is() {
         let mut f = fight(5.0);
         f.trails = Trails::new();
