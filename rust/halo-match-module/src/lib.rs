@@ -1946,7 +1946,7 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
                 HitEvent::Hit { .. } => hits += 1,
                 HitEvent::Rejected { shooter, reason } => {
                     rejected_hits += 1;
-                    not_where_seen += (*reason == halo_sim::combat::Reject::TargetNotWhereSeen) as u64;
+                    not_where_seen += u64::from(*reason == halo_sim::combat::Reject::TargetNotWhereSeen);
                     log::warn!("rejected a hit report of player {shooter} ({reason:?}) at tick {}", marker.tick);
                 }
             }

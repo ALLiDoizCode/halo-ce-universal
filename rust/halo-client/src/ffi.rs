@@ -417,10 +417,10 @@ pub unsafe extern "C" fn halo_large_unit(index: u32, player: *mut u32, tick: *mu
 #[no_mangle]
 pub unsafe extern "C" fn halo_large_unit_error(index: u32, error: *mut f32) -> u32 {
     guard(0, || {
-        let g = global();
         if error.is_null() {
             return 0;
         }
+        let g = global();
         let Some(unit) = g.frame.get(index as usize) else { return 0 };
         unsafe { *error = unit.arrival_error };
         1
