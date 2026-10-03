@@ -8,6 +8,35 @@ pub type PlayerId = u16;
 pub const FLAG_AIRBORNE: u8 = 1;
 /// [`Player::flags`]: the player is crouched (what their client says).
 pub const FLAG_CROUCHED: u8 = 2;
+/// Where the shot counter sits in [`Player::flags`] (bits 2 to 4, see [`FLAG_SHOTS_MASK`]).
+pub const FLAG_SHOTS_SHIFT: u8 = 2;
+/// [`Player::flags`], bits 2 to 4: how many shots the player's weapon has fired, modulo 8 (what their
+/// client says). It is a count and not "firing" so that a player who is seen only every few ticks (a far
+/// one is sent at 6 to 8 updates a second) still shows every shot: whoever last saw count `a` and now sees
+/// `b` knows that `(b - a) mod 8` shots were fired in between ([`shots_between`]).
+pub const FLAG_SHOTS_MASK: u8 = 0b0001_1100;
+/// [`Player::flags`]: the player's weapon is reloading (what their client says).
+pub const FLAG_RELOADING: u8 = 32;
+/// The bits of a player's flags that the player says and the server only passes on: the crouch, the shot
+/// counter and the reload. (Whether the player is in the air is the server's to judge, and the two high
+/// bits are free.)
+pub const CLIENT_FLAGS: u8 = FLAG_CROUCHED | FLAG_SHOTS_MASK | FLAG_RELOADING;
+
+/// The shot counter of a set of flags (0 to 7).
+pub fn shot_counter(flags: u8) -> u8 {
+    (flags & FLAG_SHOTS_MASK) >> FLAG_SHOTS_SHIFT
+}
+
+/// `flags` with the shot counter set to `counter` modulo 8.
+pub fn with_shot_counter(flags: u8, counter: u8) -> u8 {
+    (flags & !FLAG_SHOTS_MASK) | ((counter << FLAG_SHOTS_SHIFT) & FLAG_SHOTS_MASK)
+}
+
+/// How many shots were fired between a player's flags `before` and `after`: the counter's difference
+/// modulo 8 (a counter that went round a whole turn between two updates, 8 shots, reads as none).
+pub fn shots_between(before: u8, after: u8) -> u8 {
+    shot_counter(after).wrapping_sub(shot_counter(before)) & 7
+}
 
 /// A player as the simulation holds them.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -16,7 +45,8 @@ pub struct Player {
     pub position: [f32; 3],
     pub yaw: f32,
     pub pitch: f32,
-    /// [`FLAG_AIRBORNE`] and [`FLAG_CROUCHED`]: how the others are to show the player.
+    /// [`FLAG_AIRBORNE`], [`FLAG_CROUCHED`], the shot counter and [`FLAG_RELOADING`]: how the others are to
+    /// show the player.
     pub flags: u8,
     /// Ticks the player has been off the ground, as far as the accepted moves
     /// say (0 on the ground): what the airborne rule of the validation

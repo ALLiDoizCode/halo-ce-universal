@@ -276,6 +276,42 @@ fn an_input_counts_only_from_the_address_its_player_is_bound_to() {
 }
 
 #[test]
+fn a_players_shots_and_reload_reach_the_players_who_get_them_in_the_state_the_server_holds() {
+    let _serial = serial();
+    let Some(rig) = rig("shots", flat_floor_map(), &grid(2, 3.0), 2, 90_000) else { return };
+    let crowd = Crowd::connect(rig.gateway.local_addr(), 0..2, Impairment::none(), rig.capacity, true);
+    crowd.join_all(WAIT).unwrap();
+    let shooter = crowd.player(0).unwrap();
+    let start = rig.client.players()[&0].clone();
+
+    // player 0 fires three shots a third of a second apart and then reloads, saying so with each input
+    // (as the client does: halo_sim::weapon::Hands counts the shots)
+    for n in 0..60u32 {
+        let shots = (n / 10).min(3) as u8;
+        let reloading = if n >= 40 { halo_sim::FLAG_RELOADING } else { 0 };
+        let flags = halo_sim::with_shot_counter(reloading, shots);
+        let input = PlayerInput { player: 0, position: [start.x, start.y, start.z], yaw: 0.0, pitch: 0.0, flags };
+        shooter.send_input(&input);
+        std::thread::sleep(Duration::from_millis(33));
+    }
+    let last_tick = rig.client.marker().unwrap().tick;
+    rig.client.wait_for_tick(last_tick + 3, WAIT);
+
+    // the server holds them, and passes them on: the other player's states of player 0 carry them
+    let held = rig.client.players()[&0].flags;
+    assert_eq!(held, halo_sim::with_shot_counter(halo_sim::FLAG_RELOADING, 3), "the server's row");
+    let seen: Vec<u8> =
+        crowd.player(1).unwrap().states().iter().filter(|(_, s)| s.player() == 0).map(|(_, s)| s.0[15]).collect();
+    assert!(!seen.is_empty());
+    let counters: Vec<u8> = seen.iter().map(|f| halo_sim::shot_counter(*f)).collect();
+    assert!(counters.windows(2).all(|w| w[0] <= w[1]), "the count only goes up: {counters:?}");
+    assert_eq!(*counters.last().unwrap(), 3, "{counters:?}");
+    assert!(counters.contains(&0), "the first states were from before any shot");
+    let at_reload = seen.iter().filter(|f| **f & halo_sim::FLAG_RELOADING != 0).count();
+    assert!(at_reload > 0 && at_reload < seen.len(), "the reload shows for a while: {at_reload} of {}", seen.len());
+}
+
+#[test]
 fn the_newest_input_wins_and_a_late_one_is_dropped() {
     let _serial = serial();
     let Some(rig) = rig("late", flat_floor_map(), &grid(1, 0.0), 1, 90_000) else { return };

@@ -194,7 +194,7 @@ the setting for one start of the game. It has priority over the file.
 | `debug.gpu_skip_vertex_shaders`, `debug.gpu_debug_expression`, `debug.gpu_debug_flat`, `debug.gpu_debug_texture0` | off | `HALO_GPU_SKIP_VS`, `HALO_GPU_DEBUG_EXPR`, `HALO_GPU_DEBUG_FLAT`, `HALO_GPU_DEBUG_T0` | Tools to find problems in the graphics: skip the draws of a vertex shader, or replace the output of all pixel shaders with a GLSL expression (for example `t0.rgb`). |
 | `debug.network_test`, `debug.network_test_start`, `debug.network_test_kill`, `debug.network_test_score`, `debug.network_test_shoot`, `debug.network_test_vehicle`, `debug.network_test_pickup`, `debug.network_test_pickup_weapon`, `debug.test_input` | off | `HALO_NETWORK_TEST`, `HALO_NETWORK_TEST_START`, `HALO_NETWORK_TEST_KILL`, `HALO_NETWORK_TEST_SCORE`, `HALO_NETWORK_TEST_SHOOT`, `HALO_NETWORK_TEST_VEHICLE`, `HALO_NETWORK_TEST_PICKUP`, `HALO_NETWORK_TEST_PICKUP_WEAPON`, `HALO_TEST_INPUT` | Automatic tests of system link (`game/network_test.c`). Refer to `NETCODE.md`. |
 | `debug.scenario`, `debug.scenario_trace` | `""` | `HALO_SCENARIO`, `HALO_SCENARIO_TRACE` | The comparison harness: plays a scenario file with the first player of a network test game, alone, and writes a trace of the player's state. `tools/scenario_harness.py` runs it. Refer to `tools/scenarios/README.md`. |
-| `large.map`, `large.gateway`, `large.spacetimedb`, `large.database`, `large.root`, `large.name`, `large.log_players`, `large.scoreboard`, `large.autofire` | `""`, `127.0.0.1:7777`, `http://127.0.0.1:3000`, `""`, `""`, `""`, `false`, `false`, `false` | `HALO_LARGE_MAP`, `HALO_LARGE_GATEWAY`, `HALO_LARGE_SPACETIMEDB`, `HALO_LARGE_DATABASE`, `HALO_LARGE_ROOT`, `HALO_LARGE_NAME`, `HALO_LARGE_LOG`, `HALO_LARGE_SCOREBOARD`, `HALO_LARGE_AUTOFIRE` | The large-scale mode. Refer to "Large-scale mode". |
+| `large.map`, `large.gateway`, `large.spacetimedb`, `large.database`, `large.root`, `large.name`, `large.log_players`, `large.scoreboard`, `large.autofire`, `large.log_sounds` | `""`, `127.0.0.1:7777`, `http://127.0.0.1:3000`, `""`, `""`, `""`, `false`, `false`, `false`, `false` | `HALO_LARGE_MAP`, `HALO_LARGE_GATEWAY`, `HALO_LARGE_SPACETIMEDB`, `HALO_LARGE_DATABASE`, `HALO_LARGE_ROOT`, `HALO_LARGE_NAME`, `HALO_LARGE_LOG`, `HALO_LARGE_SCOREBOARD`, `HALO_LARGE_AUTOFIRE`, `HALO_LARGE_LOG_SOUNDS` | The large-scale mode. Refer to "Large-scale mode". |
 | `debug.network_latency`, `debug.network_loss` | `0` | `HALO_NETWORK_LATENCY`, `HALO_NETWORK_LOSS` | The game holds all the data that it receives for this number of milliseconds, and ignores this percentage of the datagrams. Use these settings to test the netcode as on the internet. |
 | `debug.telnet_console`, `debug.telnet_console_port` | `false`, `2323` | `HALO_TELNET_CONSOLE`, `HALO_TELNET_CONSOLE_PORT` | The game listens on 127.0.0.1, on this port, for a script console (connect with telnet). The console has no password, so only this computer can reach it. |
 
@@ -341,6 +341,38 @@ counted forward by the client and the server, so a recharge writes nothing).
   remote player the hits killed falls and stays as a body.
 - `large.autofire` (`HALO_LARGE_AUTOFIRE`) aims the local player at the nearest
   remote player and holds the trigger: the tests and the pictures use it.
+
+### The local player's view: weapon, HUD, sounds and effects
+
+- The local weapon is fired by the engine (its effects, sounds and first-person
+  animation are the tags'); its rounds, heat and reload are `halo_sim`'s
+  `Hands`, kept by the library (`halo_large_fire`, once a tick), and put into
+  the engine's weapon before the HUD reads it, so the HUD's ammunition is the
+  library's. The game logs both once a second, with how many shots the engine's
+  weapon and the library's model have each counted (they agree).
+- Remote firing is in the state the gateway sends: bits 2 to 4 of a unit's flags
+  count the shots the player's weapon has fired (modulo 8) and bit 5 says it is
+  reloading (`halo-wire`'s `unit.rs` has the reasoning, and the bandwidth: none
+  added). Every remote player is given the weapon the server says they carry
+  (the `fighter` table's loadout), drawn in their hand; each shot the count
+  tells of is fired by the engine's weapon, so the muzzle flash, the projectile
+  and its impacts, the shell and the sounds are the weapon's own tags', for any
+  weapon. `port/linux/game/large_effects.c` is the engine's side (weapons,
+  being hurt, the killing blow, sounds).
+- A hit the server's table gains for a player is shown as the engine shows one:
+  the unit's pain sound and flinch, and for the local player the screen's flash
+  and shake, the damage sound and the direction of the hit, from the damage
+  effect of the shooter's weapon's projectile. A killing blow is that damage
+  too, so the death sounds as a shot player's does.
+- `large.log_sounds` (`HALO_LARGE_LOG_SOUNDS`) logs each sound the game is asked
+  to start with its tag and the game tick; the tests read what played from it.
+  The game also logs the frames a second it draws once a second.
+
+`rust/halo-client/tests/effects_headless.rs` runs the real game for these: the
+HUD against the library over a magazine, a reload and a kill; a simulated player
+on the wire firing, hitting and killing another and the game's player, with the
+sounds each causes; and a hundred players in view (the frame rate, with
+`HALO_FPS_FLOOR`).
 
 `rust/halo-client/tests/combat_headless.rs` runs three real games: the game
 shoots a simulated player until it dies; simulated players shoot the game's

@@ -224,6 +224,10 @@ static const struct config_setting config_settings[] =
 	{ "large.autofire", _config_boolean, "false", "HALO_LARGE_AUTOFIRE", _environment_set_is_true, _platform_desktop,
 		"The large-scale mode's player aims at the nearest other player in the world\n"
 		"and holds the trigger down (for the automated tests' shooter)." },
+	{ "large.log_sounds", _config_boolean, "false", "HALO_LARGE_LOG_SOUNDS", _environment_set_is_true, _platform_all,
+		"Log every sound the game is asked to start, with its tag and the game tick\n"
+		"(port/linux/game/large_effects.c; for the large-scale mode's tests, which\n"
+		"see what played for a shot, a hit and a death from it)." },
 	{ "debug.network_test", _config_string, "\"\"", "HALO_NETWORK_TEST", _environment_value, _platform_all,
 		"Automated system link sessions for testing (port/linux/game/network_test.c):\n"
 		"\"host:<map>\" hosts a game on that map, \"join\" joins the first game found;\n"

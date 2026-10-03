@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use crate::map::MapData;
 use crate::movement::validate;
 use crate::rng::Rng;
-use crate::state::{Player, PlayerId, Store, FLAG_AIRBORNE, FLAG_CROUCHED};
+use crate::state::{Player, PlayerId, Store, CLIENT_FLAGS, FLAG_AIRBORNE};
 
 /// What one player reports for one tick. Each client decides its own player's
 /// movement; the step only accepts or rejects it.
@@ -15,9 +15,9 @@ pub struct PlayerInput {
     pub position: [f32; 3],
     pub yaw: f32,
     pub pitch: f32,
-    /// What else the client says about the player: [`FLAG_CROUCHED`] (the
-    /// others see it). Other bits are ignored; whether the player is in the
-    /// air is the server's to judge.
+    /// What else the client says about the player: [`crate::FLAG_CROUCHED`], the shot
+    /// counter and [`crate::FLAG_RELOADING`] (the others see them: [`CLIENT_FLAGS`]).
+    /// Other bits are ignored; whether the player is in the air is the server's to judge.
     pub flags: u8,
 }
 
@@ -72,7 +72,7 @@ pub fn step(store: &mut impl Store, inputs: &[PlayerInput], map: &MapData, _rng:
         };
         match validate(map, &player, input, store.ticks_since_move(input.player)) {
             Ok(air) => {
-                let flags = (input.flags & FLAG_CROUCHED) | if air.ticks > 0 { FLAG_AIRBORNE } else { 0 };
+                let flags = (input.flags & CLIENT_FLAGS) | if air.ticks > 0 { FLAG_AIRBORNE } else { 0 };
                 store.set_player(Player {
                     position: input.position,
                     yaw: input.yaw,

@@ -110,6 +110,32 @@ fn a_player_in_the_air_is_marked_airborne_for_the_others_to_show() {
     assert_eq!(store.player(7).unwrap().flags & halo_sim::FLAG_AIRBORNE, halo_sim::FLAG_AIRBORNE);
 }
 
+#[test]
+fn the_shot_counter_and_the_reload_a_client_reports_are_passed_on_for_the_others_to_show() {
+    let map = flat_floor_map();
+    let mut store = player_at([0.0, 0.0, 0.0]);
+    let flags = halo_sim::with_shot_counter(halo_sim::FLAG_CROUCHED | halo_sim::FLAG_RELOADING, 5);
+    let input = PlayerInput { player: 7, position: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, flags };
+    step(&mut store, &[input], &map, &mut Rng::seeded(0));
+    let shown = store.player(7).unwrap().flags;
+    assert_eq!(shown, flags);
+    assert_eq!(halo_sim::shot_counter(shown), 5);
+    // (what a client says of the air is not believed, and the two free bits are dropped)
+    let lie = PlayerInput { flags: halo_sim::FLAG_AIRBORNE | 0b1100_0000, ..input };
+    step(&mut store, &[lie], &map, &mut Rng::seeded(0));
+    assert_eq!(store.player(7).unwrap().flags, 0);
+}
+
+#[test]
+fn shots_between_two_flags_is_the_counters_difference_round_the_turn() {
+    use halo_sim::{shots_between, with_shot_counter};
+    assert_eq!(shots_between(with_shot_counter(0, 3), with_shot_counter(0, 3)), 0);
+    assert_eq!(shots_between(with_shot_counter(0, 3), with_shot_counter(0, 4)), 1);
+    assert_eq!(shots_between(with_shot_counter(0, 7), with_shot_counter(0, 1)), 2);
+    // (the other bits do not count)
+    assert_eq!(shots_between(halo_sim::FLAG_CROUCHED, with_shot_counter(halo_sim::FLAG_RELOADING, 1)), 1);
+}
+
 /// A player who has been in the air one tick, three world units above the floor
 /// (as a player who has just walked off a high ledge is).
 fn falling_player() -> MemoryStore {

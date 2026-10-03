@@ -187,7 +187,8 @@ pub extern "C" fn halo_large_place(x: f32, y: f32, z: f32) {
 /// velocity `x y z` (world units a second) of the player after the tick, and
 /// how fast the tick drove the player into the ground it landed on (world
 /// units a *tick*, the engine's unit; 0 when it did not land; what falling
-/// damage reads). The new position, the facing and whether the player is
+/// damage reads). The new position, the facing, the shot counter and reload (see
+/// [`halo_large_fire`]) and whether the player is
 /// crouched are sent to the gateway as this tick's input, as
 /// [`halo_large_send_input`] would, unless the tick ran ahead of the clock
 /// (a game that runs ticks in a rush): then the player stays where they were
@@ -215,8 +216,8 @@ pub unsafe extern "C" fn halo_large_move(
             return 0;
         };
         if moved.stepped {
+            let flags = g.local.as_ref().map_or(0, |l| l.flags(moved.crouched));
             if let Some(session) = &g.session {
-                let flags = if moved.crouched { halo_sim::FLAG_CROUCHED } else { 0 };
                 session.send_input(moved.position, yaw, pitch, flags);
             }
         }
@@ -232,6 +233,42 @@ pub unsafe extern "C" fn halo_large_move(
             moved.landing_velocity,
         ]);
         1 + 2 * moved.airborne as u32 + 4 * moved.crouched as u32
+    })
+}
+
+/// One tick of the local player's weapon: `weapon` is the tag index of the weapon in hand (its
+/// definition's index in the map, as a hit report names it), `trigger` is 1 while the trigger is
+/// held, `reload` 1 while the reload control is. The weapon's ammunition, heat and reload are the
+/// simulation's own model of them ([`halo_sim::weapon::Hands`], the one the comparison harness
+/// holds to the engine's); the HUD shows what it says, and each shot it fires is counted for the
+/// other players, who are told with the player's next position (the shot counter of the flags, see
+/// `halo_wire::unit`). The model starts full with each new life ([`halo_large_place`]) and each
+/// new weapon.
+///
+/// Returns 0 when the map is not in yet or does not have the weapon (nothing is written); otherwise
+/// 1, plus 2 when the trigger fired this tick and plus 4 when a reload began, and `out` has five
+/// `float`s: rounds loaded, rounds in reserve, heat (0 to 1), 1 while overheated and 1 while
+/// reloading.
+///
+/// # Safety
+/// `out` points to five writable `float`s.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_fire(weapon: u32, trigger: u32, reload: u32, out: *mut f32) -> u32 {
+    guard(0, || {
+        let mut g = global();
+        if out.is_null() {
+            return 0;
+        }
+        let Ok(weapon) = u16::try_from(weapon) else { return 0 };
+        let Some(armed) = g.local.as_mut().and_then(|l| l.fire(weapon, trigger != 0, reload != 0)) else { return 0 };
+        unsafe { std::slice::from_raw_parts_mut(out, 5) }.copy_from_slice(&[
+            f32::from(armed.rounds_loaded),
+            f32::from(armed.rounds_total),
+            armed.heat,
+            f32::from(u8::from(armed.overheated)),
+            f32::from(u8::from(armed.reloading)),
+        ]);
+        1 + 2 * u32::from(armed.fired) + 4 * u32::from(armed.reload_began)
     })
 }
 
@@ -701,8 +738,10 @@ pub unsafe extern "C" fn halo_large_hits(out: *mut u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn halo_large_send_input(x: f32, y: f32, z: f32, yaw: f32, pitch: f32) {
     guard((), || {
-        if let Some(session) = &global().session {
-            session.send_input([x, y, z], yaw, pitch, 0);
+        let g = global();
+        let flags = g.local.as_ref().map_or(0, |l| l.flags(false));
+        if let Some(session) = &g.session {
+            session.send_input([x, y, z], yaw, pitch, flags);
         }
     })
 }
