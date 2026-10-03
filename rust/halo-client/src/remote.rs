@@ -16,8 +16,11 @@
 //! - A state that arrives where the extrapolation was not leaves a difference
 //!   between where the player was drawn and where the new state puts them. It
 //!   is kept as an offset on top of the new extrapolation and shrinks by
-//!   [`FADE`] each tick, unless it is more than [`SNAP_DISTANCE`] (a respawn, a
-//!   teleport), when the player is drawn at the new state's position at once.
+//!   closed by at most [`correction_step`] a tick (so that the player never
+//!   moves faster than 1.5 times the fastest legal speed, whatever the
+//!   correction adds to their own movement), unless it is more than
+//!   [`SNAP_DISTANCE`] (a respawn, a teleport), when the player is drawn at the
+//!   new state's position at once.
 //!
 //! The functions here take what they work from and no clock or socket, so
 //! that tests can run them tick by tick.
@@ -31,8 +34,22 @@ use crate::session::RemoteUnit;
 /// find the ground with.
 pub const BLIND_AIRBORNE_TICKS: f32 = 4.0;
 
-/// What is left of a late update's offset after each tick.
-pub const FADE: f32 = 0.6;
+/// The fastest a player may legally move, world units a second: the wire's
+/// velocity range is 1.5 times the server's speed bound.
+const FASTEST_LEGAL: f32 = halo_wire::unit::VELOCITY_RANGE / 1.5;
+
+/// How much faster than the fastest legal speed a drawn player may be seen to
+/// move, in the tick a late update's offset is being closed.
+const CORRECTION_SPEED_FACTOR: f32 = 1.5;
+
+/// How far a late update's offset may be closed in a tick, in world units, for
+/// a player whose state has `velocity` (world units a second): what the player's
+/// own movement of a tick leaves of 1.5 times the fastest legal speed's. The
+/// offset and the velocity may point the same way, so they are added.
+pub fn correction_step(velocity: [f32; 3]) -> f32 {
+    let per_tick = TICKS_PER_SECOND as f32;
+    (CORRECTION_SPEED_FACTOR * FASTEST_LEGAL / per_tick - length(velocity) / per_tick).max(0.0)
+}
 
 /// How far, in world units, a new state may be from where the player was
 /// drawn and have the difference faded: past it the player is drawn at the new
@@ -128,8 +145,8 @@ pub fn drawn(unit: &RemoteUnit, age: f32, late: Option<(&Track, f32)>, map: Opti
     out
 }
 
-/// The difference a late update leaves, kept to fade: where the player was
-/// drawn less where the new state puts them. `None` when it is too much to fade.
+/// The difference a late update leaves, kept to close: where the player was
+/// drawn less where the new state puts them. `None` when it is too much to close.
 pub fn late_offset(was_drawn: [f32; 3], now_extrapolated: [f32; 3]) -> Option<[f32; 3]> {
     let offset =
         [was_drawn[0] - now_extrapolated[0], was_drawn[1] - now_extrapolated[1], was_drawn[2] - now_extrapolated[2]];
@@ -147,14 +164,20 @@ pub struct Track {
     /// Where the offset began, as the distance it was, for the log: how far
     /// off the drawn position was when the state came.
     pub error: f32,
+    /// How much of it is closed each tick ([`correction_step`] of the state's velocity).
+    pub step: f32,
     /// When the state came.
     pub arrived: std::time::Instant,
 }
 
 impl Track {
-    /// The offset after `ticks` ticks (whole or part) of fading.
+    /// The offset after `ticks` ticks (whole or part) of closing it.
     pub fn faded(&self, ticks: f32) -> [f32; 3] {
-        let k = FADE.powf(ticks.max(0.0));
-        [self.offset[0] * k, self.offset[1] * k, self.offset[2] * k]
+        let size = length(self.offset);
+        if size <= 0.0 {
+            return [0.0; 3];
+        }
+        let left = (size - self.step * ticks.max(0.0)).max(0.0) / size;
+        [self.offset[0] * left, self.offset[1] * left, self.offset[2] * left]
     }
 }

@@ -719,7 +719,7 @@ fn take_state(shared: &mut Shared, state: UnitState, tick: u32, at: Instant, map
         return;
     }
     let new = RemoteUnit { state, tick };
-    let mut track = Track { offset: [0.0; 3], error: 0.0, arrived: at };
+    let mut track = Track { offset: [0.0; 3], error: 0.0, step: remote::correction_step(state.velocity), arrived: at };
     let in_range = |unit: &RemoteUnit| age_of(shared, unit.tick, at) <= OUT_OF_RANGE_TICKS as f32;
     if let Some(old) = known.filter(in_range) {
         let was = draw(shared, &old, at, map).position;

@@ -178,52 +178,116 @@ fn with_no_map_an_airborne_player_is_carried_on_for_four_ticks_and_then_held() {
     assert!(watch.drawn(up + 11, Some(&map)).unwrap().position != watch.drawn(up + 11, None).unwrap().position);
 }
 
-/// A player running who stops or turns round on the tick after an update: the controls from then on.
-fn changing_track(map: &MapData, interval: u32, then: Controls) -> (Vec<Truth>, usize) {
+/// A scripted track of a player who runs along +x at the map's speed and, on the tick after the update at
+/// tick `last`, stops or turns round (their velocity changes at once, as a track of straight lines does):
+/// `then` is their speed along +x from then on. Returns the track and `last`.
+fn changing_track(map: &MapData, interval: u32, then: f32) -> (Vec<Truth>, usize) {
+    let run = map.movement.run_forward_speed;
+    let per_tick = 1.0 / halo_sim::TICKS_PER_SECOND as f32;
     // (the update the change follows: the first at or after tick 40)
     let last = 40usize.div_ceil(interval as usize) * interval as usize;
-    let change = last + 1;
-    let truth = track(map, 60, 130, |k| if k < 60 + change { running(0.0) } else { then });
+    let mut x = -20.0;
+    let truth = (0..130)
+        .map(|k| {
+            let v = if k <= last { run } else { then };
+            x += v * per_tick;
+            Truth { position: [x, 0.0, 0.0], velocity: [v, 0.0, 0.0], airborne: false }
+        })
+        .collect();
     (truth, last)
 }
 
-fn stop_and_reversal(then: Controls, name: &str) {
+/// What a stop or a reversal comes to at one update interval, from the tick of the update after the change.
+struct Change {
+    /// How far off the drawn position is when that update arrives.
+    error: f32,
+    /// The ticks after it that it takes to be within 0.05 of the track, for good.
+    settled_after: usize,
+    /// The most the drawn position moves in a tick, over the whole track.
+    step: f32,
+    /// How much of the error a tick can close, for the player the update is of.
+    closes: f32,
+}
+
+fn change(map: &MapData, interval: u32, then: f32) -> Change {
+    let (truth, last) = changing_track(map, interval, then);
+    let drawn = play(map, &truth, interval, 0, Some(map));
+    let next = last + interval as usize;
+    let off = |k: usize| distance(drawn[k].position, truth[k].position);
+    // (the drawn position at the arrival, before the update is taken: the tick before, and a tick on)
+    let error = off(next).max(drawn_before(map, &truth, interval, next));
+    let settled_after = (0..60).find(|n| (next + n..truth.len()).all(|k| off(k) < 0.05)).expect("it settles");
+    Change { error, settled_after, step: worst(&drawn, &truth, 0).1, closes: remote::correction_step([then, 0.0, 0.0]) }
+}
+
+/// How far off the drawn position is on tick `next`, just before the update of that tick is taken.
+fn drawn_before(map: &MapData, truth: &[Truth], interval: u32, next: usize) -> f32 {
+    let mut watch = Watch::new();
+    for (k, t) in truth.iter().enumerate().take(next + 1) {
+        if k < next && k % interval as usize == 0 {
+            watch.deliver(k, t, map, Some(map));
+        }
+    }
+    // (time at `next`, with the newest tick the last update's)
+    let unit = watch.drawn(next, Some(map)).unwrap();
+    distance(unit.position, truth[next].position)
+}
+
+/// Stops and reversals, at every interval: how far off they put the drawn position is at most twice the
+/// speed times the interval, the drawn position never moves more than 1.5 times the fastest legal speed in
+/// a tick, and it is within 0.05 of the track 4 ticks after the next update wherever the offset can be closed
+/// that fast by steps of that size.
+fn stop_and_reversal(then: f32, name: &str, cannot_settle_in_4: &[u32], snapped: &[u32]) {
     let map = flat_floor_map();
     let speed = map.movement.run_forward_speed;
     for interval in INTERVALS {
-        let (truth, last) = changing_track(&map, interval, then);
-        let drawn = play(&map, &truth, interval, 0, Some(&map));
-        // how far off the drawn position gets
+        let c = change(&map, interval, then);
         let bound = 2.0 * speed * interval as f32 / halo_sim::TICKS_PER_SECOND as f32;
-        let (error, step) = worst(&drawn, &truth, 0);
-        assert!(error <= bound, "{name}, every {interval} ticks: off the track by {error}, more than {bound}");
-        // (a late update's correction takes a share of what it corrects each tick, on top of the speed)
-        let allowed = step_limit(&map) + (1.0 - remote::FADE) * error;
-        assert!(step <= allowed, "{name}, every {interval} ticks: moved {step} in a tick, more than {allowed}");
-        // and it is on the track again, to 0.05, 4 ticks after the first update that follows the
-        // movement having settled (it takes the player about 12 ticks to stop or turn round)
-        let settled_at = last + 1 + 12 + interval as usize + 4;
-        let off = (settled_at..truth.len()).map(|k| distance(drawn[k].position, truth[k].position)).fold(0.0, f32::max);
-        assert!(off <= 0.05, "{name}, every {interval} ticks: still {off} off from tick {settled_at}");
-        // a player who stops or turns for one tick of the updates is better followed: the next update
-        // after the change brings them back within 0.05 in 4 ticks when it comes in 2 ticks or fewer
-        if interval <= 2 {
-            let next = last + interval as usize;
-            let off =
-                (next + 4..truth.len()).map(|k| distance(drawn[k].position, truth[k].position)).fold(0.0, f32::max);
-            assert!(off <= 0.05, "{name}, every {interval} ticks: {off} off 4 ticks after the next update");
+        assert!(c.error <= bound, "{name}, every {interval} ticks: off the track by {}, more than {bound}", c.error);
+        if snapped.contains(&interval) {
+            // more than the 2 units that are closed in steps: the player is drawn at the state's position at once,
+            // which is a move of the whole error in a tick, and the player is on the track at once
+            assert!(c.error > remote::SNAP_DISTANCE, "{name}, every {interval} ticks: {} is not a snap", c.error);
+            assert!(c.step >= 0.9 * c.error, "{name}, every {interval} ticks: moved {} for {}", c.step, c.error);
+            assert!(c.settled_after <= 4, "{name}, every {interval} ticks: {} ticks to settle", c.settled_after);
+            continue;
+        }
+        assert!(
+            c.step <= step_limit(&map),
+            "{name}, every {interval} ticks: moved {} in a tick, more than {}",
+            c.step,
+            step_limit(&map)
+        );
+        // 4 ticks of the largest step close at most this much (the track's own movement is what is left)
+        let closable = 4.0 * c.closes + 0.05;
+        if cannot_settle_in_4.contains(&interval) {
+            // the two criteria cannot both hold: the step bound is kept and the offset takes as long as the steps need
+            assert!(c.error > closable, "{name}, every {interval} ticks: {} could be closed in 4 ticks", c.error);
+            let steps = ((c.error - 0.05) / c.closes).ceil() as usize;
+            assert!(
+                c.settled_after <= steps + 1,
+                "{name}, every {interval} ticks: {} ticks, not {steps}",
+                c.settled_after
+            );
+            assert!(c.settled_after > 4, "{name}, every {interval} ticks: settled in {}", c.settled_after);
+        } else {
+            assert!(c.error <= closable, "{name}, every {interval} ticks: {} cannot be closed in 4 ticks", c.error);
+            assert!(c.settled_after <= 4, "{name}, every {interval} ticks: {} ticks to settle", c.settled_after);
         }
     }
 }
 
 #[test]
-fn a_player_who_stops_is_drawn_off_by_less_than_twice_the_distance_to_the_next_update_and_settles() {
-    stop_and_reversal(Controls::standing(0.0), "stop");
+fn a_player_who_stops_is_drawn_within_twice_the_distance_to_the_next_update_and_settles_in_4_ticks() {
+    // (at 15 ticks the drawn player is 1.11 off: 4 ticks of the largest step close 0.8)
+    stop_and_reversal(0.0, "stop", &[15], &[]);
 }
 
 #[test]
-fn a_player_who_turns_round_is_drawn_off_by_less_than_twice_the_distance_to_the_next_update_and_settles() {
-    stop_and_reversal(Controls { forward: -1.0, ..Controls::standing(0.0) }, "reversal");
+fn a_player_who_turns_round_is_drawn_within_twice_the_distance_to_the_next_update_and_settles() {
+    // (a reversal at the backward run speed: at 10 ticks the drawn player is 1.37 off, which 4 ticks of the largest
+    // step cannot close, and at 15 it is 2.06 off, which is more than is closed in steps: it is a snap)
+    stop_and_reversal(-1.9, "reversal", &[10], &[15]);
 }
 
 #[test]
