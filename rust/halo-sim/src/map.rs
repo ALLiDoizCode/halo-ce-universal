@@ -2,6 +2,7 @@ use alloc::vec::Vec;
 
 use halo_map::collision::CollisionBsp;
 use halo_map::combat::Combat;
+use halo_map::items::Items;
 use halo_map::{HaloMap, Movement};
 
 use crate::math::sqrt;
@@ -23,6 +24,9 @@ pub struct MapData {
     /// What the tags say of fighting: the weapons, and the player's health and
     /// shields (see [`crate::combat`]).
     pub combat: Combat,
+    /// What the tags say of items: what can be picked up, where it appears and
+    /// how often, and how far a player reaches (see [`crate::items`]).
+    pub items: Items,
 }
 
 impl MapData {
@@ -46,7 +50,8 @@ impl MapData {
     /// bounds and the [`Movement::COUNT`] movement values (all little-endian
     /// `f32`), the starting locations (a `u32` count, then for each its
     /// position and yaw as `f32`s, its team and four game types as `i16`s),
-    /// the combat values ([`Combat::to_bytes`], behind a `u32` length), and
+    /// the combat values ([`Combat::to_bytes`], behind a `u32` length), the
+    /// item values ([`Items::to_bytes`], likewise), and
     /// [`CollisionBsp::to_bytes`](halo_map::collision::CollisionBsp::to_bytes).
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -65,6 +70,9 @@ impl MapData {
         let combat = self.combat.to_bytes();
         out.extend_from_slice(&(combat.len() as u32).to_le_bytes());
         out.extend_from_slice(&combat);
+        let items = self.items.to_bytes();
+        out.extend_from_slice(&(items.len() as u32).to_le_bytes());
+        out.extend_from_slice(&items);
         out.extend_from_slice(&self.collision.to_bytes());
         out
     }
@@ -87,8 +95,13 @@ impl MapData {
         let short_combat = || halo_map::MapError::Malformed("map data is shorter than its combat values".into());
         let (combat_len, rest) = rest.split_at_checked(4).ok_or_else(short_combat)?;
         let combat_len = u32::from_le_bytes(combat_len.try_into().unwrap()) as usize;
-        let (combat_bytes, collision) = rest.split_at_checked(combat_len).ok_or_else(short_combat)?;
+        let (combat_bytes, rest) = rest.split_at_checked(combat_len).ok_or_else(short_combat)?;
         let combat = Combat::from_bytes(combat_bytes)?;
+        let short_items = || halo_map::MapError::Malformed("map data is shorter than its item values".into());
+        let (items_len, rest) = rest.split_at_checked(4).ok_or_else(short_items)?;
+        let items_len = u32::from_le_bytes(items_len.try_into().unwrap()) as usize;
+        let (items_bytes, collision) = rest.split_at_checked(items_len).ok_or_else(short_items)?;
+        let items = Items::from_bytes(items_bytes)?;
         let starts = start_bytes
             .as_chunks::<{ Start::BYTES }>()
             .0
@@ -111,7 +124,7 @@ impl MapData {
         if !movement.is_sane() {
             return Err(halo_map::MapError::Malformed("the map's movement values are not usable".into()));
         }
-        Ok(MapData { collision: CollisionBsp::from_bytes(collision)?, world_bounds, movement, starts, combat })
+        Ok(MapData { collision: CollisionBsp::from_bytes(collision)?, world_bounds, movement, starts, combat, items })
     }
 }
 
@@ -123,6 +136,7 @@ impl From<HaloMap> for MapData {
             movement: map.movement,
             starts: Vec::new(),
             combat: map.combat,
+            items: map.items,
         };
         let starts: Vec<Start> = map
             .player_starts

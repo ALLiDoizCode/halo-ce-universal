@@ -228,6 +228,10 @@ static const struct config_setting config_settings[] =
 		"Log every sound the game is asked to start, with its tag and the game tick\n"
 		"(port/linux/game/large_effects.c; for the large-scale mode's tests, which\n"
 		"see what played for a shot, a hit and a death from it)." },
+	{ "large.autouse", _config_real, "0.0", "HALO_LARGE_AUTOUSE", _environment_value, _platform_desktop,
+		"The large-scale mode's player presses the action button twice a second, from\n"
+		"this many seconds after the weapon is in hand, to pick up or swap for what is\n"
+		"at their feet (for the automated tests); 0 never." },
 	{ "debug.network_test", _config_string, "\"\"", "HALO_NETWORK_TEST", _environment_value, _platform_all,
 		"Automated system link sessions for testing (port/linux/game/network_test.c):\n"
 		"\"host:<map>\" hosts a game on that map, \"join\" joins the first game found;\n"

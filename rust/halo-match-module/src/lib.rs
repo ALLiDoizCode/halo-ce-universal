@@ -90,12 +90,15 @@
 //! local SpacetimeDB.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::time::Duration;
 
 use halo_map::MapError;
 use halo_sim::combat::{CombatStore, Fighter, HitEvent, Loadout, Shooter, Trails};
 use halo_sim::damage::Vitals;
+use halo_sim::items::{Ammo, Item, ItemId, ItemStore, Kit};
+use halo_sim::pickups::{self, ItemEvent, Request};
 use halo_sim::rules::{self, Contestant, Death, EndReason, Ending, Game, GameEvent, GameStore, Life, Rules, Winner};
 use halo_sim::wire::{decode_hits, decode_inputs, HIT_SIZE, INPUT_SIZE, MAX_HITS_PER_CALL};
 use halo_sim::{Event, MapData, Player, PlayerId, RejectReason, Rng, Store, TICKS_PER_SECOND};
@@ -389,6 +392,77 @@ pub struct HitReportRow {
     data: Vec<u8>,
 }
 
+/// An item on the ground: a placement's weapon or powerup, a weapon someone
+/// put down. Public, and slow state: a row is written when an item appears,
+/// when it comes to rest (a falling one is *not* written every tick: where it
+/// is in between is a function of the row, which every client works out with
+/// the same `halo_sim::items::Item::advanced_to`), when it loses rounds to a
+/// player who takes them, and deleted when it is taken or goes. Clients
+/// subscribe to all of it.
+#[table(accessor = item, public)]
+pub struct ItemRow {
+    #[primary_key]
+    #[auto_inc]
+    id: u32,
+    /// The weapon's or equipment's tag index (`halo_map::items::ItemDef`).
+    tag: u16,
+    /// Where the item was, and how it was moving (world units a tick), at the
+    /// match tick `tick`: an item at rest (`resting`) is where it is.
+    x: f32,
+    y: f32,
+    z: f32,
+    vx: f32,
+    vy: f32,
+    vz: f32,
+    tick: u64,
+    resting: bool,
+    /// The placement that made it (an index of the map's netgame equipment),
+    /// 65535 for a weapon that was put down.
+    placement: u16,
+    /// A weapon's rounds, in the magazine and in reserve.
+    loaded: i16,
+    reserve: i16,
+    last_owned: u64,
+    /// The player who put it down, who cannot take it until it rests (65535: nobody).
+    ignore: u16,
+}
+
+/// The players who are camouflaged, and until which match tick. Public: every
+/// client shows it on the players it draws. A row is there only while the
+/// camouflage is.
+#[table(accessor = powerup, public)]
+pub struct PowerupRow {
+    #[primary_key]
+    player: u16,
+    camo_until: u64,
+}
+
+/// The rounds of the weapons a player carries, slot by slot, as the server
+/// tracks them (a client reports its own as it fires: `report_ammo`). Public
+/// (the rounds are no secret), but a client subscribes to its own row only, so
+/// the others' reports are not sent to it: `version` changes when the
+/// server changed the rounds (a pickup, a spawn), which is when the client
+/// takes them.
+#[table(accessor = kit, public)]
+pub struct KitRow {
+    #[primary_key]
+    player: u16,
+    loaded_0: i16,
+    reserve_0: i16,
+    loaded_1: i16,
+    reserve_1: i16,
+    version: u32,
+}
+
+/// A player's press of the action button, waiting for the next tick: the weapon
+/// slot in hand (what a swap puts down). One a player; private.
+#[table(accessor = use_request)]
+pub struct UseRequest {
+    #[primary_key]
+    player: u16,
+    slot: u8,
+}
+
 /// What `report_death` was told to apply at the next tick. Private.
 #[table(accessor = pending_death)]
 pub struct PendingDeath {
@@ -513,6 +587,10 @@ thread_local! {
     /// memory is fresh) a report's target is checked against where it is now
     /// (see `halo_sim::combat`).
     static TRAILS: RefCell<Trails> = RefCell::new(Trails::new());
+    /// Where each falling item is as of the last tick (`halo_sim::items::ItemStore::flight`): module memory
+    /// only, so that a fall writes no rows. With none (a module whose memory is fresh) the tick works the
+    /// item's flight out again from its row.
+    static FLIGHTS: RefCell<BTreeMap<ItemId, Item>> = const { RefCell::new(BTreeMap::new()) };
 }
 
 fn match_state(ctx: &ReducerContext) -> MatchState {
@@ -662,6 +740,12 @@ impl Store for TableStore<'_> {
         let mut ids: Vec<PlayerId> = self.ctx.db.player().iter().map(|p| p.id).collect();
         ids.sort_unstable();
         ids
+    }
+
+    fn players(&self) -> Vec<Player> {
+        let mut all: Vec<Player> = self.ctx.db.player().iter().map(|r| to_player(&r)).collect();
+        all.sort_unstable_by_key(|p| p.id);
+        all
     }
 
     fn ticks_since_move(&self, id: PlayerId) -> u32 {
@@ -957,9 +1041,183 @@ impl CombatStore for TableCombat<'_> {
     }
 }
 
-/// A player has spawned: full health and shields and the starting weapon.
+fn item_of(row: &ItemRow) -> Item {
+    Item {
+        id: row.id,
+        tag: row.tag,
+        position: [row.x, row.y, row.z],
+        velocity: [row.vx, row.vy, row.vz],
+        tick: row.tick,
+        resting: row.resting,
+        placement: row.placement,
+        loaded: row.loaded,
+        reserve: row.reserve,
+        last_owned: row.last_owned,
+        ignore: row.ignore,
+    }
+}
+
+fn item_row(item: &Item) -> ItemRow {
+    ItemRow {
+        id: item.id,
+        tag: item.tag,
+        x: item.position[0],
+        y: item.position[1],
+        z: item.position[2],
+        vx: item.velocity[0],
+        vy: item.velocity[1],
+        vz: item.velocity[2],
+        tick: item.tick,
+        resting: item.resting,
+        placement: item.placement,
+        loaded: item.loaded,
+        reserve: item.reserve,
+        last_owned: item.last_owned,
+        ignore: item.ignore,
+    }
+}
+
+fn kit_of(row: Option<KitRow>, camo: Option<PowerupRow>, player: PlayerId) -> Kit {
+    let mut kit = Kit::new(player);
+    if let Some(row) = row {
+        kit.ammo = [
+            Ammo { loaded: row.loaded_0, reserve: row.reserve_0 },
+            Ammo { loaded: row.loaded_1, reserve: row.reserve_1 },
+        ];
+        kit.version = row.version;
+    }
+    kit.camo_until = camo.map_or(0, |p| p.camo_until);
+    kit
+}
+
+fn kit_row(kit: &Kit) -> KitRow {
+    KitRow {
+        player: kit.player,
+        loaded_0: kit.ammo[0].loaded,
+        reserve_0: kit.ammo[0].reserve,
+        loaded_1: kit.ammo[1].loaded,
+        reserve_1: kit.ammo[1].reserve,
+        version: kit.version,
+    }
+}
+
+/// `halo_sim::items::ItemStore` over the `item`, `kit` and `powerup` tables.
+/// Rows are written only when they change: they are public, and what
+/// subscribers are sent. Where a falling item is now is module memory only
+/// (`FLIGHTS`), as `Trails` is: the row says how it began.
+struct TableItems<'a> {
+    ctx: &'a ReducerContext,
+}
+
+impl ItemStore for TableItems<'_> {
+    fn items(&self) -> Vec<Item> {
+        let mut all: Vec<Item> = self.ctx.db.item().iter().map(|r| item_of(&r)).collect();
+        all.sort_unstable_by_key(|i| i.id);
+        all
+    }
+
+    fn item(&self, id: ItemId) -> Option<Item> {
+        self.ctx.db.item().id().find(id).as_ref().map(item_of)
+    }
+
+    fn insert_item(&mut self, item: Item) -> ItemId {
+        self.ctx.db.item().insert(item_row(&Item { id: 0, ..item })).id
+    }
+
+    fn update_item(&mut self, item: Item) {
+        let table = self.ctx.db.item();
+        match table.id().find(item.id) {
+            Some(old) if item_of(&old) == item => {}
+            Some(_) => {
+                table.id().update(item_row(&item));
+            }
+            None => {}
+        }
+    }
+
+    fn remove_item(&mut self, id: ItemId) -> bool {
+        FLIGHTS.with(|f| f.borrow_mut().remove(&id));
+        self.ctx.db.item().id().delete(id)
+    }
+
+    fn flight(&self, id: ItemId) -> Option<Item> {
+        FLIGHTS.with(|f| f.borrow().get(&id).copied())
+    }
+
+    fn set_flight(&mut self, item: Item) {
+        FLIGHTS.with(|f| f.borrow_mut().insert(item.id, item));
+    }
+
+    fn clear_flight(&mut self, id: ItemId) {
+        FLIGHTS.with(|f| f.borrow_mut().remove(&id));
+    }
+
+    fn kit(&self, player: PlayerId) -> Kit {
+        kit_of(self.ctx.db.kit().player().find(player), self.ctx.db.powerup().player().find(player), player)
+    }
+
+    fn set_kit(&mut self, kit: Kit) {
+        let table = self.ctx.db.kit();
+        match table.player().find(kit.player) {
+            Some(old) => {
+                let held = kit_of(Some(old), None, kit.player);
+                if held.ammo != kit.ammo || held.version != kit.version {
+                    table.player().update(kit_row(&kit));
+                }
+            }
+            None => {
+                table.insert(kit_row(&kit));
+            }
+        }
+        let camo = self.ctx.db.powerup();
+        match (camo.player().find(kit.player), kit.camo_until) {
+            (Some(_), 0) => {
+                camo.player().delete(kit.player);
+            }
+            (Some(old), until) if old.camo_until != until => {
+                camo.player().update(PowerupRow { player: kit.player, camo_until: until });
+            }
+            (None, until) if until != 0 => {
+                camo.insert(PowerupRow { player: kit.player, camo_until: until });
+            }
+            _ => {}
+        }
+    }
+
+    fn remove_kit(&mut self, player: PlayerId) -> bool {
+        self.ctx.db.powerup().player().delete(player);
+        self.ctx.db.kit().player().delete(player)
+    }
+
+    fn camouflaged(&self) -> Vec<PlayerId> {
+        let mut ids: Vec<PlayerId> = self.ctx.db.powerup().iter().map(|p| p.player).collect();
+        ids.sort_unstable();
+        ids
+    }
+}
+
+/// A player has spawned: full health and shields, the starting weapon and the
+/// rounds it comes with.
 fn spawn_combat(ctx: &ReducerContext, map: &MapData, id: PlayerId, tick: u64) {
     TRAILS.with(|t| halo_sim::combat::spawn(&mut TableCombat { ctx }, &mut t.borrow_mut(), map, id, tick));
+    let fighter = TableCombat { ctx }.fighter(id);
+    if let Some(fighter) = fighter {
+        pickups::on_spawn(&mut TableItems { ctx }, map, id, &fighter.loadout);
+    }
+}
+
+/// Take every item off the ground (a new game, a new map), and what the
+/// players have of them.
+fn clear_items(ctx: &ReducerContext) {
+    let ids: Vec<u32> = ctx.db.item().iter().map(|i| i.id).collect();
+    for id in ids {
+        ctx.db.item().id().delete(id);
+    }
+    let camouflaged: Vec<u16> = ctx.db.powerup().iter().map(|p| p.player).collect();
+    for id in camouflaged {
+        ctx.db.powerup().player().delete(id);
+    }
+    FLIGHTS.with(|f| f.borrow_mut().clear());
 }
 
 /// A fighter for every player who is in the world and has none: one who
@@ -985,6 +1243,19 @@ fn log_events(events: &[GameEvent]) {
                 log::warn!("a death of player {victim} was refused: {reason:?}")
             }
             GameEvent::Over(ending) => log::info!("the match is over: {ending:?}"),
+            _ => {}
+        }
+    }
+}
+
+/// What the items did, for the log: what the players took and put down.
+fn log_item_events(events: &[ItemEvent]) {
+    for event in events {
+        match event {
+            ItemEvent::PickedUp { player, item, tag, what } => {
+                log::info!("player {player} took item {item} (tag {tag}): {what:?}")
+            }
+            ItemEvent::Dropped { player, item, tag } => log::info!("player {player} put down item {item} (tag {tag})"),
             _ => {}
         }
     }
@@ -1046,6 +1317,8 @@ pub fn load_map(ctx: &ReducerContext, data: Vec<u8>) -> Result<(), String> {
     }
     // the cache is refilled from the row by the next tick, so it can never disagree with the table
     MAP_CACHE.with(|c| *c.borrow_mut() = None);
+    // (what is on the ground is the old map's)
+    clear_items(ctx);
     ctx.db.match_state().id().update(state);
     ensure_fighters(ctx, &map, match_tick_of(ctx));
     Ok(())
@@ -1107,6 +1380,8 @@ fn remove_player(ctx: &ReducerContext, id: u16) {
     ctx.db.player().id().delete(id);
     ctx.db.seat().player().delete(id);
     ctx.db.roster().player().delete(id);
+    TableItems { ctx }.remove_kit(id);
+    ctx.db.use_request().player().delete(id);
     rules::leave(&mut TableGame { ctx }, id);
     TRAILS.with(|t| halo_sim::combat::leave(&mut TableCombat { ctx }, &mut t.borrow_mut(), id));
     let reports: Vec<u64> = ctx.db.hit_report().iter().filter(|r| r.shooter == id).map(|r| r.id).collect();
@@ -1417,6 +1692,15 @@ pub fn reset(ctx: &ReducerContext) -> Result<(), String> {
         ctx.db.fighter().player().delete(id);
     }
     TRAILS.with(|t| *t.borrow_mut() = Trails::new());
+    clear_items(ctx);
+    let requests: Vec<u16> = ctx.db.use_request().iter().map(|r| r.player).collect();
+    for id in requests {
+        ctx.db.use_request().player().delete(id);
+    }
+    let kits: Vec<u16> = ctx.db.kit().iter().map(|k| k.player).collect();
+    for id in kits {
+        ctx.db.kit().player().delete(id);
+    }
     let blank = MatchTick {
         id: ONLY,
         tick: 0,
@@ -1467,6 +1751,8 @@ pub fn set_game(
     let mut game = TableGame { ctx };
     game.set_game(Game::new(rules, tick));
     rules::begin(&mut game, tick);
+    // (the items of the match before are not the new one's: its placements make theirs from the next tick)
+    clear_items(ctx);
     Ok(())
 }
 
@@ -1477,6 +1763,7 @@ pub fn set_game(
 pub fn begin_game(ctx: &ReducerContext) -> Result<(), String> {
     require_owner(ctx)?;
     rules::begin(&mut TableGame { ctx }, match_tick_of(ctx));
+    clear_items(ctx);
     Ok(())
 }
 
@@ -1507,13 +1794,58 @@ pub fn report_hits(ctx: &ReducerContext, batch: Vec<u8>) -> Result<(), String> {
 }
 
 /// What a player carries, for tests and tools: the weapons by tag index
-/// (65535 for none). The player's health and shields are as they are.
+/// (65535 for none), with the rounds the tags start them with. The player's
+/// health and shields are as they are.
 #[reducer]
 pub fn set_loadout(ctx: &ReducerContext, player: u16, weapon0: u16, weapon1: u16) -> Result<(), String> {
     require_owner(ctx)?;
     let mut fighter = TableCombat { ctx }.fighter(player).ok_or_else(|| format!("player {player} has no fighter"))?;
     fighter.loadout = Loadout { weapons: [weapon0, weapon1], ..fighter.loadout };
     TableCombat { ctx }.set_fighter(fighter);
+    if let Some(map) = current_map(ctx) {
+        pickups::on_spawn(&mut TableItems { ctx }, &map, player, &fighter.loadout);
+    }
+    Ok(())
+}
+
+/// The caller's player pressed the action button, with the weapon slot the
+/// player has in hand (the first or the second): the next tick gives the player what they reach
+/// (a weapon to take as a second, or to swap for the one in hand) if the
+/// rules of `halo_sim::pickups` say so, and nothing otherwise. A reliable call
+/// on the player's own connection, like `report_hits`: a press lost is a
+/// pickup the player has to press again for. One press a player waits for a
+/// tick (a second replaces the first). Powerups, ammunition and a weapon with
+/// nothing in hand are taken without it. Fails for a caller with no seat.
+#[reducer]
+pub fn use_item(ctx: &ReducerContext, slot: u8) -> Result<(), String> {
+    let seat = ctx.db.seat().owner().find(ctx.sender()).ok_or("you have no seat in this match")?;
+    let request = UseRequest { player: seat.player, slot: slot & 1 };
+    if ctx.db.use_request().player().find(seat.player).is_some() {
+        ctx.db.use_request().player().update(request);
+    } else {
+        ctx.db.use_request().insert(request);
+    }
+    Ok(())
+}
+
+/// The rounds of the weapons the caller's player carries, which the player's
+/// client counts as it fires: `rounds` is eight bytes, the rounds in the
+/// magazine and in reserve of slot 0 and then slot 1, as little-endian `i16`s.
+/// The server keeps them within what the weapons hold, and uses them for what
+/// a swap puts down and for how many rounds an ammunition pickup can give
+/// (`halo_sim::pickups::report_ammo`). Fails for a caller with no seat, a map
+/// that is not loaded or a batch of the wrong size.
+#[reducer]
+pub fn report_ammo(ctx: &ReducerContext, rounds: Vec<u8>) -> Result<(), String> {
+    let seat = ctx.db.seat().owner().find(ctx.sender()).ok_or("you have no seat in this match")?;
+    let map = current_map(ctx).ok_or("the match has no map yet")?;
+    let [a, b, c, d, e, f, g, h]: [u8; 8] =
+        rounds.try_into().map_err(|r: Vec<u8>| format!("{} bytes of rounds, not 8", r.len()))?;
+    let ammo = [
+        Ammo { loaded: i16::from_le_bytes([a, b]), reserve: i16::from_le_bytes([c, d]) },
+        Ammo { loaded: i16::from_le_bytes([e, f]), reserve: i16::from_le_bytes([g, h]) },
+    ];
+    pickups::report_ammo(&mut TableItems { ctx }, &TableCombat { ctx }, &map, seat.player, ammo);
     Ok(())
 }
 
@@ -1612,11 +1944,46 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
         deaths.extend(dealt.deaths);
         let outcome = rules::play(&mut store, &mut game, &map, &mut rng, marker.tick, &deaths, &inputs);
         log_events(&outcome.events);
+        // a player who died puts their weapons down; a player who spawned has the weapon
+        // and the rounds the match starts them with
+        let mut item_events: Vec<ItemEvent> = Vec::new();
+        for event in &outcome.events {
+            if let GameEvent::Died { victim, .. } = event {
+                pickups::on_death(
+                    &mut TableItems { ctx },
+                    &mut TableCombat { ctx },
+                    &store,
+                    &map,
+                    &mut rng,
+                    marker.tick,
+                    *victim,
+                    &mut item_events,
+                );
+            }
+        }
         for event in &outcome.events {
             if let GameEvent::Spawned { player, .. } = event {
                 spawn_combat(ctx, &map, *player, marker.tick);
             }
         }
+        // the items: what the placements make, what falls, what the players take
+        let mut requests: Vec<Request> =
+            ctx.db.use_request().iter().map(|r| Request { player: r.player, slot: r.slot }).collect();
+        requests.sort_unstable_by_key(|r| r.player);
+        for request in &requests {
+            ctx.db.use_request().player().delete(request.player);
+        }
+        item_events.extend(halo_sim::items::tick(
+            &mut TableItems { ctx },
+            &mut TableCombat { ctx },
+            &store,
+            &game,
+            &map,
+            &mut rng,
+            marker.tick,
+            &requests,
+        ));
+        log_item_events(&item_events);
         for event in outcome.moves {
             let Event::MoveRejected { player, reason } = event else { continue };
             rejected += 1;
