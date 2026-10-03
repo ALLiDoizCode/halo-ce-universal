@@ -18,6 +18,16 @@
 //! taking its matches down) when SpacetimeDB or the root database is lost, and
 //! a start deletes the matches an earlier run left behind.
 //!
+//! # Measuring a server at size
+//!
+//! `check/run.sh` runs a whole server on one machine with 500 simulated players
+//! (and, with `GAME=1`, the real game) through a full Team Slayer match on Blood
+//! Gulch, each program pinned to cores of its own, and reports what the match
+//! did: tick time and rate, upload, the wire as the players saw it, the game's
+//! frame rate. The players are `halo-slayer-load` (who shoots whom is
+//! [`loadgen`]); `halo-udp-loss` puts a lossy link in front of the game. The
+//! header of the script says how to run it and what it needs.
+//!
 //! # Identity and bans
 //!
 //! The owner (the identity in `owner_token_file`) publishes every database. A
@@ -31,6 +41,7 @@
 pub mod admin;
 pub mod config;
 pub mod fixtures;
+pub mod loadgen;
 pub mod maps;
 pub mod matches;
 pub mod root;
