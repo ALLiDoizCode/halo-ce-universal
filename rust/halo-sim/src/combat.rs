@@ -531,9 +531,9 @@ pub struct HitOutcome {
     pub events: Vec<HitEvent>,
 }
 
-/// An explosion a shooter has paid for in a call of [`resolve`]: whose, of
-/// which damage, and where.
-type Blast = (PlayerId, u16, [f32; 3]);
+/// A hit of an explosion that passed the checks in a call of [`resolve`]: whose,
+/// of which damage, where, and on whom.
+type Blast = (PlayerId, u16, [f32; 3], PlayerId);
 
 /// A report that passed: what it is of, and what it deals.
 struct Judged<'a> {
@@ -678,11 +678,14 @@ fn judge<'a>(
     }
 
     // the rate of fire, paid for before the history is looked through (an explosion's second hit is free)
-    let blast = (shooter_id, report.damage, report.origin);
+    // (it is free only the first time it hurts each target: a second hit of one blast on one player is a hit
+    // that was not made, and pays for itself)
+    let of_this_blast = |(s, d, at, _): &&Blast| {
+        *s == shooter_id && *d == report.damage && distance_squared(*at, report.origin) <= BLAST_MERGE * BLAST_MERGE
+    };
     let same_blast = source.is_area()
-        && blasts.iter().any(|(s, d, at)| {
-            *s == shooter_id && *d == report.damage && distance_squared(*at, report.origin) <= BLAST_MERGE * BLAST_MERGE
-        });
+        && blasts.iter().any(|b| of_this_blast(&b))
+        && !blasts.iter().filter(of_this_blast).any(|(_, _, _, target)| *target == report.target);
     if !same_blast {
         let mut record = combat.shooter(shooter_id);
         let elapsed = tick.saturating_sub(record.hit_seconds_tick) as f32 / TICKS_PER_SECOND as f32;
@@ -695,7 +698,6 @@ fn judge<'a>(
         }
         record.hit_seconds -= cost;
         combat.set_shooter(record);
-        blasts.push(blast);
     }
 
     // how far back to look: as far as the report was made, and the flight of what was fired
@@ -741,6 +743,8 @@ fn judge<'a>(
         // an explosion deals nothing to what it does not reach (the engine does not call it a hit)
         return Err(Reject::ImpactNotAtTarget);
     }
+    // (only a report that passed everything makes the blast one that later hits of it can ride on)
+    blasts.push((shooter_id, report.damage, report.origin, report.target));
     Ok(Judged { source, scale })
 }
 
@@ -1256,6 +1260,18 @@ mod tests {
             (SHOOTER, f.blast_on(ROCKET_BLAST, [6.5, 0.0, 0.3], 3, 1.0)),
         ];
         resolve(&f.store, &f.game, &mut f.combat, &f.trails, &f.map, &mut f.rng, f.tick, &elsewhere);
+        assert!(f.combat.shooter(SHOOTER).hit_seconds.abs() < 1.0e-5, "{:?}", f.combat.shooter(SHOOTER));
+    }
+
+    #[test]
+    fn the_same_explosion_on_the_same_player_twice_is_two_hits_and_pays_twice() {
+        let mut f = fight(5.0);
+        f.arm(rocket_launcher());
+        // (a target that three rockets do not kill)
+        f.map.combat.resistance.maximum_body_vitality = 1.0e6;
+        let hit = (SHOOTER, f.blast_on(ROCKET_BLAST, [5.0, 0.0, 0.3], TARGET, 1.0));
+        resolve(&f.store, &f.game, &mut f.combat, &f.trails, &f.map, &mut f.rng, f.tick, &[hit, hit, hit]);
+        // one second for each of the three (a rocket every two seconds, at twice the margin): the bucket is empty
         assert!(f.combat.shooter(SHOOTER).hit_seconds.abs() < 1.0e-5, "{:?}", f.combat.shooter(SHOOTER));
     }
 

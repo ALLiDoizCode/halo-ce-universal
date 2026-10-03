@@ -58,7 +58,7 @@ impl Source<'_> {
     /// The damage reaches everything around a point, less the further it is
     /// from it (an explosion), and not what it touches only.
     pub fn is_area(&self) -> bool {
-        self.damage.cutoff_radius > 0.0 && self.kind != Kind::Melee
+        matches!(self.kind, Kind::Detonation | Kind::SuperDetonation) && self.damage.cutoff_radius > 0.0
     }
 }
 

@@ -648,10 +648,10 @@ void scenario_harness_record(
 	if (harness.recorded >= harness.tick_count)
 	{
 		FILE *file = fopen(harness.trace_path, "w");
+		long index;
 
 		if (!file)
 			scenario_fail("cannot write the trace", harness.trace_path);
-		long index;
 
 		fprintf(file, "# halo-trace %d\n# scenario %s\n# map %s\n# source c-engine\n", harness.firing ? 2 : 1,
 			harness.name, harness.map);
