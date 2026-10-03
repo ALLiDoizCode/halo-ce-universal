@@ -212,7 +212,12 @@ seconds = 0
         mine.first().copied()
     });
     println!("the game is player {me}, {:.1} s after the match began", began.elapsed().as_secs_f32());
-    wait_for("the game to be spawned", 30, || (owner.standings().get(&me)?.state == 0).then_some(()));
+    // (the game starts its session over again when it starts the match, and the server spawns the
+    // player again for the new session: the position to compare is the one of the session whose
+    // placement the game logs, so read the server's after the game has logged it)
+    let first_unit = wait_for("the unit to be put where the server spawned the player", 60, || {
+        triple_after(&read(&log_path), "the local unit is where the server has the player")
+    });
     assert!(
         !read(&log_path).contains("the server says the local player is waiting"),
         "the game was told to wait for a wave"
@@ -222,10 +227,7 @@ seconds = 0
         "spawned beside a starting location at ({:.2} {:.2} {:.2}), spawn {}",
         spawn.x, spawn.y, spawn.z, spawn.spawns
     );
-    assert_eq!(spawn.spawns, 1);
-    let first_unit = wait_for("the unit to be put where the server spawned the player", 20, || {
-        triple_after(&read(&log_path), "the local unit is where the server has the player")
-    });
+    assert_eq!((spawn.state, spawn.spawns), (0, 1));
     for (axis, v) in [spawn.x, spawn.y, spawn.z].iter().enumerate() {
         assert!(
             (first_unit[axis] - v).abs() < 0.001,
