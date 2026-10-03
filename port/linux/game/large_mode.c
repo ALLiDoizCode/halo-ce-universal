@@ -1998,8 +1998,8 @@ weapon 50 away is a few pixels wide); an item that is shown stays so out to the 
 one on the edge does not come and go as the player moves */
 #define LARGE_ITEM_SHOW_RANGE 50.0f
 #define LARGE_ITEM_KEEP_RANGE 60.0f
-/* of the items beyond the limit, one that is already shown counts as this share nearer (squared) */
-#define LARGE_ITEM_KEEP_BIAS 0.64f
+/* of the items beyond the limit, one that is already shown counts as a fifth nearer (the distances are squared) */
+#define LARGE_ITEM_KEEP_BIAS (0.8f * 0.8f)
 
 /* an item of the server's, and the engine's object that shows it */
 struct large_item
@@ -2213,7 +2213,8 @@ static void large_mode_choose_items(
 		dz = say[i].out[2] - large_item_data.anchor.z;
 		distance = dx * dx + dy * dy + dz * dz;
 		range = known ? LARGE_ITEM_KEEP_RANGE : LARGE_ITEM_SHOW_RANGE;
-		if (distance > range * range)
+		/* (written so that a position that is no number is out of range) */
+		if (!(distance <= range * range))
 			continue;
 		say[i].wanted = TRUE;
 		say[i].key = known ? distance * LARGE_ITEM_KEEP_BIAS : distance;
@@ -2259,6 +2260,9 @@ static void large_mode_update_items(void)
 
 	large_item_data.falling = 0;
 	large_item_data.server_count = (long)count;
+	/* (nothing is near until there is a player to be near: the first unit, or where the server spawns it) */
+	if (!large_item_data.anchored)
+		count = 0;
 	for (i = 0; i < count; i++)
 		say[i].valid = halo_large_item(i, say[i].info, say[i].out) != 0;
 	large_mode_choose_items(say, count);
