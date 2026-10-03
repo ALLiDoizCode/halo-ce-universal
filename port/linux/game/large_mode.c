@@ -1543,8 +1543,7 @@ static void large_mode_set_rounds(
 			struct weapon_magazine_definition);
 
 		weapon->weapon.magazines[0].rounds_loaded = (short)MIN(loaded, (unsigned long)magazine->rounds_loaded_maximum);
-		weapon->weapon.magazines[0].rounds_total = (short)MIN(reserve, (unsigned long)MAX(magazine->rounds_total_maximum,
-			magazine->rounds_total_initial));
+		weapon->weapon.magazines[0].rounds_total = (short)MIN(reserve, (unsigned long)MAX(magazine->rounds_total_maximum, 0));
 	}
 }
 

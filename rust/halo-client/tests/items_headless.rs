@@ -250,7 +250,7 @@ fn the_game_shows_the_servers_items_takes_one_swaps_for_others_and_sees_weapons_
     // Blood Gulch's red base: the assault rifle is 0.7 ahead of the game's player (who faces +y), the
     // simulated player stands a step to its right
     // (the weapons the simulated player puts down are thrown about 0.7 along where it faces: to the game's feet)
-    let places = [at(40.4, -78.7, 1.5708), at(40.4, -77.95, -1.5708)];
+    let places = [at(40.4, -78.7, std::f32::consts::FRAC_PI_2), at(40.4, -77.95, -std::f32::consts::FRAC_PI_2)];
     let Some(a) = arena("items-bloodgulch", "bloodgulch", &places) else { return };
     let (shooter, sim) = a.seat(1);
     assert_eq!(sim, 0);
@@ -285,7 +285,9 @@ fn the_game_shows_the_servers_items_takes_one_swaps_for_others_and_sees_weapons_
     assert_eq!(a.owner.fighters()[&me].weapon_1, NO_WEAPON);
 
     // the game's player presses the action button 25 seconds after the weapon was in hand: the rifle is the second weapon
-    wait_for("the game to take the rifle", 80, || read(&log).contains("the local unit takes a weapon (slot 1)").then_some(()));
+    wait_for("the game to take the rifle", 80, || {
+        read(&log).contains("the local unit takes a weapon (slot 1)").then_some(())
+    });
     wait_for("the server to say so", 20, || (a.owner.fighters()[&me].weapon_1 == rifle).then_some(()));
     stamp("the game's player holds the pistol and the rifle");
     assert!(a.owner.items().values().all(|i| !(i.tag == rifle && (i.x - 40.128).abs() < 0.01)), "the rifle is taken");
@@ -298,11 +300,14 @@ fn the_game_shows_the_servers_items_takes_one_swaps_for_others_and_sees_weapons_
     stamp("the simulated player dies");
     a.owner.report_death(sim, None).unwrap();
     wait_for("two weapons put down", 20, || {
-        (a.owner.items().values().filter(|i| i.ignore == sim && (i.tag == shotgun || i.tag == plasma_rifle)).count() == 2)
+        (a.owner.items().values().filter(|i| i.ignore == sim && (i.tag == shotgun || i.tag == plasma_rifle)).count()
+            == 2)
             .then_some(())
     });
     wait_for("them to come to rest", 20, || {
-        a.owner.items().values().filter(|i| i.ignore == u16::MAX && (i.tag == shotgun || i.tag == plasma_rifle) && i.placement == u16::MAX).count().eq(&2).then_some(())
+        // (the game may already have swapped for one of them: what is left lies still)
+        let dropped: Vec<_> = a.owner.items().into_values().filter(|i| i.placement == u16::MAX).collect();
+        (!dropped.is_empty() && dropped.iter().all(|i| i.resting)).then_some(())
     });
     stamp("the weapons lie on the ground");
     // ... and the game's player, pressing, swaps the weapon in hand for one of them, which it puts down
@@ -325,7 +330,10 @@ fn the_game_shows_the_servers_items_takes_one_swaps_for_others_and_sees_weapons_
         })
         .collect();
     for item in a.owner.items().values().filter(|i| i.placement == u16::MAX) {
-        println!("on the ground: tag {} at ({:.2}, {:.2}, {:.2}) resting {}", item.tag, item.x, item.y, item.z, item.resting);
+        println!(
+            "on the ground: tag {} at ({:.2}, {:.2}, {:.2}) resting {}",
+            item.tag, item.x, item.y, item.z, item.resting
+        );
     }
     println!("held: {held:?}");
     stamp("done");
@@ -351,7 +359,7 @@ fn the_game_player_takes_camouflage_and_has_it_for_45_seconds_by_the_tags() {
         .find(|p| p.permutations.len() == 1 && p.permutations[0].1 == camo)
         .expect("a camouflage placement");
     let [x, y, _] = place.position;
-    let Some(a) = arena("items-camo", "boardingaction", &[at(x + 0.2, y, 3.14)]) else { return };
+    let Some(a) = arena("items-camo", "boardingaction", &[at(x + 0.2, y, std::f32::consts::PI)]) else { return };
     let (game, log) = a.start_game(120, &[]);
     let me = wait_for("the game's seat", 60, || a.owner.seats().values().map(|s| s.player).next());
     wait_for("the game's player in the world", 60, || {

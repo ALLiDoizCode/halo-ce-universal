@@ -1001,7 +1001,7 @@ fn connect(inner: &Arc<Inner>) -> Result<DbConnection, String> {
                 .on_error(move |_, e| own.shared().error = Some(format!("the subscription to the player: {e}")))
                 .subscribe([
                     format!("SELECT * FROM player WHERE id = {id}"),
-                    // (the rounds are this player's own: the others' are not sent)
+                    // (the rounds are this player's own; the table is public, so this is only what the client asks for)
                     format!("SELECT * FROM kit WHERE player = {id}"),
                 ]);
         }

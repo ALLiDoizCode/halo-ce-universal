@@ -121,7 +121,7 @@ pub enum ItemEvent {
     },
 }
 
-/// The most rounds a weapon holds in reserve, and in its magazine.
+/// The most rounds a weapon holds in its magazine, and then in reserve.
 fn limits(map: &MapData, tag: u16) -> (i16, i16) {
     map.combat
         .weapon(tag)
@@ -443,7 +443,7 @@ pub fn report_ammo(
             Ammo::default()
         } else {
             let (loaded_most, total_most) = limits(map, tag);
-            Ammo { loaded: a.loaded.clamp(0, loaded_most), reserve: a.reserve.clamp(0, total_most) }
+            Ammo { loaded: a.loaded.min(loaded_most).max(0), reserve: a.reserve.min(total_most).max(0) }
         };
     }
     items.set_kit(kit);

@@ -439,7 +439,8 @@ pub struct PowerupRow {
 
 /// The rounds of the weapons a player carries, slot by slot, as the server
 /// tracks them (a client reports its own as it fires: `report_ammo`). Public
-/// but for a client to subscribe to its own row: `version` changes when the
+/// (the rounds are no secret), but a client subscribes to its own row only, so
+/// the others' reports are not sent to it: `version` changes when the
 /// server changed the rounds (a pickup, a spawn), which is when the client
 /// takes them.
 #[table(accessor = kit, public)]
