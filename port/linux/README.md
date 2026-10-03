@@ -194,7 +194,7 @@ the setting for one start of the game. It has priority over the file.
 | `debug.gpu_skip_vertex_shaders`, `debug.gpu_debug_expression`, `debug.gpu_debug_flat`, `debug.gpu_debug_texture0` | off | `HALO_GPU_SKIP_VS`, `HALO_GPU_DEBUG_EXPR`, `HALO_GPU_DEBUG_FLAT`, `HALO_GPU_DEBUG_T0` | Tools to find problems in the graphics: skip the draws of a vertex shader, or replace the output of all pixel shaders with a GLSL expression (for example `t0.rgb`). |
 | `debug.network_test`, `debug.network_test_start`, `debug.network_test_kill`, `debug.network_test_score`, `debug.network_test_shoot`, `debug.network_test_vehicle`, `debug.network_test_pickup`, `debug.network_test_pickup_weapon`, `debug.test_input` | off | `HALO_NETWORK_TEST`, `HALO_NETWORK_TEST_START`, `HALO_NETWORK_TEST_KILL`, `HALO_NETWORK_TEST_SCORE`, `HALO_NETWORK_TEST_SHOOT`, `HALO_NETWORK_TEST_VEHICLE`, `HALO_NETWORK_TEST_PICKUP`, `HALO_NETWORK_TEST_PICKUP_WEAPON`, `HALO_TEST_INPUT` | Automatic tests of system link (`game/network_test.c`). Refer to `NETCODE.md`. |
 | `debug.scenario`, `debug.scenario_trace` | `""` | `HALO_SCENARIO`, `HALO_SCENARIO_TRACE` | The comparison harness: plays a scenario file with the first player of a network test game, alone, and writes a trace of the player's state. `tools/scenario_harness.py` runs it. Refer to `tools/scenarios/README.md`. |
-| `large.map`, `large.gateway`, `large.spacetimedb`, `large.database`, `large.root`, `large.name`, `large.log_players`, `large.scoreboard`, `large.autofire`, `large.autofire_cycle`, `large.autouse`, `large.log_sounds` | `""`, `127.0.0.1:7777`, `http://127.0.0.1:3000`, `""`, `""`, `""`, `false`, `false`, `false`, `0`, `0`, `false` | `HALO_LARGE_MAP`, `HALO_LARGE_GATEWAY`, `HALO_LARGE_SPACETIMEDB`, `HALO_LARGE_DATABASE`, `HALO_LARGE_ROOT`, `HALO_LARGE_NAME`, `HALO_LARGE_LOG`, `HALO_LARGE_SCOREBOARD`, `HALO_LARGE_AUTOFIRE`, `HALO_LARGE_AUTOFIRE_CYCLE`, `HALO_LARGE_AUTOUSE`, `HALO_LARGE_LOG_SOUNDS` | The large-scale mode. Refer to "Large-scale mode". |
+| `large.map`, `large.gateway`, `large.spacetimedb`, `large.database`, `large.root`, `large.name`, `large.log_players`, `large.scoreboard`, `large.autofire`, `large.autofire_cycle`, `large.automelee`, `large.autouse`, `large.log_sounds` | `""`, `127.0.0.1:7777`, `http://127.0.0.1:3000`, `""`, `""`, `""`, `false`, `false`, `false`, `0`, `false`, `0`, `false` | `HALO_LARGE_MAP`, `HALO_LARGE_GATEWAY`, `HALO_LARGE_SPACETIMEDB`, `HALO_LARGE_DATABASE`, `HALO_LARGE_ROOT`, `HALO_LARGE_NAME`, `HALO_LARGE_LOG`, `HALO_LARGE_SCOREBOARD`, `HALO_LARGE_AUTOFIRE`, `HALO_LARGE_AUTOFIRE_CYCLE`, `HALO_LARGE_AUTOMELEE`, `HALO_LARGE_AUTOUSE`, `HALO_LARGE_LOG_SOUNDS` | The large-scale mode. Refer to "Large-scale mode". |
 | `debug.network_latency`, `debug.network_loss` | `0` | `HALO_NETWORK_LATENCY`, `HALO_NETWORK_LOSS` | The game holds all the data that it receives for this number of milliseconds, and ignores this percentage of the datagrams. Use these settings to test the netcode as on the internet. |
 | `debug.telnet_console`, `debug.telnet_console_port` | `false`, `2323` | `HALO_TELNET_CONSOLE`, `HALO_TELNET_CONSOLE_PORT` | The game listens on 127.0.0.1, on this port, for a script console (connect with telnet). The console has no password, so only this computer can reach it. |
 
@@ -350,6 +350,8 @@ counted forward by the client and the server, so a recharge writes nothing).
   remote player and holds the trigger: the tests and the pictures use it.
   `large.autofire_cycle` lets go of it for a tick after that many, for a weapon
   that fires when the trigger is let go (the plasma pistol's charge).
+  `large.automelee` (`HALO_LARGE_AUTOMELEE`) strikes a blow every 40 ticks
+  instead.
 
 ### The local player's view: weapon, HUD, sounds and effects
 
@@ -385,7 +387,8 @@ sounds each causes; and a hundred players in view (the frame rate, with
 
 `rust/halo-client/tests/combat_headless.rs` runs real games: the game
 shoots a simulated player until it dies, with the pistol, the plasma rifle, the
-plasma pistol (tapped and charged), the rocket launcher and the needler; simulated players shoot the game's player (shield down, recharge,
+plasma pistol (tapped and charged), the rocket launcher, the needler and a melee
+blow; simulated players shoot the game's player (shield down, recharge,
 death, respawn); a bystander watches one simulated player kill another. Run it as `headless` above, with
 `--test combat_headless -- --test-threads=1`.
 

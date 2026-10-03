@@ -224,6 +224,10 @@ static const struct config_setting config_settings[] =
 	{ "large.autofire", _config_boolean, "false", "HALO_LARGE_AUTOFIRE", _environment_set_is_true, _platform_desktop,
 		"The large-scale mode's player aims at the nearest other player in the world\n"
 		"and holds the trigger down (for the automated tests' shooter)." },
+	{ "large.automelee", _config_boolean, "false", "HALO_LARGE_AUTOMELEE", _environment_set_is_true, _platform_desktop,
+		"The large-scale mode's player aims at the nearest other player in the world\n"
+		"and strikes a blow, over and over, instead of firing (for the automated\n"
+		"tests' melee)." },
 	{ "large.autofire_cycle", _config_real, "0.0", "HALO_LARGE_AUTOFIRE_CYCLE", _environment_value, _platform_desktop,
 		"With large.autofire, the trigger is held for this many ticks and let go for\n"
 		"one, over and over: a weapon that fires when the trigger is let go (the plasma\n"

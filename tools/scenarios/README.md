@@ -152,7 +152,7 @@ input 60 100 fire=1                  # the trigger is held
 - `target <x> <y> <z> <yaw>`: a unit with the multiplayer body's health and
   shields. Without it the target columns of the trace are zero.
 - Keys `fire` (1 while the trigger is held), `melee` (1 while the melee button
-  is held) and `part` (the target's material the shots are to hit, for the
+  is held; the blow is struck on its own and not again while it plays) and `part` (the target's material the shots are to hit, for the
   simulation: 0 head, 1 body; the default is 1). The engine's own hits land
   where its aim takes them (`pitch`).
 - Quantities (besides the walking ones): `rounds` (loaded and in reserve),
@@ -172,7 +172,13 @@ input 60 100 fire=1                  # the trigger is held
   `rocket_blast` (a rocket that flies for ticks and explodes: its damage falls
   with the distance of the target from the blast, and the launcher reloads) and
   `needler_burst` (a rate of fire that comes up, needles that stick to the target
-  and explode after their time, and seven stuck together exploding as one).
+  and explode after their time, and seven stuck together exploding as one),
+  and the melee blow: `melee_standing` (the blow lands on the tick the
+  first-person animation says, at a scale of 0 for a player who stands: the
+  damage's minimum), `melee_running` (at a run the scale is 1, and the engine's
+  blow has no lunge: the player runs on through it as the simulation walks) and
+  `melee_airborne` (a blow struck more than fifteen ticks into a jump has a
+  scale of 1.5).
 
 The part of the body a bullet hits in the engine depends on the frame's
 timing and the machine's load, and the damage it rolls is the engine's random
