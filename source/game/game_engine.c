@@ -5011,6 +5011,12 @@ boolean game_engine_should_end_game(
 {
 	boolean should_end_game = FALSE;
 
+	/* port: in the large-scale mode only the server ends the game (large_mode.c ends the
+	engine's when it does). The players the engine has are the ones near, a fraction of the
+	match's, and at times of one team only, which this would take for the match being over */
+	if (large_mode_active())
+		return FALSE;
+
 	if (game_engine && !multiple_teams_alive())
 		should_end_game = TRUE;
 

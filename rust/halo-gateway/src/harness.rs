@@ -713,13 +713,15 @@ pub fn analyze(crowd: &Crowd, truth: &Truth, window: Range<u32>, edges: &[f32]) 
         for (index, player) in crowd.players.iter().enumerate() {
             let me = player.id as usize;
             let receipt = player.receipt(tick);
-            expected += 1;
+            // (a player the match does not have in the world, one waiting to spawn, is sent nothing)
+            let in_world = at.positions[me].is_some();
+            expected += in_world as u64;
             match &receipt {
                 Some(receipt) => {
                     ages.push((receipt.first_at_us - at.stamped_us) as f64 / 1e3);
                     bytes[index] += receipt.wire_bytes as u64;
                 }
-                None => missed += 1,
+                None => missed += in_world as u64,
             }
             let Some(from) = at.positions[me] else { continue };
             for (other, position) in at.positions.iter().enumerate() {

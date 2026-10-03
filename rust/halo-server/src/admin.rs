@@ -71,6 +71,17 @@ impl Admin {
         }
     }
 
+    /// Run a SQL query on the database `name` as its owner (who can read the
+    /// private tables too); the answer as SpacetimeDB gives it, JSON.
+    pub fn sql(&self, name: &str, query: &str, token: &str) -> Result<String, String> {
+        let (status, body) =
+            self.request("POST", &format!("/v1/database/{name}/sql"), Some(token), query.as_bytes())?;
+        if status != 200 {
+            return Err(format!("sql on {name}: {status} {}", body.trim()));
+        }
+        Ok(body)
+    }
+
     /// The Prometheus metrics.
     pub fn metrics(&self) -> Result<String, String> {
         match self.request("GET", "/v1/metrics", None, &[])? {

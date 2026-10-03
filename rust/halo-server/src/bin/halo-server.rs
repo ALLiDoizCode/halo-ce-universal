@@ -63,8 +63,15 @@ fn run(config: Config) {
     let running = halo_server::start(config, maps, log).unwrap_or_else(|e| fail(&e));
     let running = Arc::new(running);
     {
-        let running = running.clone();
-        ctrlc::set_handler(move || running.request_stop()).unwrap_or_else(|e| fail(&format!("signal handler: {e}")));
+        // (a weak reference: the handler lives as long as the program, and must not stop
+        // the server from being taken apart and stopped below)
+        let running = Arc::downgrade(&running);
+        ctrlc::set_handler(move || {
+            if let Some(running) = running.upgrade() {
+                running.request_stop();
+            }
+        })
+        .unwrap_or_else(|e| fail(&format!("signal handler: {e}")));
     }
     running.wait();
     let running = Arc::try_unwrap(running).unwrap_or_else(|_| fail("the server is still referenced"));
