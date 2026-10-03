@@ -81,14 +81,14 @@ fn status() -> (u32, u32, u32, u32) {
 }
 
 /// What `halo_large_frame` and `halo_large_unit` hold now: the newest datagram
-/// tick, and each unit as (player, datagram tick, [x y z vx vy vz yaw pitch]).
-fn frame() -> (u32, Vec<(u32, u32, [f32; 8])>) {
+/// tick, and each unit as (player, datagram tick, [x y z vx vy vz yaw pitch flags]).
+fn frame() -> (u32, Vec<(u32, u32, [f32; 9])>) {
     let mut tick = 0u32;
     let count = unsafe { halo_large_frame(&mut tick) };
     let units = (0..count)
         .map(|i| {
             let (mut player, mut at) = (0u32, 0u32);
-            let mut out = [0f32; 8];
+            let mut out = [0f32; 9];
             assert_eq!(unsafe { halo_large_unit(i, &mut player, &mut at, out.as_mut_ptr()) }, 1);
             (player, at, out)
         })
@@ -244,8 +244,13 @@ fn the_librarys_input_moves_its_player_and_it_keeps_the_session_alive_alone() {
     assert!(start(&world));
     wait_for("the library never joined", || status().0 == 1);
     let start_row = world.rig.client.players()[&ME].clone();
-    let moved =
-        PlayerInput { player: ME, position: [start_row.x + 0.05, start_row.y, start_row.z], yaw: 1.25, pitch: -0.25 };
+    let moved = PlayerInput {
+        player: ME,
+        position: [start_row.x + 0.05, start_row.y, start_row.z],
+        yaw: 1.25,
+        pitch: -0.25,
+        flags: 0,
+    };
     world.rig.client.discard_ticks();
     let from = world.rig.client.next_tick(WAIT).unwrap().marker.tick;
     let until = Instant::now() + WAIT;

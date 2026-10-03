@@ -34,8 +34,14 @@ const SCN_STRUCTURE_BSP_REFERENCES: usize = 0x5A4;
 const GLOBALS_SIZE: usize = 0x1AC;
 const GLOBALS_MULTIPLAYER_INFORMATION: usize = 0x164;
 const GLOBALS_PLAYER_INFORMATION: usize = 0x170;
+const GLOBALS_FALLING_DAMAGE: usize = 0x188;
 const SZ_MULTIPLAYER_INFORMATION: usize = 0xA0;
 const SZ_PLAYER_INFORMATION: usize = 0xF4;
+// game_globals_falling_damage (0x98 bytes), the runtime values at its end
+const SZ_FALLING_DAMAGE: usize = 0x98;
+const FD_RUNTIME_MAXIMUM_FALLING_VELOCITY: usize = 0x8C;
+const FD_RUNTIME_MINIMUM_DAMAGE_VELOCITY: usize = 0x90;
+const FD_RUNTIME_MAXIMUM_DAMAGE_VELOCITY: usize = 0x94;
 /// game_globals_multiplayer_information: the player's unit, a tag reference
 const MPI_UNIT: usize = 0x10;
 // game_globals_player_information
@@ -52,9 +58,16 @@ const PI_AIRBORNE_ACCELERATION: usize = 0x54;
 const BIPED_SIZE: usize = 0x4F4;
 const BIPED_DOWNHILL_VELOCITY_SCALE: usize = 0x2F0 + 0x74;
 const BIPED_UPHILL_VELOCITY_SCALE: usize = 0x2F0 + 0x80;
+const BIPED_JUMP_VELOCITY: usize = 0x2F0 + 0xC4;
+const BIPED_MAXIMUM_SOFT_LANDING_TIME: usize = 0x2F0 + 0xE4;
+const BIPED_MAXIMUM_HARD_LANDING_TIME: usize = 0x2F0 + 0xE8;
+const BIPED_MINIMUM_SOFT_LANDING_VELOCITY: usize = 0x2F0 + 0xEC;
+const BIPED_MINIMUM_HARD_LANDING_VELOCITY: usize = 0x2F0 + 0xF0;
+const BIPED_MAXIMUM_HARD_LANDING_VELOCITY: usize = 0x2F0 + 0xF4;
 const BIPED_COLLISION_HEIGHT_STANDING: usize = 0x2F0 + 0x134;
 const BIPED_COLLISION_HEIGHT_CROUCHING: usize = 0x2F0 + 0x138;
 const BIPED_COLLISION_RADIUS: usize = 0x2F0 + 0x13C;
+const BIPED_RUNTIME_CROUCH_TRANSITION_VELOCITY: usize = 0x2F0 + 0x1DC;
 const BIPED_RUNTIME_MINIMUM_NORMAL_K: usize = 0x2F0 + 0x1E0;
 const BIPED_RUNTIME_DOWNHILL_K0: usize = 0x2F0 + 0x1E4;
 const BIPED_RUNTIME_DOWNHILL_K1: usize = 0x2F0 + 0x1E8;
@@ -471,6 +484,11 @@ fn parse_movement(raw: &Raw, space: &Space, tags: &[TagInstance]) -> Result<Move
         return malformed("the globals tag has no player information");
     }
 
+    let (n, fd) = space.block(raw, g + GLOBALS_FALLING_DAMAGE, SZ_FALLING_DAMAGE)?;
+    if n == 0 {
+        return malformed("the globals tag has no falling damage");
+    }
+
     let movement = Movement {
         run_forward_speed: raw.f32(pi + PI_RUN_FORWARD_SPEED)?,
         run_backward_speed: raw.f32(pi + PI_RUN_BACKWARD_SPEED)?,
@@ -491,6 +509,16 @@ fn parse_movement(raw: &Raw, space: &Space, tags: &[TagInstance]) -> Result<Move
         uphill_k0: raw.f32(b + BIPED_RUNTIME_UPHILL_K0)?,
         uphill_k1: raw.f32(b + BIPED_RUNTIME_UPHILL_K1)?,
         uphill_velocity_scale: raw.f32(b + BIPED_UPHILL_VELOCITY_SCALE)?,
+        jump_velocity: raw.f32(b + BIPED_JUMP_VELOCITY)?,
+        crouch_transition_velocity: raw.f32(b + BIPED_RUNTIME_CROUCH_TRANSITION_VELOCITY)?,
+        maximum_soft_landing_time: raw.f32(b + BIPED_MAXIMUM_SOFT_LANDING_TIME)?,
+        maximum_hard_landing_time: raw.f32(b + BIPED_MAXIMUM_HARD_LANDING_TIME)?,
+        minimum_soft_landing_velocity: raw.f32(b + BIPED_MINIMUM_SOFT_LANDING_VELOCITY)?,
+        minimum_hard_landing_velocity: raw.f32(b + BIPED_MINIMUM_HARD_LANDING_VELOCITY)?,
+        maximum_hard_landing_velocity: raw.f32(b + BIPED_MAXIMUM_HARD_LANDING_VELOCITY)?,
+        minimum_damage_velocity: raw.f32(fd + FD_RUNTIME_MINIMUM_DAMAGE_VELOCITY)?,
+        maximum_damage_velocity: raw.f32(fd + FD_RUNTIME_MAXIMUM_DAMAGE_VELOCITY)?,
+        maximum_falling_velocity: raw.f32(fd + FD_RUNTIME_MAXIMUM_FALLING_VELOCITY)?,
     };
     if !movement.is_sane() {
         return malformed(format!("the movement values of the tags are not usable: {movement:?}"));

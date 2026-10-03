@@ -288,7 +288,7 @@ struct Shared {
     ack: Ack,
     last_snapshot: Option<Instant>,
     /// The latest Input, and when it was sent: what the keepalive repeats.
-    last_input: Option<([f32; 3], f32, f32)>,
+    last_input: Option<([f32; 3], f32, f32, u8)>,
     last_input_at: Option<Instant>,
     counters: Counters,
     slow: Slow,
@@ -328,11 +328,11 @@ impl Inner {
     }
 
     /// Send an Input saying where the player is, with what has been received.
-    fn send_input(&self, shared: &mut Shared, player: u16, position: [f32; 3], yaw: f32, pitch: f32) {
+    fn send_input(&self, shared: &mut Shared, player: u16, position: [f32; 3], yaw: f32, pitch: f32, flags: u8) {
         let seq = self.seq.fetch_add(1, Relaxed);
-        let input = PlayerInput { player, position, yaw, pitch };
+        let input = PlayerInput { player, position, yaw, pitch, flags };
         self.send(&ClientMessage::Input { seq, input, ack: shared.ack });
-        shared.last_input = Some((position, yaw, pitch));
+        shared.last_input = Some((position, yaw, pitch, flags));
         shared.last_input_at = Some(Instant::now());
         shared.counters.inputs_sent += 1;
     }
@@ -490,11 +490,13 @@ impl Session {
     }
 
     /// Tell the gateway where this player is now; each call is the next
-    /// input. Not sent (false) before the gateway has welcomed the player.
-    pub fn send_input(&self, position: [f32; 3], yaw: f32, pitch: f32) -> bool {
+    /// input. `flags` is what the player says of themselves
+    /// (`halo_sim::FLAG_CROUCHED`). Not sent (false) before the gateway has
+    /// welcomed the player.
+    pub fn send_input(&self, position: [f32; 3], yaw: f32, pitch: f32, flags: u8) -> bool {
         let mut shared = self.inner.shared();
         let (Some(player), Some(_)) = (shared.player, shared.welcome) else { return false };
-        self.inner.send_input(&mut shared, player, position, yaw, pitch);
+        self.inner.send_input(&mut shared, player, position, yaw, pitch, flags);
         true
     }
 }
@@ -601,9 +603,9 @@ fn maintain(inner: &Inner, last_join: &mut Instant) {
             shared.counters.rejoins += 1;
         } else {
             if shared.last_input_at.is_none_or(|at| at.elapsed() >= KEEPALIVE) {
-                let at = shared.last_input.or(shared.slow.local.map(|l| ([l[0], l[1], l[2]], l[3], l[4])));
-                if let Some((position, yaw, pitch)) = at {
-                    inner.send_input(&mut shared, player, position, yaw, pitch);
+                let at = shared.last_input.or(shared.slow.local.map(|l| ([l[0], l[1], l[2]], l[3], l[4], 0)));
+                if let Some((position, yaw, pitch, flags)) = at {
+                    inner.send_input(&mut shared, player, position, yaw, pitch, flags);
                 }
             }
             return;

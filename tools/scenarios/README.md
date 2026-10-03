@@ -74,7 +74,6 @@ cargo run --release -p halo-scenario -- ../tools/scenarios/walk_flat.scn --maps 
 python ../tools/scenario_harness.py compare engine.tsv rust.tsv --scenario ../tools/scenarios/walk_flat.scn
 ```
 
-A scenario that jumps or crouches is refused until those are simulated.
 The simulation has the map's collision BSP alone: a scenario that walks the
 engine's player into scenery or another object (a rock, a crate) does not
 match, as the engine stops there and the simulation does not, so scenarios

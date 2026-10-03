@@ -76,6 +76,7 @@ const T_GLOBALS: usize = 0x1000;
 const T_PLAYER_INFORMATION: usize = 0x11C0;
 const T_MULTIPLAYER_INFORMATION: usize = 0x12C0;
 const T_BIPED: usize = 0x1380;
+const T_FALLING_DAMAGE: usize = 0x1900;
 
 /// Offsets within the structure BSP data.
 const B_SBSP: usize = 0x40;
@@ -172,6 +173,8 @@ fn build() -> Image {
     let g = t + T_GLOBALS;
     m.tag_block(g + 0x164, 1, T_MULTIPLAYER_INFORMATION);
     m.tag_block(g + 0x170, 1, T_PLAYER_INFORMATION);
+    m.tag_block(g + 0x188, 1, T_FALLING_DAMAGE);
+    m.f32s(t + T_FALLING_DAMAGE + 0x8C, &[0.35, 0.125, 0.3125]); // maximum falling, minimum damage, maximum damage
     m.tag_ref(t + T_MULTIPLAYER_INFORMATION + 0x10, 5);
     let pi = t + T_PLAYER_INFORMATION;
     m.f32s(pi + 0x34, &[2.5, 2.0, 1.75, 0.5, 1.0, 0.75, 0.625, 0.25, 0.04]);
@@ -180,6 +183,9 @@ fn build() -> Image {
     m.f32(bd + 0x80, 0.5); // uphill velocity scale
     m.f32s(bd + 0x134, &[0.75, 0.5, 0.25]); // collision height standing, crouching, radius
     m.f32s(bd + 0x1E0, &[0.7, -0.3, -0.7, 0.3, 0.7]);
+    m.f32(bd + 0xC4, 0.0625); // jump velocity
+    m.f32s(bd + 0xE4, &[0.25, 0.75, 1.5, 3.0, 9.0]); // landing times, landing velocities
+    m.f32(bd + 0x1DC, 0.125); // crouch transition velocity
 
     let b = HEADER + TAG_DATA_SIZE; // structure bsp data, which the scenario locates
     let r = t + T_BSP_REFS;
@@ -292,6 +298,21 @@ fn the_players_movement_values_are_read_from_the_globals_and_the_multiplayer_bip
     assert_eq!(
         (m.minimum_normal_k, m.downhill_k0, m.downhill_k1, m.uphill_k0, m.uphill_k1),
         (0.7, -0.3, -0.7, 0.3, 0.7)
+    );
+    assert_eq!((m.jump_velocity, m.crouch_transition_velocity), (0.0625, 0.125));
+    assert_eq!(
+        (
+            m.maximum_soft_landing_time,
+            m.maximum_hard_landing_time,
+            m.minimum_soft_landing_velocity,
+            m.minimum_hard_landing_velocity,
+            m.maximum_hard_landing_velocity
+        ),
+        (0.25, 0.75, 1.5, 3.0, 9.0)
+    );
+    assert_eq!(
+        (m.maximum_falling_velocity, m.minimum_damage_velocity, m.maximum_damage_velocity),
+        (0.35, 0.125, 0.3125)
     );
 }
 

@@ -10,12 +10,12 @@ fn max_step() -> f32 {
 
 fn player_at(position: [f32; 3]) -> MemoryStore {
     let mut store = MemoryStore::new();
-    store.set_player(Player { id: 7, position, yaw: 1.0, pitch: 0.5 });
+    store.set_player(Player::new(7, position, 1.0, 0.5));
     store
 }
 
 fn report(store: &mut MemoryStore, map: &MapData, position: [f32; 3]) -> Event {
-    let input = PlayerInput { player: 7, position, yaw: 2.0, pitch: -0.25 };
+    let input = PlayerInput { player: 7, position, yaw: 2.0, pitch: -0.25, flags: 0 };
     let events = step(store, &[input], map, &mut Rng::seeded(0));
     assert_eq!(events.len(), 1);
     events[0]
@@ -70,12 +70,148 @@ fn a_move_through_the_floor_is_rejected_and_the_player_stays() {
     assert_eq!(store.player(7).unwrap(), before);
 }
 
+/// A player who jumps on flat ground at tick `at`, as the movement of a
+/// legitimate client makes it: the positions it reports, a tick each.
+fn jump_reports(ticks: usize) -> Vec<[f32; 3]> {
+    use halo_sim::walk::{walk, Body, Controls};
+    let map = flat_floor_map();
+    let mut body = Body::at([0.0, 0.0, 0.0]);
+    let mut reports = Vec::new();
+    for tick in 0..ticks {
+        let controls = Controls { jump: tick == 10, ..Controls::standing(0.0) };
+        walk(&map, &mut body, &controls);
+        reports.push(body.position);
+    }
+    reports
+}
+
+#[test]
+fn a_jump_is_accepted_tick_by_tick_from_leaving_the_ground_to_landing() {
+    let map = flat_floor_map();
+    let reports = jump_reports(100);
+    assert!(reports.iter().any(|p| p[2] > 0.5), "the jump left the ground");
+    let mut store = player_at(reports[0]);
+    for (tick, position) in reports.iter().enumerate() {
+        assert_eq!(report(&mut store, &map, *position), Event::MoveAccepted { player: 7 }, "tick {tick}");
+    }
+    let player = store.player(7).unwrap();
+    assert_eq!((player.flags & halo_sim::FLAG_AIRBORNE, player.air_ticks), (0, 0), "landed");
+}
+
+#[test]
+fn a_player_in_the_air_is_marked_airborne_for_the_others_to_show() {
+    let map = flat_floor_map();
+    let reports = jump_reports(100);
+    let mut store = player_at(reports[0]);
+    let apex = reports.iter().enumerate().max_by(|a, b| a.1[2].total_cmp(&b.1[2])).unwrap().0;
+    for position in &reports[..=apex] {
+        report(&mut store, &map, *position);
+    }
+    assert_eq!(store.player(7).unwrap().flags & halo_sim::FLAG_AIRBORNE, halo_sim::FLAG_AIRBORNE);
+}
+
+/// A player who has been in the air one tick, three world units above the floor
+/// (as a player who has just walked off a high ledge is).
+fn falling_player() -> MemoryStore {
+    let mut store = MemoryStore::new();
+    store.set_player(Player {
+        flags: halo_sim::FLAG_AIRBORNE,
+        air_ticks: 1,
+        air_z: 3.0,
+        ..Player::new(7, [0.0, 0.0, 3.0], 1.0, 0.5)
+    });
+    store
+}
+
+#[test]
+fn a_fall_from_a_ledge_is_accepted_tick_by_tick_to_the_ground() {
+    use halo_sim::walk::{walk, Body, Controls};
+    let map = flat_floor_map();
+    let mut store = falling_player();
+    let mut body = Body::at([0.0, 0.0, 3.0]);
+    let mut ticks = 0;
+    while ticks < 200 {
+        walk(&map, &mut body, &Controls::standing(0.0));
+        assert_eq!(report(&mut store, &map, body.position), Event::MoveAccepted { player: 7 }, "tick {ticks}");
+        ticks += 1;
+        if !body.airborne {
+            break;
+        }
+    }
+    assert!(!body.airborne, "the fall ended");
+    assert_eq!(store.player(7).unwrap().air_ticks, 0, "the player is on the ground");
+}
+
+#[test]
+fn a_player_cannot_hang_in_the_air() {
+    let map = flat_floor_map();
+    let mut store = falling_player();
+    let mut refused_at = None;
+    for tick in 0..80 {
+        if report(&mut store, &map, [0.0, 0.0, 3.0]) == rejected(RejectReason::OffGround) {
+            refused_at = Some(tick);
+            break;
+        }
+    }
+    // a jump can hang for a while (it is up for most of a second); not for ever
+    assert!(refused_at.is_some_and(|t| (10..60).contains(&t)), "hanging is refused after a while: {refused_at:?}");
+}
+
+#[test]
+fn a_player_cannot_climb_in_the_air() {
+    let map = flat_floor_map();
+    let mut store = falling_player();
+    let mut z = 3.0;
+    let mut refused = false;
+    for _ in 0..30 {
+        z += 0.06;
+        refused |= report(&mut store, &map, [0.0, 0.0, z]) == rejected(RejectReason::OffGround);
+    }
+    assert!(refused, "a steady climb in the air is refused");
+}
+
+#[test]
+fn a_player_cannot_glide_down_slower_than_a_fall() {
+    let map = flat_floor_map();
+    let mut store = falling_player();
+    let mut z = 3.0;
+    let mut refused_at = None;
+    for tick in 0..100 {
+        z -= 0.01;
+        if report(&mut store, &map, [0.0, 0.0, z]) == rejected(RejectReason::OffGround) {
+            refused_at = Some(tick);
+            break;
+        }
+    }
+    assert!(refused_at.is_some_and(|t| t < 70), "a slow descent is refused once a jump would be down: {refused_at:?}");
+}
+
+#[test]
+fn two_ticks_of_a_jump_in_one_report_are_accepted_when_the_gateway_hands_the_server_the_newest_of_two_inputs() {
+    use halo_sim::walk::{walk, Body, Controls};
+    // the player jumps while running, and reports every second tick: each report is two
+    // ticks of a run and a jump in the one tick the store counts
+    let map = flat_floor_map();
+    let mut body = Body::at([0.0, 0.0, 0.0]);
+    let mut store = player_at([0.0, 0.0, 0.0]);
+    for tick in 0..120 {
+        let controls =
+            Controls { forward: 0.9, strafe: 0.0, yaw: 0.0, pitch: 0.0, jump: tick % 40 == 20, crouch: false };
+        walk(&map, &mut body, &controls);
+        if tick % 2 == 1 {
+            assert_eq!(report(&mut store, &map, body.position), Event::MoveAccepted { player: 7 }, "tick {tick}");
+        }
+    }
+}
+
 #[test]
 fn a_move_that_ends_well_above_the_ground_is_rejected_and_the_player_stays() {
     let map = flat_floor_map();
     let mut store = player_at([0.0, 0.0, 1.0]);
     let before = store.player(7).unwrap();
-    assert_eq!(report(&mut store, &map, [0.0, 0.0, 1.1]), rejected(RejectReason::OffGround));
+    // (a player who was never on the ground, floating: the slack of a first
+    // tick in the air does not stretch to a climb of this size at once)
+    assert_eq!(report(&mut store, &map, [0.0, 0.0, 1.5]), rejected(RejectReason::OffGround));
     assert_eq!(store.player(7).unwrap(), before);
 }
 
@@ -86,7 +222,7 @@ fn reported_numbers_that_are_not_finite_are_rejected() {
     for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
         assert_eq!(report(&mut store, &map, [bad, 0.0, 0.0]), rejected(RejectReason::NotFinite));
     }
-    let input = PlayerInput { player: 7, position: [0.0; 3], yaw: f32::NAN, pitch: 0.0 };
+    let input = PlayerInput { player: 7, position: [0.0; 3], yaw: f32::NAN, pitch: 0.0, flags: 0 };
     let events = step(&mut store, &[input], &map, &mut Rng::seeded(0));
     assert_eq!(events, [rejected(RejectReason::NotFinite)]);
     assert_eq!(store.player(7).unwrap().yaw, 1.0);
@@ -96,7 +232,7 @@ fn reported_numbers_that_are_not_finite_are_rejected() {
 fn an_input_for_a_player_who_does_not_exist_is_rejected() {
     let map = flat_floor_map();
     let mut store = MemoryStore::new();
-    let input = PlayerInput { player: 9, position: [0.0; 3], yaw: 0.0, pitch: 0.0 };
+    let input = PlayerInput { player: 9, position: [0.0; 3], yaw: 0.0, pitch: 0.0, flags: 0 };
     let events = step(&mut store, &[input], &map, &mut Rng::seeded(0));
     assert_eq!(events, [Event::MoveRejected { player: 9, reason: RejectReason::UnknownPlayer }]);
     assert!(store.player_ids().is_empty());
@@ -107,9 +243,9 @@ fn each_player_in_a_batch_is_judged_alone_and_events_follow_input_order() {
     let map = flat_floor_map();
     let mut store = MemoryStore::new();
     for id in [1, 2, 3] {
-        store.set_player(Player { id, position: [id as f32, 0.0, 0.0], yaw: 0.0, pitch: 0.0 });
+        store.set_player(Player::new(id, [id as f32, 0.0, 0.0], 0.0, 0.0));
     }
-    let input = |player, x| PlayerInput { player, position: [x, 0.0, 0.0], yaw: 0.0, pitch: 0.0 };
+    let input = |player, x| PlayerInput { player, position: [x, 0.0, 0.0], yaw: 0.0, pitch: 0.0, flags: 0 };
     let events = step(&mut store, &[input(3, 3.05), input(1, 99.0), input(2, 2.05)], &map, &mut Rng::seeded(0));
     assert_eq!(
         events,
@@ -146,7 +282,8 @@ fn the_same_inputs_give_the_same_state() {
         for _ in 0..200 {
             let (dx, dy) = ((rng.next_f32() - 0.5) * 0.3, (rng.next_f32() - 0.5) * 0.3);
             let p = store.player(7).unwrap().position;
-            let input = PlayerInput { player: 7, position: [p[0] + dx, p[1] + dy, 0.0], yaw: 0.0, pitch: 0.0 };
+            let input =
+                PlayerInput { player: 7, position: [p[0] + dx, p[1] + dy, 0.0], yaw: 0.0, pitch: 0.0, flags: 0 };
             events.extend(step(&mut store, &[input], &map, &mut rng));
         }
         (halo_sim::snapshot(&store), events)
@@ -158,7 +295,7 @@ fn the_same_inputs_give_the_same_state() {
 fn only_a_players_first_input_of_a_tick_counts() {
     let map = flat_floor_map();
     let mut store = player_at([0.0, 0.0, 0.0]);
-    let at = |x| PlayerInput { player: 7, position: [x, 0.0, 0.0], yaw: 0.0, pitch: 0.0 };
+    let at = |x| PlayerInput { player: 7, position: [x, 0.0, 0.0], yaw: 0.0, pitch: 0.0, flags: 0 };
     let (a, b) = (max_step() * 0.9, max_step() * 1.8);
     let events = step(&mut store, &[at(a), at(b)], &map, &mut Rng::seeded(0));
     assert_eq!(events, [Event::MoveAccepted { player: 7 }, rejected(RejectReason::DuplicateInput)]);
@@ -193,7 +330,7 @@ impl Store for Elapsed {
 fn after_ticks(ticks: u32, position: [f32; 3]) -> Event {
     let map = flat_floor_map();
     let mut store = Elapsed { inner: player_at([0.0, 0.0, 0.0]), ticks };
-    let input = PlayerInput { player: 7, position, yaw: 2.0, pitch: -0.25 };
+    let input = PlayerInput { player: 7, position, yaw: 2.0, pitch: -0.25, flags: 0 };
     step(&mut store, &[input], &map, &mut Rng::seeded(0))[0]
 }
 
@@ -231,7 +368,8 @@ fn reporting_rarely_never_lets_a_player_outrun_the_bound_over_time() {
             store.ticks = every;
             let x = store.player(7).unwrap().position[0];
             let allowed = max_step() * every.min(halo_sim::MAX_CATCH_UP_TICKS) as f32;
-            let input = PlayerInput { player: 7, position: [x + allowed * 0.999, 0.0, 0.0], yaw: 0.0, pitch: 0.0 };
+            let input =
+                PlayerInput { player: 7, position: [x + allowed * 0.999, 0.0, 0.0], yaw: 0.0, pitch: 0.0, flags: 0 };
             assert_eq!(
                 step(&mut store, &[input], &map, &mut Rng::seeded(t as u64)),
                 [Event::MoveAccepted { player: 7 }]

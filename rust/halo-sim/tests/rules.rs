@@ -151,7 +151,7 @@ fn enemies_are_not_spawned_near_each_other_when_a_free_start_is_away() {
     let far = start_at(40.0, 0.0, -1);
     let mut m = Match::new(with_starts(flat_floor_map(), &[near, far]), Rules::slayer());
     enter_placed(&mut m.game, 0, 0, [0.0, 0.0, 0.01], 0.0);
-    m.store.set_player(halo_sim::Player { id: 0, position: [0.0, 0.0, 0.01], yaw: 0.0, pitch: 0.0 });
+    m.store.set_player(halo_sim::Player::new(0, [0.0, 0.0, 0.01], 0.0, 0.0));
     for seed in 0..20 {
         let mut rng = Rng::seeded(seed);
         let mut store = m.store.clone();
@@ -170,7 +170,7 @@ fn in_a_team_game_a_player_is_spawned_where_their_team_is() {
     let mut m = Match::new(with_starts(flat_floor_map(), &[by_friend, by_enemy]), Rules::team_slayer());
     for (id, team, x) in [(0u16, 0u8, -33.0f32), (1, 0, -27.0), (2, 1, 34.0)] {
         enter_placed(&mut m.game, id, team, [x, 0.0, 0.01], 0.0);
-        m.store.set_player(halo_sim::Player { id, position: [x, 0.0, 0.01], yaw: 0.0, pitch: 0.0 });
+        m.store.set_player(halo_sim::Player::new(id, [x, 0.0, 0.01], 0.0, 0.0));
     }
     let mut at_friend = 0;
     for seed in 0..40 {
@@ -226,7 +226,7 @@ fn a_spawned_player_can_be_moved_by_the_step_from_where_they_were_put() {
     m.join(2, 0);
     m.run(1);
     let at = m.store.player(2).unwrap().position;
-    let input = PlayerInput { player: 2, position: [at[0] + 0.05, at[1], at[2]], yaw: 0.5, pitch: 0.0 };
+    let input = PlayerInput { player: 2, position: [at[0] + 0.05, at[1], at[2]], yaw: 0.5, pitch: 0.0, flags: 0 };
     let events = {
         m.tick += 1;
         play(&mut m.store, &mut m.game, &m.map, &mut m.rng, m.tick, &[], &[input]).moves
@@ -497,7 +497,7 @@ fn a_dead_player_does_not_move() {
     let at = m.store.player(1).unwrap().position;
     m.tick(&[kill(1, 0)], &[]);
     m.tick += 1;
-    let input = PlayerInput { player: 1, position: [at[0] + 0.05, at[1], at[2]], yaw: 1.0, pitch: 0.0 };
+    let input = PlayerInput { player: 1, position: [at[0] + 0.05, at[1], at[2]], yaw: 1.0, pitch: 0.0, flags: 0 };
     let outcome = play(&mut m.store, &mut m.game, &m.map, &mut m.rng, m.tick, &[], &[input]);
     assert!(outcome.moves.is_empty(), "the input of a dead player is dropped: {:?}", outcome.moves);
     assert_eq!(m.store.player(1).unwrap().position, at);
@@ -634,7 +634,7 @@ fn the_clock_starts_when_the_match_begins() {
 #[test]
 fn a_player_placed_by_the_caller_is_alive_and_can_die_and_respawn() {
     let mut m = Match::new(floor_with(3), Rules::slayer());
-    m.store.set_player(halo_sim::Player { id: 4, position: [1.0, 2.0, 0.01], yaw: 0.0, pitch: 0.0 });
+    m.store.set_player(halo_sim::Player::new(4, [1.0, 2.0, 0.01], 0.0, 0.0));
     assert!(enter_placed(&mut m.game, 4, 1, [1.0, 2.0, 0.01], 0.0));
     assert!(!enter_placed(&mut m.game, 4, 1, [1.0, 2.0, 0.01], 0.0), "once");
     assert!(m.alive(4));

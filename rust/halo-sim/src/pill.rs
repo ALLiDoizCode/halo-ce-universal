@@ -556,14 +556,27 @@ pub struct Footing {
     /// How far the pill's base sphere is inside what it should stay out of:
     /// 0 for a pill the engine's movement could have put there.
     pub penetration: f32,
-    /// Something a player may stand on is under the pill, within `drop`.
+    /// Something is under the pill, within `drop`, that is not an overhang
+    /// (a wall counts: the engine keeps a player on what they moved along).
     pub supported: bool,
+    /// Something a player stands on is under the pill, within `drop`: ground
+    /// the tags' slope limit allows, or a climbable surface.
+    pub standing: bool,
 }
 
 /// Judge a pill whose base sphere's centre is at `base`: how deep it is in
 /// the map, and whether it stands on something (touching a surface that is
-/// not an overhang, or within `drop` of one).
-pub(crate) fn footing(bsp: &CollisionBsp, base: Vec3, height: f32, radius: f32, drop: f32) -> Footing {
+/// not an overhang, or within `drop` of one); and whether it is on ground
+/// a player stands on, with `minimum_normal_k` the least vertical part of its
+/// normal that is (the tags').
+pub(crate) fn footing(
+    bsp: &CollisionBsp,
+    base: Vec3,
+    height: f32,
+    radius: f32,
+    drop: f32,
+    minimum_normal_k: f32,
+) -> Footing {
     let center = [base[0], base[1], base[2] + height * 0.5];
     let features = features_in_sphere(bsp, center, height * 0.5 + radius + drop, height, radius);
     // Anything that is not an overhang holds a player up as far as validating
@@ -577,8 +590,12 @@ pub(crate) fn footing(bsp: &CollisionBsp, base: Vec3, height: f32, radius: f32, 
     // inside it as often as a hair outside)
     let penetration = features.inside(&base, 0.0).iter().fold(0.0f32, |deepest, (depth, _, _)| deepest.max(*depth));
     // standing on something is being within `drop` of it
-    let supported = features.inside(&base, drop).iter().any(|(_, plane, origin)| walkable(plane, origin.flags));
-    Footing { penetration, supported }
+    let near = features.inside(&base, drop);
+    let supported = near.iter().any(|(_, plane, origin)| walkable(plane, origin.flags));
+    let standing = near.iter().any(|(_, plane, origin)| {
+        origin.flags & halo_map::collision::SURFACE_CLIMBABLE != 0 || plane.n[2] >= minimum_normal_k
+    });
+    Footing { penetration, supported, standing }
 }
 
 /// collision_get_features_in_sphere, for the structure BSP alone: what the

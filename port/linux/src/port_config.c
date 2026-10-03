@@ -262,8 +262,9 @@ static const struct config_setting config_settings[] =
 	{ "debug.test_input", _config_string, "\"\"", "HALO_TEST_INPUT", _environment_value, _platform_all,
 		"\"bot:<seed>\" plays controller 1 with a scripted pattern (automated\n"
 		"network tests); \"look:<seed>\" stands still, only turning and looking\n"
-		"up and down; \"walk:<seed>\" only walks, strafes and turns; empty for\n"
-		"none." },
+		"up and down, \"scan:<seed>\" only turning, level; \"walk:<seed>\" only walks,\n"
+		"strafes and turns; \"hop:<seed>\" does and also jumps and crouches; empty\n"
+		"for none." },
 	{ "debug.scenario", _config_string, "\"\"", "HALO_SCENARIO", _environment_value, _platform_all,
 		"A scenario file (tools/scenarios/): the comparison harness plays it with\n"
 		"the first player of a network test game alone, and writes the trace to\n"

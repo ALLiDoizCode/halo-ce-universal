@@ -34,11 +34,31 @@ pub struct Movement {
     pub uphill_k0: f32,
     pub uphill_k1: f32,
     pub uphill_velocity_scale: f32,
+    /// The upward speed a jump gives, world units a *tick* (the tag's own
+    /// unit: the engine adds it to the velocity as it is).
+    pub jump_velocity: f32,
+    /// How fast the crouch changes (the cache's runtime value, per tick: the
+    /// part of the way between standing and crouching a tick covers).
+    pub crouch_transition_velocity: f32,
+    /// Landing: the longest the soft and the hard landing last, seconds; the
+    /// speeds a second at which a landing is soft and at which it is hard,
+    /// and the speed at which the hard landing lasts the longest.
+    pub maximum_soft_landing_time: f32,
+    pub maximum_hard_landing_time: f32,
+    pub minimum_soft_landing_velocity: f32,
+    pub minimum_hard_landing_velocity: f32,
+    pub maximum_hard_landing_velocity: f32,
+    // the globals tag, falling damage (the cache's runtime values, world units a tick)
+    /// A landing faster than this hurts, and one at `maximum_damage_velocity` hurts the most.
+    pub minimum_damage_velocity: f32,
+    pub maximum_damage_velocity: f32,
+    /// Falling faster than this, hurt or not, is the fall that kills.
+    pub maximum_falling_velocity: f32,
 }
 
 impl Movement {
     /// How many numbers there are, for [`Movement::to_array`].
-    pub const COUNT: usize = 19;
+    pub const COUNT: usize = 29;
 
     pub fn to_array(&self) -> [f32; Self::COUNT] {
         [
@@ -61,6 +81,16 @@ impl Movement {
             self.uphill_k0,
             self.uphill_k1,
             self.uphill_velocity_scale,
+            self.jump_velocity,
+            self.crouch_transition_velocity,
+            self.maximum_soft_landing_time,
+            self.maximum_hard_landing_time,
+            self.minimum_soft_landing_velocity,
+            self.minimum_hard_landing_velocity,
+            self.maximum_hard_landing_velocity,
+            self.minimum_damage_velocity,
+            self.maximum_damage_velocity,
+            self.maximum_falling_velocity,
         ]
     }
 
@@ -85,6 +115,16 @@ impl Movement {
             uphill_k0: a[16],
             uphill_k1: a[17],
             uphill_velocity_scale: a[18],
+            jump_velocity: a[19],
+            crouch_transition_velocity: a[20],
+            maximum_soft_landing_time: a[21],
+            maximum_hard_landing_time: a[22],
+            minimum_soft_landing_velocity: a[23],
+            minimum_hard_landing_velocity: a[24],
+            maximum_hard_landing_velocity: a[25],
+            minimum_damage_velocity: a[26],
+            maximum_damage_velocity: a[27],
+            maximum_falling_velocity: a[28],
         }
     }
 
@@ -94,6 +134,7 @@ impl Movement {
         let a = self.to_array();
         a.iter().all(|v| v.is_finite())
             && a[..12].iter().all(|v| *v >= 0.0)
+            && a[19..].iter().all(|v| *v >= 0.0)
             && self.collision_radius > 0.0
             && self.collision_height_standing >= 2.0 * self.collision_radius
     }

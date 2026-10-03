@@ -143,6 +143,17 @@ pub struct PlayerRow {
     last_reject: u8,
     /// The tick of the latest rejection.
     last_reject_tick: u64,
+    /// How the others are to show the player: `halo_sim::FLAG_AIRBORNE` (the
+    /// server's judgement, from the moves it accepted) and
+    /// `halo_sim::FLAG_CROUCHED` (the player's own report). The gateway sends
+    /// it as the flags of the player's packed state.
+    flags: u8,
+    /// Where the player is in the air, which the airborne rule of the
+    /// validation measures the next move against (`halo_sim::Player`'s).
+    air_ticks: u32,
+    air_z: f32,
+    free_ticks: u32,
+    free_z: f32,
 }
 
 pub const REJECT_NONE: u8 = 0;
@@ -445,7 +456,14 @@ fn require_gateway(ctx: &ReducerContext) -> Result<(), String> {
 }
 
 fn to_player(row: &PlayerRow) -> Player {
-    Player { id: row.id, position: [row.x, row.y, row.z], yaw: row.yaw, pitch: row.pitch }
+    Player {
+        flags: row.flags,
+        air_ticks: row.air_ticks,
+        air_z: row.air_z,
+        free_ticks: row.free_ticks,
+        free_z: row.free_z,
+        ..Player::new(row.id, [row.x, row.y, row.z], row.yaw, row.pitch)
+    }
 }
 
 /// Longest name a player has: the engine's name field.
@@ -493,7 +511,20 @@ impl Store for TableStore<'_> {
     fn set_player(&mut self, p: Player) {
         let table = self.ctx.db.player();
         let (x, y, z) = (p.position[0], p.position[1], p.position[2]);
-        let moved = |row: PlayerRow| PlayerRow { x, y, z, yaw: p.yaw, pitch: p.pitch, updated_tick: self.tick, ..row };
+        let moved = |row: PlayerRow| PlayerRow {
+            x,
+            y,
+            z,
+            yaw: p.yaw,
+            pitch: p.pitch,
+            updated_tick: self.tick,
+            flags: p.flags,
+            air_ticks: p.air_ticks,
+            air_z: p.air_z,
+            free_ticks: p.free_ticks,
+            free_z: p.free_z,
+            ..row
+        };
         match table.id().find(p.id) {
             Some(row) => {
                 table.id().update(moved(row));
@@ -510,6 +541,11 @@ impl Store for TableStore<'_> {
                     rejected_moves: 0,
                     last_reject: REJECT_NONE,
                     last_reject_tick: 0,
+                    flags: p.flags,
+                    air_ticks: p.air_ticks,
+                    air_z: p.air_z,
+                    free_ticks: p.free_ticks,
+                    free_z: p.free_z,
                 };
                 table.insert(fresh);
             }
@@ -807,6 +843,11 @@ pub fn add_players(ctx: &ReducerContext, batch: Vec<u8>) -> Result<(), String> {
             rejected_moves: 0,
             last_reject: REJECT_NONE,
             last_reject_tick: 0,
+            flags: 0,
+            air_ticks: 0,
+            air_z: 0.0,
+            free_ticks: 0,
+            free_z: 0.0,
         });
     }
     Ok(())
@@ -889,6 +930,11 @@ pub fn join(ctx: &ReducerContext, udp_key: Vec<u8>) -> Result<(), String> {
             rejected_moves: 0,
             last_reject: REJECT_NONE,
             last_reject_tick: 0,
+            flags: 0,
+            air_ticks: 0,
+            air_z: 0.0,
+            free_ticks: 0,
+            free_z: 0.0,
         });
         add_to_roster(ctx, id, Some(ctx.sender()));
         rules::enter_placed(&mut TableGame { ctx }, id, roster_team(ctx, id), [x, y, z], spawn.yaw);
@@ -1184,16 +1230,17 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
     marker.tick += 1;
     marker.stamped_us = ctx.timestamp.to_micros_since_unix_epoch();
 
-    let mut inputs = Vec::new();
     let mut batches: Vec<InputBatch> = ctx.db.input_batch().iter().collect();
     batches.sort_unstable_by_key(|b| b.id);
+    let mut decoded = Vec::with_capacity(batches.len());
     for batch in batches {
         ctx.db.input_batch().id().delete(batch.id);
         match decode_inputs(&batch.data) {
-            Ok(mut decoded) => inputs.append(&mut decoded),
+            Ok(inputs) => decoded.push(inputs),
             Err(e) => log::warn!("dropped a batch of {} bytes", e.0),
         }
     }
+    let inputs = halo_sim::wire::collapse_batches(decoded);
 
     let mut deaths: Vec<PendingDeath> = ctx.db.pending_death().iter().collect();
     deaths.sort_unstable_by_key(|d| d.id);
@@ -1216,6 +1263,22 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
             let Event::MoveRejected { player, reason } = event else { continue };
             rejected += 1;
             if let Some(mut row) = ctx.db.player().id().find(player) {
+                // (for the operator's log: where the player is, where they said they were, and when they last moved)
+                if let Some(input) = inputs.iter().find(|i| i.player == player) {
+                    log::warn!(
+                        "rejected a move of player {player} ({reason:?}) at tick {}: from ({:.3} {:.3} {:.3}) to \
+                         ({:.3} {:.3} {:.3}), last moved at tick {}, {} ticks in the air",
+                        marker.tick,
+                        row.x,
+                        row.y,
+                        row.z,
+                        input.position[0],
+                        input.position[1],
+                        input.position[2],
+                        row.updated_tick,
+                        row.air_ticks
+                    );
+                }
                 row.rejected_moves += 1;
                 row.last_reject = reject_code(reason);
                 row.last_reject_tick = marker.tick;

@@ -1,8 +1,8 @@
 //! A player on foot: the engine's biped movement (`biped_update_moving` and
 //! `biped_update_physics` in `source/units/bipeds.c`) for a player who walks,
-//! runs, stops against walls, slides along them, climbs and descends slopes
-//! and falls off ledges. Jumping, crouching and the landing pause are not
-//! here yet.
+//! runs, stops against walls, slides along them, climbs and descends slopes,
+//! falls off ledges, jumps, lands (a hard landing holds the player still for a
+//! moment) and crouches.
 //!
 //! Every number is the map's tags' ([`halo_map::Movement`]); nothing is
 //! retuned. A tick moves the player's [`Body`] by what their [`Controls`] ask
@@ -36,11 +36,15 @@ pub struct Controls {
     pub yaw: f32,
     /// Where the player aims, radians, up positive.
     pub pitch: f32,
+    /// The jump button is held.
+    pub jump: bool,
+    /// The crouch button is held.
+    pub crouch: bool,
 }
 
 impl Controls {
     pub fn standing(yaw: f32) -> Controls {
-        Controls { forward: 0.0, strafe: 0.0, yaw, pitch: 0.0 }
+        Controls { forward: 0.0, strafe: 0.0, yaw, pitch: 0.0, jump: false, crouch: false }
     }
 }
 
@@ -61,9 +65,34 @@ pub struct Body {
     /// The collision BSP's surface the player stands on, or -1.
     pub support_surface: i32,
     /// How fast the last tick drove the player into the ground it came to,
-    /// in world units a tick; 0 when it did not land.
+    /// in world units a tick; 0 when it did not land. (What the falling
+    /// damage reads: [`halo_map::Movement::minimum_damage_velocity`].)
     pub landing_velocity: f32,
+    /// How far down into the crouch the player is, 0 (standing) to 1: it
+    /// moves by [`halo_map::Movement::crouch_transition_velocity`] a tick
+    /// towards where the player's stance is.
+    pub crouch: f32,
+    /// The player's stance, the crouch the animation holds from the end of
+    /// the last tick: the crouch button was held, or there was no room to
+    /// stand. (The `crouch` follows it a tick later.)
+    pub crouching: bool,
+    /// How far down the pill the last tick moved was: the `crouch` before it.
+    pub pill_crouch: f32,
+    /// Ticks on the ground since the last jump, at most 127: a jump needs
+    /// more than 5.
+    pub jump_timer: u8,
+    /// How the last landing hit: [`NO_LANDING`], [`SOFT_LANDING`] or
+    /// [`HARD_LANDING`]; a hard landing holds the player still.
+    pub landing: i8,
+    /// Ticks into the landing, and how many it lasts.
+    pub landing_counter: i8,
+    pub landing_time: i8,
 }
+
+/// `Body::landing` when the player has not just landed.
+pub const NO_LANDING: i8 = -1;
+pub const SOFT_LANDING: i8 = 0;
+pub const HARD_LANDING: i8 = 1;
 
 /// What the engine's `depths_of_hell` is: a plane far below the map, which a
 /// player who is on nothing stands on as far as the movement rules go.
@@ -80,7 +109,23 @@ impl Body {
             ground_plane: DEPTHS_OF_HELL,
             support_surface: NONE,
             landing_velocity: 0.0,
+            crouch: 0.0,
+            crouching: false,
+            pill_crouch: 0.0,
+            jump_timer: 127,
+            landing: NO_LANDING,
+            landing_counter: 0,
+            landing_time: 0,
         }
+    }
+
+    /// Whether the player is crouched as far as the others and the server are
+    /// concerned (what a client reports as [`crate::FLAG_CROUCHED`]): in the
+    /// crouch stance, or still on the way up from it, with a pill shorter than
+    /// a standing player's (the one the last tick moved had the crouch the
+    /// tick began with).
+    pub fn crouched(&self) -> bool {
+        self.crouching || self.crouch > 0.0 || self.pill_crouch > 0.0
     }
 
     /// The velocity in world units a second.
@@ -104,6 +149,7 @@ pub fn footing(map: &MapData, position: Vec3) -> Footing {
         m.collision_height_standing - 2.0 * radius,
         radius,
         crate::GROUND_TOLERANCE,
+        m.minimum_normal_k,
     )
 }
 
@@ -139,21 +185,73 @@ pub fn walk(map: &MapData, body: &mut Body, controls: &Controls) {
         throttle_strafe = 0.0;
     }
 
-    // biped_update_moving: the speeds the throttle asks for, a tick's worth
-    let forward_speed = if throttle_forward <= 0.0 { m.run_backward_speed } else { m.run_forward_speed };
-    let sideways_speed = m.run_sideways_speed;
-    let movement_desired = [throttle_forward * forward_speed / ticks, throttle_strafe * sideways_speed / ticks, 0.0];
-    let acceleration_maximum = m.run_acceleration / ticks;
-    let airborne_acceleration_maximum = m.airborne_acceleration / ticks;
+    // biped_update_moving: the speeds the throttle asks for, a tick's worth. A
+    // player held by a hard landing asks for nothing (and pushes against what
+    // moves them with all they have: the movement penalty)
+    let crouch = body.crouch;
+    let uncrouch = 1.0 - crouch;
+    let held = body.landing == HARD_LANDING;
+    let (movement_desired, acceleration_maximum, airborne_acceleration_maximum, movement_penalty) = if held {
+        ([0.0; 3], HELD_ACCELERATION / ticks, 0.0, 1.0)
+    } else {
+        // (standing and crouching speeds blend by how far down the player is)
+        let (run, sneak) = if throttle_forward <= 0.0 {
+            (m.run_backward_speed, m.sneak_backward_speed)
+        } else {
+            (m.run_forward_speed, m.sneak_forward_speed)
+        };
+        let forward_speed = run * uncrouch + sneak * crouch;
+        let sideways_speed = m.run_sideways_speed * uncrouch + m.sneak_sideways_speed * crouch;
+        let acceleration = m.run_acceleration * uncrouch + m.sneak_acceleration * crouch;
+        (
+            [throttle_forward * forward_speed / ticks, throttle_strafe * sideways_speed / ticks, 0.0],
+            acceleration / ticks,
+            m.airborne_acceleration / ticks,
+            0.0,
+        )
+    };
+
+    // the crouch moves towards the stance, a step a tick (the pill below is
+    // the one the player had at the start of the tick)
+    let transition = m.crouch_transition_velocity;
+    let crouch_delta;
+    let new_crouch;
+    if body.crouching {
+        let to_go = 1.0 - body.crouch;
+        if to_go <= transition {
+            new_crouch = 1.0;
+            crouch_delta = to_go;
+        } else {
+            new_crouch = body.crouch + transition;
+            crouch_delta = transition;
+        }
+    } else {
+        let to_go = -body.crouch;
+        if to_go >= -transition {
+            new_crouch = 0.0;
+            crouch_delta = to_go;
+        } else {
+            new_crouch = body.crouch - transition;
+            crouch_delta = -transition;
+        }
+    }
+    // (in the air, the legs coming up or going down move the pill's base)
+    let crouch_velocity = if body.airborne && crouch_delta.abs() > 0.01 {
+        (m.collision_height_standing - m.collision_height_crouching) * crouch_delta
+    } else {
+        0.0
+    };
 
     // the player's facing, flat (biped_update flattens it)
     let (yaw_sine, yaw_cosine) = sin_cos(controls.yaw);
     let forward = [yaw_cosine, yaw_sine];
 
     // biped_get_physics_pill: the pill stands on the origin, so its base
-    // sphere's centre is a radius above
+    // sphere's centre is a radius above; its height is the standing one
+    // shortened by how far down the player is
     let radius = m.collision_radius;
-    let height = m.collision_height_standing - 2.0 * radius;
+    let height = m.collision_height_standing + (m.collision_height_crouching - m.collision_height_standing) * crouch
+        - 2.0 * radius;
     let position = [body.position[0], body.position[1], body.position[2] + radius];
 
     // biped_update_physics
@@ -161,8 +259,8 @@ pub fn walk(map: &MapData, body: &mut Body, controls: &Controls) {
     let mut facing = [0.0f32; 2];
     let new_velocity: Vec3 = if body.airborne {
         let desired = [
-            movement_desired[0] * forward[0] - forward[1] * movement_desired[1],
-            movement_desired[1] * forward[0] + movement_desired[0] * forward[1],
+            (movement_desired[0] * forward[0] - forward[1] * movement_desired[1]) * (1.0 - movement_penalty),
+            (movement_desired[1] * forward[0] + movement_desired[0] * forward[1]) * (1.0 - movement_penalty),
         ];
         let acceleration = [desired[0] - velocity[0], desired[1] - velocity[1]];
         let mut direction = acceleration;
@@ -221,7 +319,7 @@ pub fn walk(map: &MapData, body: &mut Body, controls: &Controls) {
             speed *= (k - m.uphill_k0) * (m.uphill_velocity_scale - 1.0) / (m.uphill_k1 - m.uphill_k0) + 1.0;
         }
 
-        let desired_velocity = scale(&move_direction, speed * (1.0 - 0.0));
+        let desired_velocity = scale(&move_direction, speed * (1.0 - movement_penalty));
         let acceleration = sub(&desired_velocity, &velocity);
         let mut direction = acceleration;
         let mut change = if normalize(&mut direction) > acceleration_maximum {
@@ -236,7 +334,9 @@ pub fn walk(map: &MapData, body: &mut Body, controls: &Controls) {
         add(&change, &velocity)
     };
 
-    let mut moved = move_pill(&map.collision, position, new_velocity, height, radius);
+    let mut velocity_asked = new_velocity;
+    velocity_asked[2] += crouch_velocity;
+    let mut moved = move_pill(&map.collision, position, velocity_asked, height, radius);
     let mut clipped_position = moved.position;
     let mut clipped_velocity = moved.velocity;
     let mut stick_surface = NONE;
@@ -304,10 +404,12 @@ pub fn walk(map: &MapData, body: &mut Body, controls: &Controls) {
             ground_plane = contact.plane;
             support_surface = contact.surface;
             if support_surface == NONE || support_surface != stick_surface {
-                landing_velocity = -dot(&new_velocity, &ground_plane.n);
+                landing_velocity = -dot(&velocity_asked, &ground_plane.n);
             }
         }
     }
+
+    clipped_velocity[2] -= crouch_velocity;
 
     body.position = [clipped_position[0], clipped_position[1], clipped_position[2] - radius];
     body.velocity = clipped_velocity;
@@ -315,6 +417,90 @@ pub fn walk(map: &MapData, body: &mut Body, controls: &Controls) {
     body.ground_plane = ground_plane;
     body.support_surface = support_surface;
     body.landing_velocity = landing_velocity;
+    body.pill_crouch = crouch;
+    body.crouch = new_crouch;
+
+    // a player who stands up where there is no room is held in the crouch
+    let mut crouching = controls.crouch;
+    if body.crouch != 0.0 && !controls.crouch {
+        let standing = m.collision_height_standing - 2.0 * radius;
+        let at = [body.position[0], body.position[1], body.position[2] + radius];
+        if crate::pill::footing(&map.collision, at, standing, radius, 0.0, m.minimum_normal_k).penetration
+            > NO_ROOM_TO_STAND
+        {
+            crouching = true;
+        }
+    }
+    let cannot_stand = crouching && !controls.crouch;
+
+    // biped_start_landing: a landing hard enough holds the player a while
+    if body.landing_velocity > 0.0 {
+        start_landing(m, body);
+    }
+
+    // biped_update_jumping: a player on the ground who has landed a few ticks
+    // ago (and is not held by a hard landing) leaps if the button is down
+    if !cannot_stand && !body.airborne && body.landing != HARD_LANDING {
+        body.jump_timer = body.jump_timer.saturating_add(1).min(127);
+        if controls.jump && body.jump_timer > 5 {
+            // biped_jump: the velocity up becomes the jump's if it was less
+            if body.velocity[2] < m.jump_velocity {
+                body.velocity[2] = m.jump_velocity;
+            }
+            body.airborne = true;
+            body.jump_timer = 0;
+            body.support_surface = NONE;
+        }
+    }
+
+    // biped_update_landing: a player on the ground counts off the landing
+    if !body.airborne && body.landing != NO_LANDING {
+        body.landing_counter = body.landing_counter.saturating_add(1);
+        if body.landing_counter >= body.landing_time {
+            body.landing = NO_LANDING;
+        }
+    }
+
+    body.crouching = crouching;
+}
+
+/// How far into the map a pill standing up may be for there to be room for
+/// the player to stand (a hair of rounding is not no room).
+const NO_ROOM_TO_STAND: f32 = 0.001;
+
+/// How fast a player held by a hard landing slows (the engine's default
+/// acceleration limit for a biped it gives no speeds), world units a second
+/// a second.
+const HELD_ACCELERATION: f32 = 0.16;
+
+/// `biped_start_landing`: how long a landing at `body.landing_velocity` holds
+/// the player, and whether it is a soft or a hard one.
+fn start_landing(m: &halo_map::Movement, body: &mut Body) {
+    let ticks = TICKS_PER_SECOND as f32;
+    let landing_velocity = body.landing_velocity;
+    let minimum_soft = m.minimum_soft_landing_velocity * (1.0 / ticks);
+    let minimum_hard = m.minimum_hard_landing_velocity * (1.0 / ticks);
+    if landing_velocity < minimum_soft {
+        return;
+    }
+    let (velocity, range, recovery, kind) = if landing_velocity < minimum_hard {
+        (landing_velocity - minimum_soft, minimum_hard - minimum_soft, m.maximum_soft_landing_time, SOFT_LANDING)
+    } else {
+        (
+            landing_velocity,
+            m.maximum_hard_landing_velocity * (1.0 / ticks) - minimum_hard,
+            m.maximum_hard_landing_time,
+            HARD_LANDING,
+        )
+    };
+    let recovery = recovery * ticks;
+    if range > 0.0 {
+        let share = (velocity / range).clamp(0.0, 1.0);
+        body.landing = kind;
+        body.landing_counter = 0;
+        // (the engine truncates it to a char)
+        body.landing_time = (recovery * share) as i64 as i8;
+    }
 }
 
 /// The part of `biped_update_physics` that keeps a walking player on the

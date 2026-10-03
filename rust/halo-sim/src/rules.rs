@@ -550,7 +550,7 @@ pub fn spawn_due(
         }
         match spot {
             Some(spot) => {
-                store.set_player(Player { id: c.id, position: spot.position, yaw: spot.yaw, pitch: 0.0 });
+                store.set_player(Player::new(c.id, spot.position, spot.yaw, 0.0));
                 c.life = Life::Alive;
                 c.spawns += 1;
                 c.spawn = spot.position;

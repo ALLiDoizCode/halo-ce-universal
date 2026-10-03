@@ -1,0 +1,17 @@
+# Walking down a run of high ledges on Hang 'Em High, three falls one after
+# another with the walking going on (and a wall brushed on the way): falls of
+# one to three world units, each landed, with the stance and speed carried on.
+scenario fall_steps
+map hangemhigh
+# <name> <x> <y> <z> <yaw, radians>: a little above the ground, so that the
+# player settles on it in the first ticks
+start steps 27.9078 -15.5764 -2.7 1.5708
+ticks 210
+input 30 210 forward=1.0
+
+# what the Rust simulation may differ from the C engine by: falling and
+# landing are the same arithmetic as walking (see walk_slope)
+tolerance position 0.001
+tolerance velocity 0.005
+tolerance facing 0.001
+tolerance state 0

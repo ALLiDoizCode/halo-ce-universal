@@ -178,33 +178,60 @@ pub extern "C" fn halo_large_place(x: f32, y: f32, z: f32) {
 
 /// The local player's movement for one tick: `forward` and `strafe` are the
 /// throttle (ahead and to the left, -1 to 1), `yaw` and `pitch` where the
-/// player faces and aims, in radians. Returns 0 when the library cannot move
-/// the player yet (the map is not in, or the player not placed): the caller
-/// moves them as it did before. Otherwise it returns 1, plus 2 while the
-/// player is in the air, and `out` has seven `float`s: the position `x y z`
-/// (world units) and velocity `x y z` (world units a second) of the player
-/// after the tick, and 0. The new position and the facing are sent to the
-/// gateway as this tick's input, as [`halo_large_send_input`] would.
+/// player faces and aims, in radians, and `jump` and `crouch` are 1 while the
+/// buttons are held. Returns 0 when the library cannot move the player yet
+/// (the map is not in, or the player not placed): the caller moves them as it
+/// did before. Otherwise it returns 1, plus 2 while the player is in the air
+/// and plus 4 while they are crouched (in the crouch, or standing up from it),
+/// and `out` has seven `float`s: the position `x y z` (world units) and
+/// velocity `x y z` (world units a second) of the player after the tick, and
+/// how fast the tick drove the player into the ground it landed on (world
+/// units a *tick*, the engine's unit; 0 when it did not land; what falling
+/// damage reads). The new position, the facing and whether the player is
+/// crouched are sent to the gateway as this tick's input, as
+/// [`halo_large_send_input`] would, unless the tick ran ahead of the clock
+/// (a game that runs ticks in a rush): then the player stays where they were
+/// and nothing is sent.
 ///
 /// # Safety
 /// `out` points to seven writable `float`s.
 #[no_mangle]
-pub unsafe extern "C" fn halo_large_move(forward: f32, strafe: f32, yaw: f32, pitch: f32, out: *mut f32) -> u32 {
+pub unsafe extern "C" fn halo_large_move(
+    forward: f32,
+    strafe: f32,
+    yaw: f32,
+    pitch: f32,
+    jump: u32,
+    crouch: u32,
+    out: *mut f32,
+) -> u32 {
     guard(0, || {
         let mut g = global();
         if out.is_null() {
             return 0;
         }
-        let Some(moved) = g.local.as_mut().and_then(|l| l.step(Controls { forward, strafe, yaw, pitch })) else {
+        let controls = Controls { forward, strafe, yaw, pitch, jump: jump != 0, crouch: crouch != 0 };
+        let Some(moved) = g.local.as_mut().and_then(|l| l.step(controls)) else {
             return 0;
         };
-        if let Some(session) = &g.session {
-            session.send_input(moved.position, yaw, pitch);
+        if moved.stepped {
+            if let Some(session) = &g.session {
+                let flags = if moved.crouched { halo_sim::FLAG_CROUCHED } else { 0 };
+                session.send_input(moved.position, yaw, pitch, flags);
+            }
         }
         let [x, y, z] = moved.position;
         let [vx, vy, vz] = moved.velocity;
-        unsafe { std::slice::from_raw_parts_mut(out, 7) }.copy_from_slice(&[x, y, z, vx, vy, vz, 0.0]);
-        1 + 2 * moved.airborne as u32
+        unsafe { std::slice::from_raw_parts_mut(out, 7) }.copy_from_slice(&[
+            x,
+            y,
+            z,
+            vx,
+            vy,
+            vz,
+            moved.landing_velocity,
+        ]);
+        1 + 2 * moved.airborne as u32 + 4 * moved.crouched as u32
     })
 }
 
@@ -277,11 +304,13 @@ pub unsafe extern "C" fn halo_large_frame(tick: *mut u32) -> u32 {
 /// One state of the frozen frame, `index` below the count [`halo_large_frame`]
 /// returned. Returns 1, or 0 when there is no such state. `player` is the
 /// player number, `tick` the tick of the datagram that carried the state, and
-/// `out` has eight `float`s: position `x y z` (world units), velocity
-/// `x y z` (world units a second), yaw and pitch (radians).
+/// `out` has nine `float`s: position `x y z` (world units), velocity
+/// `x y z` (world units a second), yaw and pitch (radians), and the player's
+/// flags as a number (1 in the air, 2 crouched: `halo_sim::FLAG_AIRBORNE`,
+/// `halo_sim::FLAG_CROUCHED`).
 ///
 /// # Safety
-/// `player` and `tick` point to a writable `unsigned long` each, `out` to eight
+/// `player` and `tick` point to a writable `unsigned long` each, `out` to nine
 /// writable `float`s.
 #[no_mangle]
 pub unsafe extern "C" fn halo_large_unit(index: u32, player: *mut u32, tick: *mut u32, out: *mut f32) -> u32 {
@@ -295,7 +324,7 @@ pub unsafe extern "C" fn halo_large_unit(index: u32, player: *mut u32, tick: *mu
         unsafe {
             *player = s.player as u32;
             *tick = unit.tick;
-            std::slice::from_raw_parts_mut(out, 8).copy_from_slice(&[
+            std::slice::from_raw_parts_mut(out, 9).copy_from_slice(&[
                 s.position[0],
                 s.position[1],
                 s.position[2],
@@ -304,6 +333,7 @@ pub unsafe extern "C" fn halo_large_unit(index: u32, player: *mut u32, tick: *mu
                 s.velocity[2],
                 s.yaw,
                 s.pitch,
+                s.flags as f32,
             ]);
         }
         1
@@ -536,7 +566,7 @@ pub unsafe extern "C" fn halo_large_scoreboard_row(index: u32, out: *mut u32, na
 pub extern "C" fn halo_large_send_input(x: f32, y: f32, z: f32, yaw: f32, pitch: f32) {
     guard((), || {
         if let Some(session) = &global().session {
-            session.send_input([x, y, z], yaw, pitch);
+            session.send_input([x, y, z], yaw, pitch, 0);
         }
     })
 }

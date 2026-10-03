@@ -8,7 +8,8 @@
 //! 11      u16     yaw: 65536 is a full turn, counted from 0 radians
 //! 13      i8      pitch: 127 is straight up (+pi/2), -127 straight down
 //! 14      u8      the low 8 bits of the tick this state is from
-//! 15      u8      flags (none defined yet, sent as 0)
+//! 15      u8      flags: bit 0 airborne, bit 1 crouched (`halo_sim::FLAG_AIRBORNE`,
+//!                 `halo_sim::FLAG_CROUCHED`); the rest 0
 //! ```
 //!
 //! All little-endian. A coordinate is quantised to its axis's range over

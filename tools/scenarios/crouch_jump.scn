@@ -1,0 +1,21 @@
+# Jumping and crouching in the air: the legs come up and go down again while
+# the player is off the ground (which moves the player's pill), and the
+# landing is made crouched and standing.
+scenario crouch_jump
+map bloodgulch
+# <name> <x> <y> <z> <yaw, radians>: a little above the ground, so that the
+# player settles on it in the first ticks
+start flat_field 77.9 -166.2 0.32 0.0
+ticks 210
+input 30 210 forward=1.0
+input 60 61 jump=1
+input 70 100 crouch=1
+input 120 121 jump=1
+input 110 150 crouch=1
+
+# what the Rust simulation may differ from the C engine by: the stance is
+# arithmetic of the same kind as walking (see walk_slope)
+tolerance position 0.001
+tolerance velocity 0.005
+tolerance facing 0.001
+tolerance state 0

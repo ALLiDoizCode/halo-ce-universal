@@ -1,7 +1,7 @@
 //! What the gateway knows about its players between ticks: who is bound to
 //! which address, each player's newest input, and what each has acknowledged.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
@@ -153,17 +153,27 @@ impl Sessions {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+/// How many of a player's inputs wait for a tick at most. A client's ticks and
+/// the server's run at the same rate, so now and then two of the client's
+/// inputs come between two of the server's (and then none): each is handed over
+/// at a tick of its own, which the server's speed bound, a tick's worth of
+/// movement for each input, has the room for; the two ticks' worth of movement
+/// in one report that the newest of the two would be (running downhill, jumping)
+/// it has not. More than this wait only when a client sends faster than it
+/// should, and the oldest are dropped.
+const QUEUED: usize = 2;
+
+#[derive(Debug, Default)]
 struct Slot {
+    /// The newest sequence number offered.
     seq: u32,
-    input: PlayerInput,
-    /// Not yet handed to the module.
-    fresh: bool,
+    /// The inputs not yet handed to the module, oldest first.
+    waiting: VecDeque<PlayerInput>,
 }
 
-/// Each player's newest input. An input whose sequence number is not newer
-/// than the one held is late and dropped, so a reordered datagram can never
-/// move a player backwards.
+/// Each player's inputs between ticks. An input whose sequence number is not
+/// newer than the newest held is late and dropped, so a reordered datagram can
+/// never move a player backwards.
 #[derive(Debug, Default)]
 pub struct InputBoard {
     slots: HashMap<u16, Slot>,
@@ -173,16 +183,19 @@ impl InputBoard {
     /// Offer an input; `false` if it was late and dropped.
     pub fn offer(&mut self, seq: u32, input: PlayerInput) -> bool {
         match self.slots.get_mut(&input.player) {
-            Some(slot) if !seq_newer(seq, slot.seq) => false,
+            Some(slot) if !seq_newer(seq, slot.seq) => return false,
             Some(slot) => {
-                *slot = Slot { seq, input, fresh: true };
-                true
+                slot.seq = seq;
+                slot.waiting.push_back(input);
+                while slot.waiting.len() > QUEUED {
+                    slot.waiting.pop_front();
+                }
             }
             None => {
-                self.slots.insert(input.player, Slot { seq, input, fresh: true });
-                true
+                self.slots.insert(input.player, Slot { seq, waiting: VecDeque::from([input]) });
             }
         }
+        true
     }
 
     /// Forget a player's sequence numbers, so that a fresh session may start counting again.
@@ -190,14 +203,10 @@ impl InputBoard {
         self.slots.remove(&player);
     }
 
-    /// The inputs that arrived since the last call, one per player (the
-    /// newest), by ascending player id; they are not returned again.
+    /// The oldest waiting input of each player that has one, by ascending
+    /// player id; they are not returned again.
     pub fn take_fresh(&mut self) -> Vec<PlayerInput> {
-        let mut out: Vec<PlayerInput> = Vec::new();
-        for slot in self.slots.values_mut().filter(|s| s.fresh) {
-            slot.fresh = false;
-            out.push(slot.input);
-        }
+        let mut out: Vec<PlayerInput> = self.slots.values_mut().filter_map(|s| s.waiting.pop_front()).collect();
         out.sort_unstable_by_key(|i| i.player);
         out
     }
@@ -231,7 +240,7 @@ mod tests {
     use super::*;
 
     fn input(player: u16, x: f32) -> PlayerInput {
-        PlayerInput { player, position: [x, 0.0, 0.0], yaw: 0.0, pitch: 0.0 }
+        PlayerInput { player, position: [x, 0.0, 0.0], yaw: 0.0, pitch: 0.0, flags: 0 }
     }
 
     fn addr(port: u16) -> SocketAddr {
@@ -239,15 +248,26 @@ mod tests {
     }
 
     #[test]
-    fn the_newest_input_wins_and_a_late_one_is_dropped() {
+    fn inputs_are_handed_over_in_order_one_a_tick_and_a_late_one_is_dropped() {
         let mut board = InputBoard::default();
         assert!(board.offer(5, input(1, 5.0)));
         assert!(!board.offer(4, input(1, 4.0)), "late");
         assert!(!board.offer(5, input(1, 9.0)), "a repeat");
         assert!(board.offer(7, input(1, 7.0)));
         assert!(board.offer(6, input(2, 6.0)));
-        let taken = board.take_fresh();
-        assert_eq!(taken, [input(1, 7.0), input(2, 6.0)]);
+        assert_eq!(board.take_fresh(), [input(1, 5.0), input(2, 6.0)]);
+        assert_eq!(board.take_fresh(), [input(1, 7.0)]);
+        assert!(board.take_fresh().is_empty());
+    }
+
+    #[test]
+    fn a_client_that_sends_faster_than_it_should_loses_its_oldest_inputs() {
+        let mut board = InputBoard::default();
+        for seq in 1..=5 {
+            board.offer(seq, input(1, seq as f32));
+        }
+        assert_eq!(board.take_fresh(), [input(1, 4.0)]);
+        assert_eq!(board.take_fresh(), [input(1, 5.0)]);
     }
 
     #[test]
