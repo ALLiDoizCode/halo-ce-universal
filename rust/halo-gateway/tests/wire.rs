@@ -27,7 +27,7 @@ use halo_wire::auth;
 use halo_wire::datagram::{
     Ack, Challenge, ClientMessage, Refused, ServerMessage, REFUSED_BAD_PROOF, REFUSED_NO_SEAT, REFUSED_STALE,
 };
-use halo_wire::planner::STALENESS_BOUND_TICKS;
+use halo_wire::planner::{PlannerConfig, STALENESS_BOUND_TICKS};
 use halo_wire::unit::Bounds;
 
 fn serial() -> MutexGuard<'static, ()> {
@@ -383,6 +383,15 @@ fn every_player_is_sent_every_tick_and_the_states_match_the_server() {
     assert_eq!(stats.send_errors, 0);
 }
 
+/// The wire bar for near players at `budget`: see `Report::near_service`.
+fn assert_near_service(report: &halo_gateway::harness::Report, budget: u32) {
+    let capacity = PlannerConfig::with_budget(budget).near_capacity();
+    println!("{}", report.near_summary(capacity));
+    if let Err(why) = report.near_service(capacity) {
+        panic!("{why}");
+    }
+}
+
 #[test]
 fn a_budget_holds_and_nearby_players_are_updated_every_tick_while_far_ones_less_often() {
     let _serial = serial();
@@ -413,11 +422,7 @@ fn a_budget_holds_and_nearby_players_are_updated_every_tick_while_far_ones_less_
     assert!(report.missed_ticks <= report.expected_receipts / 1000, "{} ticks missed", report.missed_ticks);
     let bands = &report.bands;
     assert!(bands[0].pairs > 1000, "players were near each other");
-    assert!(
-        bands[0].fraction_updated >= 0.999,
-        "players within 10 wu were updated in {:.3}% of ticks",
-        bands[0].fraction_updated * 100.0
-    );
+    assert_near_service(&report, BUDGET);
     assert!(bands[0].hz > bands[1].hz && bands[1].hz > bands[2].hz && bands[2].hz > bands[3].hz, "{bands:?}");
     assert!(bands[3].updated > 0, "far players are still updated now and then");
     // tick 30 Hz, state age
@@ -743,7 +748,7 @@ fn five_hundred_players_on_blood_gulch_hold_a_90_kb_s_budget() {
     );
     assert!(report.max_download <= BUDGET as f64 * 1.02);
     assert_eq!(report.missed_ticks, 0);
-    assert!(report.bands[0].fraction_updated >= 0.999);
+    assert_near_service(&report, BUDGET);
     assert!(report.tick_age_ms.p50 < 10.0);
     assert!(stats.send_ms.max < 10.0 || stats.send_ms.p99 < 10.0);
 }

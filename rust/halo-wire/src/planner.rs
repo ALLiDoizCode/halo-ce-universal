@@ -8,14 +8,22 @@
 //! A player's weight each tick:
 //!
 //! - 1 within `near_radius` world units (10),
-//! - falling with the square of the distance beyond that
-//!   (`(near_radius / distance)^2`), down to `far_floor` (0.06),
+//! - falling beyond that with the 1.5th power of the distance
+//!   (`(near_radius / distance)^1.5`; it was the 2nd, which left the farthest players
+//!   at 10 to 25 wu 2 Hz in a crowd), down to `far_floor` (0.06),
 //! - doubled when within `facing_degrees` (60) of where the recipient faces.
 //!
-//! Players within `near_radius` also rank above everyone else, so with room
-//! in the budget (and the prototype needed 90 KB/s for Blood Gulch at 500
-//! players) they are sent every tick; among themselves, and among everyone
-//! else, the highest accumulated priority goes first, so nobody starves.
+//! Players within `near_radius` also rank above everyone else, but only up to
+//! a *near share* (`near_share`, 0.57) of the states a tick pays for: about
+//! 100 of the 180 that 90 KB/s buys, so a recipient with that many players
+//! within `near_radius` or fewer is sent every one of them every tick
+//! ([`PlannerConfig::near_capacity`]). With more, the near players take
+//! turns by accumulated priority for the share, and those beyond it compete
+//! with everyone else for the rest of the tick. Without the share, near is
+//! absolute and a crowd of 150 near players left the players at 10 to 25 wu
+//! 3.9 Hz on average (2 Hz for the slowest). The share is a fraction of the
+//! tick's states, so it grows with the budget. Among everyone not near, the
+//! highest accumulated priority goes first, so nobody starves.
 //!
 //! Datagrams get lost, and a state that was sent and lost must not be treated
 //! as sent. Every Snapshot carries a number, the recipient says which numbers
@@ -28,8 +36,9 @@
 //! player's state stays unsent for longer than that while the budget can pay
 //! for it (about `players x 16 bytes / max_stale_ticks` a tick). So that those
 //! who fall due together (everyone does, after a recipient is brought up to
-//! date) do not take the tick from the near ones, no more than 1.5 times the
-//! average need of them go first in a tick, the longest waiting first. A new
+//! date) do not take the tick from the near ones, no more than the average
+//! need of them (the other players divided by `max_stale_ticks`, about 34 a
+//! tick at 500 players) go first in a tick, the longest waiting first. A new
 //! recipient has been sent no one, so everyone is urgent to it at first and
 //! it is brought up to date, nearest and facing first, within its budget.
 //!
@@ -73,6 +82,9 @@ pub struct PlannerConfig {
     /// A player not sent to the recipient for this many ticks is sent before
     /// anyone else (when the budget can pay for it).
     pub max_stale_ticks: u32,
+    /// The share of a tick's states that players within `near_radius` rank
+    /// ahead of everyone else for, 0 to 1. Near players beyond it take turns.
+    pub near_share: f32,
 }
 
 impl PlannerConfig {
@@ -84,7 +96,15 @@ impl PlannerConfig {
             facing_degrees: 60.0,
             facing_boost: 2.0,
             max_stale_ticks: 15,
+            near_share: 0.57,
         }
+    }
+
+    /// The most near players a recipient can have and still be sent every one of them every
+    /// tick: the near share of the states a tick's budget pays for (about 100 at 90 KB/s).
+    pub fn near_capacity(&self) -> usize {
+        let per_tick = self.budget_bytes_per_second as f32 / TICKS_PER_SECOND as f32;
+        (self.near_share.clamp(0.0, 1.0) * affordable(per_tick, usize::MAX >> 1) as f32).round() as usize
     }
 }
 
@@ -161,6 +181,8 @@ struct Ranked {
     /// `tick + 1` of the last tick the player was sent in; 0 if never.
     since: u32,
     near: bool,
+    /// Near, and within the tick's near share: ranked ahead of everyone not urgent.
+    in_share: bool,
     priority: f32,
     /// Index into the world.
     index: u32,
@@ -245,7 +267,13 @@ impl Planner {
                 other.position[2] - me.position[2],
             ];
             let d2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
-            let mut weight = if d2 <= near2 { 1.0 } else { (near2 / d2).max(cfg.far_floor) };
+            let mut weight = if d2 <= near2 {
+                1.0
+            } else {
+                // (near_radius / distance)^1.5
+                let q = cfg.near_radius / d2.sqrt();
+                (q * q.sqrt()).max(cfg.far_floor)
+            };
             let ahead = d[0] * forward[0] + d[1] * forward[1] + d[2] * forward[2];
             if d2 <= 0.0 || (ahead > 0.0 && ahead * ahead >= cone2 * d2) {
                 weight *= cfg.facing_boost;
@@ -262,6 +290,7 @@ impl Planner {
                 overdue,
                 since: self.last_sent[slot],
                 near: d2 <= near2,
+                in_share: false,
                 priority: *p,
                 index: index as u32,
             });
@@ -278,9 +307,9 @@ impl Planner {
         // Players who fall due together (a new recipient is brought up to date in a few ticks, so
         // its whole world falls due again together) would take the budget from the near ones for
         // as long as the wave lasts. Only a tick's quota of them goes first, those waiting longest;
-        // the rest follow in the next ticks. The quota is one and a half times what the bound needs
-        // on average, so the bound still holds, and the wave is flushed within a few ticks.
-        let quota = (self.scratch.len().div_ceil(cfg.max_stale_ticks.max(1) as usize) * 3 / 2).max(1);
+        // the rest follow in the next ticks. The quota is what the bound needs on
+        // average, so the bound still holds, and the wave is flushed within a few ticks.
+        let quota = self.scratch.len().div_ceil(cfg.max_stale_ticks.max(1) as usize).max(1);
         if self.scratch.iter().filter(|r| r.overdue).count() > quota {
             let mut due: Vec<usize> = (0..self.scratch.len()).filter(|i| self.scratch[*i].overdue).collect();
             let order = |a: &usize, b: &usize| {
@@ -297,11 +326,29 @@ impl Planner {
         }
 
         let take = affordable(self.credit, self.scratch.len());
-        // urgent players first, then near ones, then by accumulated priority, then by world order
+        // The near players go ahead of the rest only up to their share of what the tick pays for,
+        // the highest accumulated priority first. Those beyond it compete with everyone else.
+        let share = (cfg.near_share.clamp(0.0, 1.0) * take as f32).round() as usize;
+        let mut near: Vec<usize> =
+            (0..self.scratch.len()).filter(|i| self.scratch[*i].near && !self.scratch[*i].urgent).collect();
+        if near.len() > share {
+            let order = |a: &usize, b: &usize| {
+                let (a, b) = (&self.scratch[*a], &self.scratch[*b]);
+                b.priority.total_cmp(&a.priority).then(a.index.cmp(&b.index))
+            };
+            if share > 0 {
+                near.select_nth_unstable_by(share - 1, order);
+            }
+            near.truncate(share);
+        }
+        for i in near {
+            self.scratch[i].in_share = true;
+        }
+        // urgent players first, then near ones within the share, then by accumulated priority, then by world order
         let by_priority = |a: &Ranked, b: &Ranked| {
             b.urgent
                 .cmp(&a.urgent)
-                .then(b.near.cmp(&a.near))
+                .then(b.in_share.cmp(&a.in_share))
                 .then(b.priority.total_cmp(&a.priority))
                 .then(a.index.cmp(&b.index))
         };
@@ -559,6 +606,142 @@ mod tests {
         assert_eq!(plan.states, 150);
         assert_eq!(plan.datagrams.len(), 3, "74 + 74 + 2");
         assert_eq!(states_of(&plan).len(), 150);
+    }
+
+    /// One recipient, 499 other players: `near` within 10 wu, 177 at 10 to 25 wu, the
+    /// rest beyond 60 wu (the crowd of #45). Planned for `ticks` ticks after a warm-up
+    /// that brings the recipient up to date.
+    struct CrowdRun {
+        near: usize,
+        /// Times each player was sent, by id.
+        sent: Vec<u32>,
+        /// The longest wait between two sends, by id, after the warm-up.
+        longest: Vec<u32>,
+        /// How many gaps of three ticks or more near players had.
+        near_gaps_over_2: u32,
+        ticks: u32,
+        bytes: usize,
+    }
+
+    const BAND: usize = 177;
+
+    impl CrowdRun {
+        fn new(near: usize, config: PlannerConfig) -> CrowdRun {
+            let others = 499;
+            let far = others - near - BAND;
+            let mut radii: Vec<f32> = (0..near).map(|i| 1.0 + (i as f32 * 0.618) % 1.0 * 8.9).collect();
+            radii.extend((0..BAND).map(|i| 10.5 + (i as f32 * 0.618) % 1.0 * 14.0));
+            radii.extend((0..far).map(|i| 61.0 + (i as f32 * 0.618) % 1.0 * 40.0));
+            let world = ring(&radii);
+            let mut planner = Planner::new(config);
+            let mut run =
+                CrowdRun { near, sent: vec![0; 500], longest: vec![0; 500], near_gaps_over_2: 0, ticks: 900, bytes: 0 };
+            let mut last = vec![0u32; 500];
+            let warm_up = 60;
+            for tick in 0..warm_up + run.ticks {
+                let plan = planner.plan(&observer_at_origin(), &world, tick);
+                run.bytes += plan.wire_bytes();
+                for id in states_of(&plan) {
+                    let id = id as usize;
+                    if tick >= warm_up {
+                        run.sent[id] += 1;
+                        let gap = tick - last[id].max(warm_up - 1);
+                        run.longest[id] = run.longest[id].max(gap);
+                        if id <= near && gap > 2 {
+                            run.near_gaps_over_2 += 1;
+                        }
+                    }
+                    last[id] = tick;
+                }
+            }
+            run
+        }
+
+        fn hz(&self, ids: std::ops::RangeInclusive<usize>) -> (f64, f64) {
+            let rates: Vec<f64> = ids.map(|id| self.sent[id] as f64 / self.ticks as f64 * 30.0).collect();
+            (rates.iter().sum::<f64>() / rates.len() as f64, rates.iter().copied().fold(f64::MAX, f64::min))
+        }
+
+        fn near_hz(&self) -> f64 {
+            self.hz(1..=self.near).0
+        }
+
+        fn band_hz(&self) -> (f64, f64) {
+            self.hz(self.near + 1..=self.near + BAND)
+        }
+
+        fn near_longest(&self) -> u32 {
+            self.longest[1..=self.near].iter().copied().max().unwrap()
+        }
+
+        fn report(&self) {
+            let (mean, min) = self.band_hz();
+            println!(
+                "{} near: near {:.1} Hz, longest wait {}; 10 to 25 wu {:.1} Hz mean, {:.1} Hz slowest; far longest wait {}",
+                self.near,
+                self.near_hz(),
+                self.near_longest(),
+                mean,
+                min,
+                self.longest[self.near + BAND + 1..].iter().max().unwrap()
+            );
+        }
+    }
+
+    fn crowd(near: usize) -> CrowdRun {
+        let run = CrowdRun::new(near, PlannerConfig::with_budget(90_000));
+        run.report();
+        assert!(run.bytes as f32 <= 90_000.0 * (60 + run.ticks) as f32 / 30.0 + 2.0 * 3000.0, "{} bytes", run.bytes);
+        run
+    }
+
+    #[test]
+    fn with_69_near_players_all_are_sent_every_tick_and_the_next_band_keeps_14_hz() {
+        let run = crowd(69);
+        assert!(run.sent[1..=69].iter().all(|n| *n == run.ticks), "a near player missed a tick");
+        assert!(run.band_hz().0 >= 14.0, "{:?}", run.band_hz());
+    }
+
+    #[test]
+    fn with_100_near_players_all_are_sent_every_tick() {
+        let run = crowd(100);
+        assert!(run.sent[1..=100].iter().all(|n| *n == run.ticks), "a near player missed a tick");
+    }
+
+    #[test]
+    fn with_150_near_players_they_take_turns_and_the_next_band_keeps_10_hz() {
+        let run = crowd(150);
+        assert!(run.near_hz() >= 20.0, "near {:.1} Hz", run.near_hz());
+        assert!(run.near_longest() <= 2, "a near player waited {} ticks", run.near_longest());
+        // no wave of near players missing ticks in a row, every `max_stale_ticks` or otherwise
+        assert_eq!(run.near_gaps_over_2, 0);
+        let (mean, slowest) = run.band_hz();
+        assert!(mean >= 10.0, "10 to 25 wu averages {mean:.1} Hz");
+        assert!(slowest >= 5.0, "the slowest player at 10 to 25 wu gets {slowest:.1} Hz");
+    }
+
+    #[test]
+    fn with_220_near_players_none_waits_more_than_3_ticks() {
+        let run = crowd(220);
+        assert!(run.near_longest() <= 3, "a near player waited {} ticks", run.near_longest());
+    }
+
+    #[test]
+    fn the_near_capacity_is_the_near_share_of_what_a_tick_pays_for() {
+        let capacity = PlannerConfig::with_budget(90_000).near_capacity();
+        assert!((100..=105).contains(&capacity), "{capacity}");
+        assert_eq!(PlannerConfig::with_budget(0).near_capacity(), 0);
+        assert!(PlannerConfig::with_budget(180_000).near_capacity() > 195);
+        // and the promise holds up to it
+        let run = CrowdRun::new(capacity, PlannerConfig::with_budget(90_000));
+        assert!(run.sent[1..=capacity].iter().all(|n| *n == run.ticks), "a near player missed a tick");
+    }
+
+    #[test]
+    fn the_near_share_is_a_fraction_of_the_ticks_states() {
+        // 150 near players and a budget twice as large: the share doubles with it, so they fit
+        let run = CrowdRun::new(150, PlannerConfig::with_budget(180_000));
+        assert!(run.sent[1..=150].iter().all(|n| *n == run.ticks), "a near player missed a tick");
     }
 
     /// A recipient over a lossy link: what arrives is acknowledged, one tick
