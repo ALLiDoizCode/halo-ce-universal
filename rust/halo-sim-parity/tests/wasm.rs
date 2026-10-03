@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use halo_sim_parity::{event_counts, fight_counts, match_event_counts, run, run_fight, run_match};
+use halo_sim_parity::{event_counts, fight_counts, item_counts, match_event_counts, run, run_fight, run_items, run_match};
 use wasmi::{Engine, Linker, Module, Store};
 
 const TICKS: u32 = 10_000;
@@ -63,6 +63,10 @@ impl Wasm {
 
     fn run_fight(&mut self, seed: u64, ticks: u32) -> Vec<u8> {
         self.call("parity_fight_run", seed, ticks)
+    }
+
+    fn run_items(&mut self, seed: u64, ticks: u32) -> Vec<u8> {
+        self.call("parity_items_run", seed, ticks)
     }
 
     fn call(&mut self, export: &str, seed: u64, ticks: u32) -> Vec<u8> {
@@ -136,4 +140,26 @@ fn the_wasm_build_fights_byte_identically_to_the_native_build() {
         let refused: u32 = counts[1..13].iter().sum();
         assert!(refused > 20, "seed {seed:#x}: too few refused: {counts:?}");
     }
+}
+
+/// Items: placements that spawn on their periods, weapons that fall and bounce and come to rest on a
+/// floor (so a client that works a fall out from the row of its drop gets the server's rest), pickups
+/// with the nearest player winning, powerups and rounds.
+#[test]
+fn the_wasm_build_runs_the_items_byte_identically_to_the_native_build() {
+    let mut wasm = Wasm::load(&build_wasm());
+    let mut camouflage_ended = 0;
+    for seed in [1, 2, 0xDEAD_BEEF_0BAD_F00D] {
+        let native = run_items(seed, 4_000);
+        let wasm_result = wasm.run_items(seed, 4_000);
+        assert_eq!(wasm_result.len(), native.len(), "seed {seed:#x}");
+        assert!(wasm_result == native, "seed {seed:#x}: the wasm and native items differ");
+
+        // the scenario really exercised them: every kind of thing, bar none
+        let counts = item_counts(&native);
+        assert!(counts[..9].iter().all(|&c| c > 2), "seed {seed:#x}: too thin: {counts:?}");
+        camouflage_ended += counts[9];
+    }
+    assert!(camouflage_ended > 0, "no camouflage ran out in any of them");
+    assert_ne!(run_items(1, 600), run_items(2, 600));
 }

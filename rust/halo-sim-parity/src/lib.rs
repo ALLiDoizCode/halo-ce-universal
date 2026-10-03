@@ -35,10 +35,13 @@ fn max_step() -> f32 {
     flat_floor_map().max_move_speed() / halo_sim::TICKS_PER_SECOND as f32
 }
 
-struct Fnv(u64);
+mod items_run;
+pub use items_run::*;
+
+pub(crate) struct Fnv(pub(crate) u64);
 
 impl Fnv {
-    fn bytes(&mut self, bytes: &[u8]) {
+    pub(crate) fn bytes(&mut self, bytes: &[u8]) {
         for &b in bytes {
             self.0 = (self.0 ^ b as u64).wrapping_mul(0x0000_0100_0000_01B3);
         }
@@ -194,7 +197,7 @@ pub fn event_counts(output: &[u8]) -> [u32; EVENT_KINDS] {
     std::array::from_fn(|i| u32::from_le_bytes(tail[i * 4..i * 4 + 4].try_into().unwrap()))
 }
 
-static OUTPUT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub(crate) static OUTPUT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// For the WebAssembly host: run the scenario and return the length of the
 /// result, which [`parity_output`] points to.
