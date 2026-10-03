@@ -562,11 +562,27 @@ impl Truth {
 /// Walk `walkers` for `duration`, the way clients under test do: each time a
 /// tick completes, plan every walker's next move from what the server holds
 /// and send it as that player's input. Records every tick in `truth`.
+///
+/// A client plans from the newest tick it has seen. The subscriber queues
+/// every tick since it connected (the join, and a loaded machine, can leave
+/// dozens), so the walk records every tick that is waiting but plans from the
+/// last of them: planning from each in turn would send a burst of moves from
+/// states the server left long ago, which no client does. A walk that starts
+/// a fresh `truth` starts at the present: the ticks queued from before it
+/// (while the players were still joining, and nobody was sent to) are not
+/// part of what the walk is measured against.
 pub fn run_walk(client: &MatchClient, walkers: &mut Walkers, crowd: &Crowd, truth: &mut Truth, duration: Duration) {
+    if truth.ticks.is_empty() {
+        client.discard_ticks();
+    }
     let until = Instant::now() + duration;
     while Instant::now() < until {
-        let Some(seen) = client.next_tick(Duration::from_secs(10)) else { panic!("no tick for 10 s") };
+        let Some(mut seen) = client.next_tick(Duration::from_secs(10)) else { panic!("no tick for 10 s") };
         truth.record(&seen);
+        while let Some(newer) = client.next_tick(Duration::ZERO) {
+            truth.record(&newer);
+            seen = newer;
+        }
         walkers.sync_with_server(seen.players.values());
         crowd.send_inputs(&walkers.next_inputs());
     }
