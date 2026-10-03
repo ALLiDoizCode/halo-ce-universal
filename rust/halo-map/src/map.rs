@@ -10,6 +10,10 @@ use std::io::Read;
 use std::path::Path;
 
 use crate::collision::{Bsp2dNode, Bsp2dReference, Bsp3dNode, CollisionBsp, Edge, Leaf, Plane3d, Surface, Vertex};
+use crate::combat::{
+    Combat, Damage, DamageMaterial, Magazine, Projectile, Resistance, StartingEquipment, Trigger, Weapon,
+    MATERIAL_TYPES,
+};
 use crate::error::{malformed, MapError, Result};
 use crate::movement::Movement;
 use crate::reader::{Raw, Space};
@@ -28,6 +32,7 @@ const SCN_VEHICLE_PALETTE: usize = 0x24C;
 const SCN_PLAYERS: usize = 0x354;
 const SCN_NETGAME_FLAGS: usize = 0x378;
 const SCN_NETGAME_EQUIPMENT: usize = 0x384;
+const SCN_STARTING_EQUIPMENT: usize = 0x390;
 const SCN_STRUCTURE_BSP_REFERENCES: usize = 0x5A4;
 
 // struct game_globals (0x1AC bytes), the tag of group 'matg'
@@ -73,6 +78,101 @@ const BIPED_RUNTIME_DOWNHILL_K0: usize = 0x2F0 + 0x1E4;
 const BIPED_RUNTIME_DOWNHILL_K1: usize = 0x2F0 + 0x1E8;
 const BIPED_RUNTIME_UPHILL_K0: usize = 0x2F0 + 0x1EC;
 const BIPED_RUNTIME_UPHILL_K1: usize = 0x2F0 + 0x1F0;
+
+// struct scenario_starting_equipment (0xCC bytes) and the item collection it names
+const SZ_STARTING_EQUIPMENT: usize = 0xCC;
+const SE_FLAGS: usize = 0;
+const SE_GAME_TYPES: usize = 4;
+const SE_ITEM_COLLECTIONS: usize = 0x3C;
+const SE_COLLECTION_COUNT: usize = 6;
+const SZ_TAG_REFERENCE: usize = 0x10;
+const SZ_ITEM_PERMUTATION: usize = 0x54;
+const IP_WEIGHT: usize = 0x20;
+const IP_ITEM: usize = 0x24;
+
+// struct weapon_definition (0x508 bytes) and its magazines and triggers
+const WEAPON_SIZE: usize = 0x508;
+const WEAPON_FLAGS: usize = 0x308;
+const WEAPON_SECONDARY_TRIGGER_MODE: usize = 0x32C;
+const WEAPON_HEAT_RECOVERY_THRESHOLD: usize = 0x34C;
+const WEAPON_HEAT_OVERHEATED_THRESHOLD: usize = 0x350;
+const WEAPON_HEAT_DETONATION_THRESHOLD: usize = 0x354;
+const WEAPON_HEAT_LOSS_PER_SECOND: usize = 0x35C;
+const WEAPON_MELEE_ATTACK_DAMAGE: usize = 0x394;
+const WEAPON_AGE_RATE_OF_FIRE_PENALTY: usize = 0x444;
+const WEAPON_TYPE: usize = 0x4E2;
+const WEAPON_MAGAZINES: usize = 0x4F0;
+const WEAPON_TRIGGERS: usize = 0x4FC;
+const SZ_MAGAZINE: usize = 0x70;
+const SZ_TRIGGER: usize = 0x114;
+
+// a weapon's first-person animations, in an animation graph (the tag of group
+// 'antr'): the set whose animations are listed by kind, and the graph's own
+const WEAPON_FIRST_PERSON_ANIMATIONS: usize = 0x46C;
+const ANIMATION_GRAPH_SIZE: usize = 0x80;
+const AG_FIRST_PERSON_WEAPON_ANIMATIONS: usize = 0x48;
+const AG_ANIMATIONS: usize = 0x74;
+const AG_WEAPON_ANIMATIONS: usize = 0x18;
+const OBJECT_ANIMATION_GRAPH: usize = 0x38;
+// a set of a graph's animations of one kind of thing (both kinds above are 0x1C
+// bytes: four unused longs and the block of indices)
+const SZ_ANIMATION_SET: usize = 0x1C;
+const SET_ANIMATIONS: usize = 0x10;
+/// `_weapon_state_primary_recoil`'s animation, in a weapon's set
+const WEAPON_PRIMARY_RECOIL: usize = 9;
+const SZ_ANIMATION: usize = 0xB4;
+const ANIM_FRAME_COUNT: usize = 0x22;
+/// `_first_person_weapon_animation_reload_while_empty`, which the engine times every reload by
+const FIRST_PERSON_RELOAD_WHILE_EMPTY: usize = 7;
+
+// struct projectile_definition (0x24C bytes)
+const PROJECTILE_SIZE: usize = 0x24C;
+const PROJ_FLAGS: usize = 0x17C;
+const PROJ_DETONATION_TIMER_STARTS: usize = 0x180;
+const PROJ_TIMER_LOWER_BOUND: usize = 0x1BC;
+const PROJ_TIMER_UPPER_BOUND: usize = 0x1C0;
+const PROJ_MINIMUM_VELOCITY: usize = 0x1C4;
+const PROJ_MAXIMUM_RANGE: usize = 0x1C8;
+const PROJ_AIR_GRAVITY_SCALE: usize = 0x1CC;
+const PROJ_INITIAL_VELOCITY: usize = 0x1E4;
+const PROJ_FINAL_VELOCITY: usize = 0x1E8;
+const PROJ_IMPACT_DAMAGE: usize = 0x224;
+
+// struct damage_effect_definition (0x2A0 bytes)
+const DAMAGE_EFFECT_SIZE: usize = 0x2A0;
+const DMG_SIDE_EFFECT: usize = 0x1C4;
+const DMG_CATEGORY: usize = 0x1C6;
+const DMG_FLAGS: usize = 0x1C8;
+const DMG_MINIMUM: usize = 0x1D0;
+const DMG_LOWER_BOUND: usize = 0x1D4;
+const DMG_UPPER_BOUND: usize = 0x1D8;
+const DMG_MATERIAL_MODIFIERS: usize = 0x200;
+
+// struct collision_model (0x298 bytes), whose damage_resistance is its first part,
+// and the biped's reference to it
+const COLLISION_MODEL_SIZE: usize = 0x298;
+const OBJECT_COLLISION_MODEL: usize = 0x70;
+const RES_FLAGS: usize = 0;
+const RES_INDIRECT_DAMAGE_MATERIAL_INDEX: usize = 4;
+const RES_MAXIMUM_BODY_VITALITY: usize = 8;
+const RES_FRIENDLY_DAMAGE_RESISTANCE: usize = 0x44;
+const RES_BODY_DESTROYED_THRESHOLD: usize = 0xB8;
+const RES_MAXIMUM_SHIELD_VITALITY: usize = 0xCC;
+const RES_SHIELD_MATERIAL_TYPE: usize = 0xD2;
+const RES_SHIELD_FAILURE_FUNCTION: usize = 0xEC;
+const RES_SHIELD_FAILURE_THRESHOLD: usize = 0xF0;
+const RES_MAXIMUM_SHIELD_FAILURE: usize = 0xF4;
+const RES_MINIMUM_SHIELD_STUN_DAMAGE: usize = 0x108;
+const RES_SHIELD_STUN_TIME: usize = 0x10C;
+const RES_SHIELD_RECHARGE_TIME: usize = 0x110;
+const RES_RUNTIME_SHIELD_RECHARGE_VELOCITY: usize = 0x1C0;
+const RES_MATERIALS: usize = 0x234;
+const SZ_RESISTANCE_MATERIAL: usize = 0x48;
+const RM_FLAGS: usize = 0x20;
+const RM_MATERIAL_TYPE: usize = 0x24;
+const RM_SHIELD_LEAK_FRACTION: usize = 0x28;
+const RM_SHIELD_DAMAGE_MULTIPLIER: usize = 0x2C;
+const RM_BODY_DAMAGE_MULTIPLIER: usize = 0x3C;
 
 // element sizes
 const SZ_PLAYER_START: usize = 0x34;
@@ -212,6 +312,8 @@ pub struct HaloMap {
     pub netgame_flags: Vec<NetgameFlag>,
     pub netgame_equipment: Vec<NetgameEquipment>,
     pub vehicles: Vec<VehiclePlacement>,
+    /// What the tags say of fighting: weapons, the player's health and shields.
+    pub combat: Combat,
 }
 
 impl HaloMap {
@@ -404,6 +506,7 @@ fn parse(data: &[u8], compressed: bool) -> Result<HaloMap> {
     }
 
     let movement = parse_movement(&raw, &tags_space, &tags)?;
+    let combat = parse_combat(&raw, &tags_space, &tags, scn)?;
 
     // struct scenario_structure_bsp_reference { file_offset, file_size,
     // base_address, pad, tag_reference }; a multiplayer map has one
@@ -453,6 +556,7 @@ fn parse(data: &[u8], compressed: bool) -> Result<HaloMap> {
         netgame_flags,
         netgame_equipment,
         vehicles,
+        combat,
     })
 }
 
@@ -524,6 +628,260 @@ fn parse_movement(raw: &Raw, space: &Space, tags: &[TagInstance]) -> Result<Move
         return malformed(format!("the movement values of the tags are not usable: {movement:?}"));
     }
     Ok(movement)
+}
+
+/// The tag a `struct tag_reference` at `off` names, if it names one.
+fn referenced<'a>(raw: &Raw, tags: &'a [TagInstance], off: usize, group: &str) -> Result<Option<&'a TagInstance>> {
+    let index = raw.u32(off + 0xC)?;
+    if index == 0xFFFF_FFFF {
+        return Ok(None);
+    }
+    let Some(tag) = tags.get((index & 0xFFFF) as usize).filter(|t| t.tag_index == index) else {
+        return malformed(format!("tag reference 0x{index:08X} is out of range"));
+    };
+    if tag.group.trim_end() != group {
+        return malformed(format!("tag reference to '{}' has group '{}', expected '{group}'", tag.name, tag.group));
+    }
+    Ok(Some(tag))
+}
+
+/// The damage of a damage effect tag referenced at `off`.
+fn parse_damage(raw: &Raw, space: &Space, tags: &[TagInstance], off: usize) -> Result<Option<Damage>> {
+    let Some(tag) = referenced(raw, tags, off, "jpt!")? else { return Ok(None) };
+    let d = space.resolve(tag.base_address, DAMAGE_EFFECT_SIZE)?;
+    let mut material_modifiers = [0.0; MATERIAL_TYPES];
+    for (i, m) in material_modifiers.iter_mut().enumerate() {
+        *m = raw.f32(d + DMG_MATERIAL_MODIFIERS + 4 * i)?;
+    }
+    Ok(Some(Damage {
+        side_effect: raw.i16(d + DMG_SIDE_EFFECT)?,
+        category: raw.i16(d + DMG_CATEGORY)?,
+        flags: raw.u32(d + DMG_FLAGS)?,
+        minimum: raw.f32(d + DMG_MINIMUM)?,
+        lower: raw.f32(d + DMG_LOWER_BOUND)?,
+        upper: raw.f32(d + DMG_UPPER_BOUND)?,
+        material_modifiers,
+    }))
+}
+
+fn parse_projectile(raw: &Raw, space: &Space, tags: &[TagInstance], off: usize) -> Result<Option<Projectile>> {
+    let Some(tag) = referenced(raw, tags, off, "proj")? else { return Ok(None) };
+    let p = space.resolve(tag.base_address, PROJECTILE_SIZE)?;
+    Ok(Some(Projectile {
+        flags: raw.u32(p + PROJ_FLAGS)?,
+        detonation_timer_starts: raw.i16(p + PROJ_DETONATION_TIMER_STARTS)?,
+        timer_lower_bound: raw.f32(p + PROJ_TIMER_LOWER_BOUND)?,
+        timer_upper_bound: raw.f32(p + PROJ_TIMER_UPPER_BOUND)?,
+        minimum_velocity: raw.f32(p + PROJ_MINIMUM_VELOCITY)?,
+        maximum_range: raw.f32(p + PROJ_MAXIMUM_RANGE)?,
+        air_gravity_scale: raw.f32(p + PROJ_AIR_GRAVITY_SCALE)?,
+        initial_velocity: raw.f32(p + PROJ_INITIAL_VELOCITY)?,
+        final_velocity: raw.f32(p + PROJ_FINAL_VELOCITY)?,
+        impact_damage: parse_damage(raw, space, tags, p + PROJ_IMPACT_DAMAGE)?,
+    }))
+}
+
+/// The frames of the first-person animation a weapon reloads by
+/// (`weapon_get_first_person_animation_time`, which the engine reloads by),
+/// 0 for a weapon with none.
+fn parse_reload_frames(raw: &Raw, space: &Space, tags: &[TagInstance], weapon: usize) -> Result<i16> {
+    animation_frames(
+        raw,
+        space,
+        tags,
+        weapon + WEAPON_FIRST_PERSON_ANIMATIONS,
+        AG_FIRST_PERSON_WEAPON_ANIMATIONS,
+        FIRST_PERSON_RELOAD_WHILE_EMPTY,
+    )
+}
+
+/// The frames of the animation a weapon's own model plays when it fires (its
+/// primary recoil), which the weapon is not idle for: it cannot start a
+/// reload until it has played (`weapon_set_state`, `weapon_state_next`).
+fn parse_recoil_frames(raw: &Raw, space: &Space, tags: &[TagInstance], weapon: usize) -> Result<i16> {
+    animation_frames(raw, space, tags, weapon + OBJECT_ANIMATION_GRAPH, AG_WEAPON_ANIMATIONS, WEAPON_PRIMARY_RECOIL)
+}
+
+/// The frame count of the animation of kind `kind` in the first set of a
+/// graph's block of sets (at `sets_offset` in the graph), where the graph is
+/// the tag referenced at `reference`; 0 for none.
+fn animation_frames(
+    raw: &Raw,
+    space: &Space,
+    tags: &[TagInstance],
+    reference: usize,
+    sets_offset: usize,
+    kind: usize,
+) -> Result<i16> {
+    let Some(graph) = referenced(raw, tags, reference, "antr")? else { return Ok(0) };
+    let g = space.resolve(graph.base_address, ANIMATION_GRAPH_SIZE)?;
+    let (n, sets) = space.block(raw, g + sets_offset, SZ_ANIMATION_SET)?;
+    if n == 0 {
+        return Ok(0);
+    }
+    // the first set's list of animation indices, by kind of animation
+    let (count, indices) = space.block(raw, sets + SET_ANIMATIONS, 2)?;
+    if kind >= count {
+        return Ok(0);
+    }
+    let animation = raw.i16(indices + 2 * kind)?;
+    let (animations, first) = space.block(raw, g + AG_ANIMATIONS, SZ_ANIMATION)?;
+    if animation < 0 || animation as usize >= animations {
+        return Ok(0);
+    }
+    raw.i16(first + animation as usize * SZ_ANIMATION + ANIM_FRAME_COUNT)
+}
+
+fn parse_weapon(raw: &Raw, space: &Space, tags: &[TagInstance], tag: &TagInstance) -> Result<Weapon> {
+    let w = space.resolve(tag.base_address, WEAPON_SIZE)?;
+    let (n, mags) = space.block(raw, w + WEAPON_MAGAZINES, SZ_MAGAZINE)?;
+    let mut magazines = Vec::with_capacity(n);
+    for i in 0..n {
+        let m = mags + i * SZ_MAGAZINE;
+        magazines.push(Magazine {
+            flags: raw.u32(m)?,
+            rounds_recharged_per_second: raw.i16(m + 4)?,
+            rounds_total_initial: raw.i16(m + 6)?,
+            rounds_total_maximum: raw.i16(m + 8)?,
+            rounds_loaded_maximum: raw.i16(m + 0xA)?,
+            reload_time: raw.f32(m + 0x14)?,
+            rounds_reloaded: raw.i16(m + 0x18)?,
+            chamber_time: raw.f32(m + 0x1C)?,
+        });
+    }
+    let (n, trigs) = space.block(raw, w + WEAPON_TRIGGERS, SZ_TRIGGER)?;
+    let mut triggers = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = trigs + i * SZ_TRIGGER;
+        triggers.push(Trigger {
+            flags: raw.u32(t)?,
+            initial_rate_of_fire: raw.f32(t + 4)?,
+            final_rate_of_fire: raw.f32(t + 8)?,
+            rate_of_fire_acceleration: raw.f32(t + 0xF8)?,
+            rate_of_fire_deceleration: raw.f32(t + 0xFC)?,
+            magazine_index: raw.i16(t + 0x20)?,
+            rounds_per_shot: raw.i16(t + 0x22)?,
+            minimum_rounds_loaded_per_shot: raw.i16(t + 0x24)?,
+            charging_time: raw.f32(t + 0x48)?,
+            charged_time: raw.f32(t + 0x4C)?,
+            spew_time: raw.f32(t + 0x58)?,
+            overloading_time: raw.f32(t + 0xC4)?,
+            projectiles_per_shot: raw.i16(t + 0x6E)?,
+            heat_generated_per_round: raw.f32(t + 0xB8)?,
+            age_generated_per_round: raw.f32(t + 0xBC)?,
+            projectile: parse_projectile(raw, space, tags, t + 0x94)?,
+        });
+    }
+    Ok(Weapon {
+        tag_index: (tag.tag_index & 0xFFFF) as u16,
+        reload_frames: parse_reload_frames(raw, space, tags, w)?,
+        recoil_frames: parse_recoil_frames(raw, space, tags, w)?,
+        name: format!("{}.{}", tag.name, tag.group.trim_end()),
+        flags: raw.u32(w + WEAPON_FLAGS)?,
+        weapon_type: raw.i16(w + WEAPON_TYPE)?,
+        secondary_trigger_mode: raw.i16(w + WEAPON_SECONDARY_TRIGGER_MODE)?,
+        heat_recovery_threshold: raw.f32(w + WEAPON_HEAT_RECOVERY_THRESHOLD)?,
+        heat_overheated_threshold: raw.f32(w + WEAPON_HEAT_OVERHEATED_THRESHOLD)?,
+        heat_detonation_threshold: raw.f32(w + WEAPON_HEAT_DETONATION_THRESHOLD)?,
+        heat_loss_per_second: raw.f32(w + WEAPON_HEAT_LOSS_PER_SECOND)?,
+        age_rate_of_fire_penalty: raw.f32(w + WEAPON_AGE_RATE_OF_FIRE_PENALTY)?,
+        magazines,
+        triggers,
+        melee_damage: parse_damage(raw, space, tags, w + WEAPON_MELEE_ATTACK_DAMAGE)?,
+    })
+}
+
+/// The collision model of the multiplayer player's biped: its resistance.
+fn parse_resistance(raw: &Raw, space: &Space, tags: &[TagInstance], biped: usize) -> Result<Resistance> {
+    let Some(tag) = referenced(raw, tags, biped + OBJECT_COLLISION_MODEL, "coll")? else {
+        return malformed("the multiplayer unit has no collision model");
+    };
+    let c = space.resolve(tag.base_address, COLLISION_MODEL_SIZE)?;
+    let (n, mats) = space.block(raw, c + RES_MATERIALS, SZ_RESISTANCE_MATERIAL)?;
+    let mut materials = Vec::with_capacity(n);
+    for i in 0..n {
+        let m = mats + i * SZ_RESISTANCE_MATERIAL;
+        materials.push(DamageMaterial {
+            flags: raw.u32(m + RM_FLAGS)?,
+            material_type: raw.i16(m + RM_MATERIAL_TYPE)?,
+            shield_leak_fraction: raw.f32(m + RM_SHIELD_LEAK_FRACTION)?,
+            shield_damage_multiplier: raw.f32(m + RM_SHIELD_DAMAGE_MULTIPLIER)?,
+            body_damage_multiplier: raw.f32(m + RM_BODY_DAMAGE_MULTIPLIER)?,
+        });
+    }
+    Ok(Resistance {
+        flags: raw.u32(c + RES_FLAGS)?,
+        indirect_damage_material_index: raw.i16(c + RES_INDIRECT_DAMAGE_MATERIAL_INDEX)?,
+        maximum_body_vitality: raw.f32(c + RES_MAXIMUM_BODY_VITALITY)?,
+        friendly_damage_resistance: raw.f32(c + RES_FRIENDLY_DAMAGE_RESISTANCE)?,
+        body_destroyed_threshold: raw.f32(c + RES_BODY_DESTROYED_THRESHOLD)?,
+        maximum_shield_vitality: raw.f32(c + RES_MAXIMUM_SHIELD_VITALITY)?,
+        shield_material_type: raw.i16(c + RES_SHIELD_MATERIAL_TYPE)?,
+        shield_failure_function: raw.i16(c + RES_SHIELD_FAILURE_FUNCTION)?,
+        shield_failure_threshold: raw.f32(c + RES_SHIELD_FAILURE_THRESHOLD)?,
+        maximum_shield_failure: raw.f32(c + RES_MAXIMUM_SHIELD_FAILURE)?,
+        minimum_shield_stun_damage: raw.f32(c + RES_MINIMUM_SHIELD_STUN_DAMAGE)?,
+        shield_stun_time: raw.f32(c + RES_SHIELD_STUN_TIME)?,
+        shield_recharge_time: raw.f32(c + RES_SHIELD_RECHARGE_TIME)?,
+        shield_recharge_velocity: raw.f32(c + RES_RUNTIME_SHIELD_RECHARGE_VELOCITY)?,
+        materials,
+    })
+}
+
+/// What the tags say of fighting: every weapon, the multiplayer player's
+/// resistance, and the scenario's starting equipment.
+fn parse_combat(raw: &Raw, space: &Space, tags: &[TagInstance], scn: usize) -> Result<Combat> {
+    let mut weapons = Vec::new();
+    for tag in tags.iter().filter(|t| t.group.trim_end() == "weap") {
+        weapons.push(parse_weapon(raw, space, tags, tag)?);
+    }
+
+    // the multiplayer player's unit, as parse_movement finds it
+    let Some(globals) = tags.iter().find(|t| t.group == "matg") else {
+        return malformed("the map has no globals tag");
+    };
+    let g = space.resolve(globals.base_address, GLOBALS_SIZE)?;
+    let (n, mpi) = space.block(raw, g + GLOBALS_MULTIPLAYER_INFORMATION, SZ_MULTIPLAYER_INFORMATION)?;
+    if n == 0 {
+        return malformed("the globals tag has no multiplayer information");
+    }
+    let unit_index = raw.u32(mpi + MPI_UNIT + 0xC)?;
+    let Some(biped_tag) = tags.get((unit_index & 0xFFFF) as usize).filter(|t| t.tag_index == unit_index) else {
+        return malformed("the multiplayer unit is not a tag of the map");
+    };
+    let biped = space.resolve(biped_tag.base_address, BIPED_SIZE)?;
+    let resistance = parse_resistance(raw, space, tags, biped)?;
+
+    let (n, starts) = space.block(raw, scn + SCN_STARTING_EQUIPMENT, SZ_STARTING_EQUIPMENT)?;
+    let mut starting_equipment = Vec::with_capacity(n);
+    for i in 0..n {
+        let s = starts + i * SZ_STARTING_EQUIPMENT;
+        let mut collections = Vec::new();
+        for c in 0..SE_COLLECTION_COUNT {
+            let Some(collection) = referenced(raw, tags, s + SE_ITEM_COLLECTIONS + c * SZ_TAG_REFERENCE, "itmc")?
+            else {
+                continue;
+            };
+            // struct item_collection_definition: its permutations are its first block
+            let cd = space.resolve(collection.base_address, 0x5C)?;
+            let (count, perms) = space.block(raw, cd, SZ_ITEM_PERMUTATION)?;
+            let mut permutations = Vec::with_capacity(count);
+            for p in 0..count {
+                let o = perms + p * SZ_ITEM_PERMUTATION;
+                let index = raw.u32(o + IP_ITEM + 0xC)?;
+                if index != 0xFFFF_FFFF {
+                    permutations.push((raw.f32(o + IP_WEIGHT)?, (index & 0xFFFF) as u16));
+                }
+            }
+            collections.push(permutations);
+        }
+        starting_equipment.push(StartingEquipment {
+            flags: raw.u32(s + SE_FLAGS)?,
+            game_types: raw.i16s(s + SE_GAME_TYPES)?,
+            collections,
+        });
+    }
+    Ok(Combat { weapons, resistance, starting_equipment })
 }
 
 /// struct collision_bsp (0x60): eight tag blocks in the order bsp3d nodes,

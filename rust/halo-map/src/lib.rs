@@ -30,6 +30,7 @@
 
 mod codec;
 pub mod collision;
+pub mod combat;
 mod error;
 mod map;
 mod movement;

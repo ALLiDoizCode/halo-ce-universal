@@ -7,6 +7,8 @@ repository's root or assets/).
 
 import math
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -50,7 +52,8 @@ def test_a_scenario_is_a_named_map_start_and_per_tick_inputs():
     ticks = scenario.tick_inputs()
     assert len(ticks) == 6
     # untouched ticks: no throttle, facing the start's way
-    assert ticks[0] == {"forward": 0.0, "strafe": 0.0, "yaw": 0.5, "pitch": 0.0, "jump": 0.0, "crouch": 0.0}
+    assert ticks[0] == {"forward": 0.0, "strafe": 0.0, "yaw": 0.5, "pitch": 0.0, "jump": 0.0, "crouch": 0.0,
+                        "fire": 0.0, "part": 1.0}
     # an input line sets only the keys it names, over its ticks (the end is not included)
     assert ticks[1]["forward"] == 1.0 and ticks[1]["strafe"] == -0.5
     assert ticks[4]["forward"] == 1.0 and ticks[5]["forward"] == 0.0
@@ -80,9 +83,44 @@ def test_the_scenarios_that_ship_cover_the_first_features():
     for stem, scenario in shipped.items():
         assert scenario.name == stem
         assert scenario.map and scenario.start_name
-        assert set(scenario.tolerances) == set(harness.QUANTITIES)
+        quantities = harness.ALL_QUANTITIES if scenario.firing else harness.QUANTITIES
+        assert set(scenario.tolerances) == set(quantities)
     assert any(any(tick["forward"] for tick in s.tick_inputs()) for s in shipped.values())
     assert not any(tick["forward"] for tick in shipped["stand_still"].tick_inputs())
+
+
+FIRING = """
+scenario test_fire
+map bloodgulch
+start spot 1 2 3 0
+target 4 5 6 3.14
+weapon weapons/pistol/pistol
+flight 1
+ticks 10
+input 2 6 fire=1 part=2
+tolerance shield 0.01
+"""
+
+
+def test_a_scenario_of_firing_has_a_weapon_a_target_a_trigger_and_the_part_a_shot_hits():
+    scenario = harness.parse_scenario(FIRING)
+    assert scenario.firing and scenario.weapon == "weapons/pistol/pistol"
+    assert scenario.target == (4.0, 5.0, 6.0, 3.14) and scenario.flight == 1
+    assert scenario.tolerances == {"shield": 0.01}
+    ticks = scenario.tick_inputs()
+    assert (ticks[1]["fire"], ticks[2]["fire"], ticks[5]["fire"], ticks[6]["fire"]) == (0.0, 1.0, 1.0, 0.0)
+    assert ticks[0]["part"] == 1.0 and ticks[3]["part"] == 2.0
+    assert not harness.parse_scenario(SCENARIO).firing
+
+
+@pytest.mark.parametrize("text, message", [
+    ("scenario a\nmap m\nstart s 0 0 0 0\nticks 4\ntarget 1 2 3\n", "target takes"),
+    ("scenario a\nmap m\nstart s 0 0 0 0\nticks 4\nweapon\n", "weapon takes"),
+    ("scenario a\nmap m\nstart s 0 0 0 0\nticks 4\nflight soon\n", "unreadable"),
+])
+def test_a_scenario_of_firing_that_cannot_be_played_is_rejected(text, message):
+    with pytest.raises(HarnessError, match=message):
+        harness.parse_scenario(text)
 
 
 # ---------- traces
@@ -95,15 +133,59 @@ def test_a_trace_is_read_back_as_a_row_a_tick():
 
 
 @pytest.mark.parametrize("text, message", [
-    ("tick\tx\n", "not a halo-trace 1"),
+    ("tick\tx\n", "not a halo-trace file"),
     ("# halo-trace 1\ntick\tx\n", "columns must be"),
     ("# halo-trace 1\n" + "\t".join(harness.TRACE_COLUMNS) + "\n1 0 0 0 0 0 0 0 0 0\n", "tick 1 where tick 0"),
     ("# halo-trace 1\n" + "\t".join(harness.TRACE_COLUMNS) + "\n0 0 0\n", "3 columns"),
     ("# halo-trace 1\n", "no column line"),
+    ("# halo-trace 3\ntick\tx\n", "not a halo-trace file"),
 ])
 def test_a_trace_that_is_not_one_is_rejected(text, message):
     with pytest.raises(HarnessError, match=message):
         harness.parse_trace(text)
+
+
+def firing_row(tick, rounds=12, total=48, heat=0.0, shield=1.0, body=1.0, stun=0, dead=0, hit=-1):
+    return row(tick) + (rounds, total, heat, shield, body, stun, dead, hit)
+
+
+def make_firing_trace(rows):
+    columns = harness.TRACE_COLUMNS + harness.COMBAT_COLUMNS
+    lines = ["\t".join(str(value) for value in r) for r in rows]
+    return harness.parse_trace("# halo-trace 2\n# scenario t\n" + "\t".join(columns) + "\n" + "\n".join(lines) + "\n")
+
+
+def test_a_trace_of_firing_has_the_weapon_and_the_target_after_the_movement():
+    trace = make_firing_trace([firing_row(0), firing_row(1, rounds=11, shield=0.6667, stun=180, hit=1)])
+    assert trace.firing and len(trace.rows[1]) == 18
+    assert trace.rows[1][10] == 11 and trace.rows[1][17] == 1
+    assert not make_trace([row(0)]).firing
+
+
+def test_a_trace_of_firing_is_not_comparable_with_one_that_is_not():
+    with pytest.raises(HarnessError, match="firing"):
+        harness.compare_traces(make_trace([row(0)]), make_firing_trace([firing_row(0)]))
+
+
+def test_the_combat_quantities_are_each_the_difference_of_a_column():
+    a = make_firing_trace([firing_row(0), firing_row(1), firing_row(2)])
+    b = make_firing_trace([
+        firing_row(0), firing_row(1, rounds=11, heat=0.25, shield=0.75, body=0.5, stun=3, dead=1, hit=2),
+        firing_row(2, total=47),
+    ])
+    quantities = harness.compare_traces(a, b).quantities
+    assert quantities["rounds"].largest == 1 and quantities["rounds"].first_over == 1
+    assert quantities["heat"].largest == pytest.approx(0.25)
+    assert quantities["shield"].largest == pytest.approx(0.25)
+    assert quantities["body"].largest == pytest.approx(0.5)
+    assert quantities["stun"].largest == 3
+    assert quantities["life"].largest == 1 and quantities["hit"].largest == 1
+    assert harness.compare_traces(a, a).passed
+    # (the tolerance of one: the rounds may be a round apart, the shield not)
+    assert not harness.compare_traces(a, b, {"rounds": 1, "heat": 1, "shield": 0.1, "body": 1, "stun": 3,
+                                             "life": 1, "hit": 1}).passed
+    assert harness.compare_traces(a, b, {"rounds": 1, "heat": 1, "shield": 1, "body": 1, "stun": 3, "life": 1,
+                                         "hit": 1}).passed
 
 
 # ---------- comparison
@@ -237,3 +319,43 @@ def test_the_engine_plays_a_scenario_the_same_each_time_and_it_climbs_the_slope(
     assert last[2] > first[2] + 10  # walked north (+y) ...
     assert last[3] > first[3] + 3   # ... and up
     assert abs(last[1] - first[1]) < 0.5
+
+
+def rust_trace(scenario, trace_path, hits=None):
+    """Plays a scenario in the Rust simulation (halo-scenario), on the same maps. With hits (a trace of the
+    engine), the hits that land are the engine's: what a shot hits is the client's to decide."""
+    maps = game_data_root() / "maps"
+    subprocess.run(
+        ["cargo", "run", "--release", "--quiet", "-p", "halo-scenario", "--", str(scenario), "--maps", str(maps),
+         "--out", str(trace_path)] + (["--hits", str(hits)] if hits else []),
+        cwd=harness.REPOSITORY / "rust", check=True, capture_output=True,
+    )
+
+
+FIRING_SCENARIOS = sorted(path.stem for path in harness.SCENARIOS.glob("*.scn")
+                          if harness.load_scenario(path).firing)
+
+
+def test_there_are_scenarios_of_firing_for_the_weapons_rate_damage_and_shield():
+    assert {"pistol_kill", "pistol_magazine", "pistol_shield"} <= set(FIRING_SCENARIOS)
+
+
+@needs_engine
+@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo is needed to play the scenario in the simulation")
+@pytest.mark.parametrize("name", FIRING_SCENARIOS)
+def test_the_simulation_matches_the_engine_on_a_scenario_of_firing(name, tmp_path):
+    """The acceptance gate of the weapons: the rate of fire, ammunition, damage a hit does to shield and health
+    and the shield's stun and recharge, tick by tick, within the scenario's tolerances. The simulation fires the
+    weapon itself; the hits that land on the target are the engine's own (where a shot goes depends on the frame
+    it is fired on, which changes with the load of the machine; a shot's hit is the client's to decide)."""
+    scenario = harness.SCENARIOS / f"{name}.scn"
+    engine, rust = tmp_path / "engine.tsv", tmp_path / "rust.tsv"
+    harness.run_scenario(scenario, engine, harness.default_binary(), game_data_root())
+    rust_trace(scenario, rust, hits=engine)
+    comparison = harness.compare_traces(
+        harness.load_trace(engine), harness.load_trace(rust), harness.load_scenario(scenario).tolerances)
+    assert comparison.passed, harness.format_comparison(comparison)
+    # (the engine's trace is of something happening: shots were fired, and a hit landed if there is a target)
+    rows = harness.load_trace(engine).rows
+    assert rows[0][10] > rows[-1][10] or rows[-1][11] < rows[0][11] or rows[-1][10] == rows[0][10] > 0
+    assert any(r[17] >= 0 for r in rows) == (harness.load_scenario(scenario).target is not None)

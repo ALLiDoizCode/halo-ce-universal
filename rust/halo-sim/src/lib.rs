@@ -39,6 +39,8 @@
 
 extern crate alloc;
 
+pub mod combat;
+pub mod damage;
 pub mod fixtures;
 mod map;
 pub mod math;
@@ -50,6 +52,7 @@ pub mod spawn;
 mod state;
 mod step;
 pub mod walk;
+pub mod weapon;
 pub mod wire;
 
 pub use map::MapData;

@@ -13,7 +13,7 @@ use halo_map::{flag_type, game_type, HaloMap, MapError};
 const TAG_BASE: u32 = 0x803A_6000;
 const BSP_BASE: u32 = 0x4000_0000;
 const HEADER: usize = 0x800;
-const TAG_DATA_SIZE: usize = 0x2000;
+const TAG_DATA_SIZE: usize = 0x3200;
 const BSP_DATA_SIZE: usize = 0x1000;
 
 /// The map's inflated image, header included.
@@ -77,6 +77,26 @@ const T_PLAYER_INFORMATION: usize = 0x11C0;
 const T_MULTIPLAYER_INFORMATION: usize = 0x12C0;
 const T_BIPED: usize = 0x1380;
 const T_FALLING_DAMAGE: usize = 0x1900;
+// fighting: the biped's collision model, a pistol with its magazine, trigger,
+// projectile and damage, its first-person animations, and the scenario's
+// starting equipment
+const T_COLLISION_MODEL: usize = 0x1A00;
+const T_WEAPON: usize = 0x1D00;
+const T_PROJECTILE: usize = 0x2300;
+const T_DAMAGE_EFFECT: usize = 0x2600;
+const T_ANIMATION_GRAPH: usize = 0x2900;
+const T_FIRST_PERSON_ANIMATIONS: usize = 0x2A00;
+const T_FIRST_PERSON_INDICES: usize = 0x2A40;
+const T_ANIMATIONS: usize = 0x2A80;
+const T_WEAPON_ANIMATIONS: usize = 0x2B00;
+const T_WEAPON_INDICES: usize = 0x2B40;
+const T_MAGAZINES: usize = 0x2C00;
+const T_TRIGGERS: usize = 0x2C80;
+const T_MATERIALS: usize = 0x2E00;
+const T_STARTING: usize = 0x2F00;
+const T_ITEM_COLLECTION: usize = 0x3000;
+const T_PERMUTATIONS: usize = 0x3080;
+const NONE: u32 = 0xFFFF_FFFF;
 
 /// Offsets within the structure BSP data.
 const B_SBSP: usize = 0x40;
@@ -109,15 +129,20 @@ fn build() -> Image {
     let t = HEADER;
     m.u32(t, TAG_BASE + T_INSTANCES as u32);
     m.u32(t + 4, tag_id(0));
-    m.u32(t + 0xC, 6);
+    m.u32(t + 0xC, 11);
     m.code(t + 0x20, b"tags");
-    let tags: [(&[u8; 4], &str); 6] = [
+    let tags: [(&[u8; 4], &str); 11] = [
         (b"scnr", "levels\\synth\\synth"),
         (b"itmc", "item collections\\pistol"),
         (b"vehi", "vehicles\\warthog\\warthog"),
         (b"sbsp", "levels\\synth\\synth"),
         (b"matg", "globals\\globals"),
         (b"bipd", "characters\\cyborg_mp\\cyborg_mp"),
+        (b"coll", "characters\\cyborg\\cyborg"),
+        (b"weap", "weapons\\pistol\\pistol"),
+        (b"proj", "weapons\\pistol\\bullet"),
+        (b"jpt!", "weapons\\pistol\\bullet"),
+        (b"antr", "weapons\\pistol\\fp"),
     ];
     let mut name_at = T_NAMES;
     for (i, (group, name)) in tags.iter().enumerate() {
@@ -126,11 +151,21 @@ fn build() -> Image {
         m.u32(o + 0xC, tag_id(i as u32));
         m.u32(o + 0x10, TAG_BASE + name_at as u32);
         m.cstr(t + name_at, name);
-        name_at += 0x40;
+        name_at += 0x20;
     }
     m.u32(t + T_INSTANCES + 0x14, TAG_BASE + T_SCENARIO as u32);
     m.u32(t + T_INSTANCES + 4 * 0x20 + 0x14, TAG_BASE + T_GLOBALS as u32);
     m.u32(t + T_INSTANCES + 5 * 0x20 + 0x14, TAG_BASE + T_BIPED as u32);
+    for (index, at) in [
+        (1, T_ITEM_COLLECTION),
+        (6, T_COLLISION_MODEL),
+        (7, T_WEAPON),
+        (8, T_PROJECTILE),
+        (9, T_DAMAGE_EFFECT),
+        (10, T_ANIMATION_GRAPH),
+    ] {
+        m.u32(t + T_INSTANCES + index * 0x20 + 0x14, TAG_BASE + at as u32);
+    }
 
     // scenario
     let s = t + T_SCENARIO;
@@ -138,6 +173,7 @@ fn build() -> Image {
     m.tag_block(s + 0x354, 1, T_PLAYERS);
     m.tag_block(s + 0x378, 1, T_FLAGS);
     m.tag_block(s + 0x384, 1, T_EQUIPMENT);
+    m.tag_block(s + 0x390, 1, T_STARTING);
     m.tag_block(s + 0x240, 1, T_VEHICLES);
     m.tag_block(s + 0x24C, 1, T_PALETTE);
     m.tag_block(s + 0x5A4, 1, T_BSP_REFS);
@@ -186,6 +222,89 @@ fn build() -> Image {
     m.f32(bd + 0xC4, 0.0625); // jump velocity
     m.f32s(bd + 0xE4, &[0.25, 0.75, 1.5, 3.0, 9.0]); // landing times, landing velocities
     m.f32(bd + 0x1DC, 0.125); // crouch transition velocity
+    m.tag_ref(t + T_BIPED + 0x70, 6); // collision model
+
+    // the multiplayer player's body: 75 health and a 75 shield, stunned for 6
+    // seconds by a hit and back in 4, a head and a body
+    let c = t + T_COLLISION_MODEL;
+    m.u32(c, 7);
+    m.i16(c + 4, 1);
+    m.f32(c + 8, 75.0);
+    m.f32(c + 0x44, 0.25);
+    m.f32(c + 0xCC, 75.0);
+    m.i16(c + 0xD2, 22);
+    m.f32(c + 0x10C, 6.0);
+    m.f32(c + 0x110, 4.0);
+    m.f32(c + 0x1C0, 0.008_333_334);
+    m.tag_block(c + 0x234, 2, T_MATERIALS);
+    for (i, (flags, body)) in [(1u32, 1.0f32), (0, 0.8)].iter().enumerate() {
+        let o = t + T_MATERIALS + i * 0x48;
+        m.u32(o + 0x20, *flags);
+        m.i16(o + 0x24, 21);
+        m.f32(o + 0x2C, 1.0);
+        m.f32(o + 0x3C, *body);
+    }
+
+    // the pistol: a magazine of 12 and 60 rounds, one trigger at 3.5 a second that fires
+    // a bullet of 25 damage, reloaded by a 70-frame first-person animation
+    let w = t + T_WEAPON;
+    m.u32(w + 0x308, 0);
+    m.u32(w + 0x394 + 0xC, NONE); // no melee damage
+    m.tag_ref(w + 0x46C, 10);
+    m.tag_ref(w + 0x38, 10); // the weapon's own animations, the same graph
+    m.tag_block(w + 0x4F0, 1, T_MAGAZINES);
+    m.tag_block(w + 0x4FC, 1, T_TRIGGERS);
+    let mag = t + T_MAGAZINES;
+    m.i16(mag + 6, 60);
+    m.i16(mag + 8, 120);
+    m.i16(mag + 0xA, 12);
+    m.f32(mag + 0x14, 2.17);
+    m.i16(mag + 0x18, 12);
+    let tr = t + T_TRIGGERS;
+    m.f32s(tr + 4, &[3.5, 3.5]);
+    m.f32s(tr + 0xF8, &[1.0, 1.0]);
+    m.i16(tr + 0x20, 0);
+    m.i16(tr + 0x22, 1);
+    m.i16(tr + 0x6E, 1);
+    m.tag_ref(tr + 0x94, 8);
+    let pr = t + T_PROJECTILE;
+    m.f32(pr + 0x1C8, 40.0);
+    m.f32s(pr + 0x1E4, &[10.0, 10.0]);
+    m.tag_ref(pr + 0x224, 9);
+    let d = t + T_DAMAGE_EFFECT;
+    m.i16(d + 0x1C6, 2);
+    m.u32(d + 0x1C8, 2);
+    m.f32s(d + 0x1D0, &[25.0, 25.0, 25.0]);
+    m.f32(d + 0x200 + 4 * 21, 1.5);
+    m.f32(d + 0x200 + 4 * 22, 1.0);
+
+    // its first-person animations: the animation for reloading is the first of one
+    let a = t + T_ANIMATION_GRAPH;
+    m.tag_block(a + 0x48, 1, T_FIRST_PERSON_ANIMATIONS);
+    m.tag_block(a + 0x74, 2, T_ANIMATIONS);
+    m.tag_block(t + T_FIRST_PERSON_ANIMATIONS + 0x10, 8, T_FIRST_PERSON_INDICES);
+    for i in 0..8usize {
+        m.i16(t + T_FIRST_PERSON_INDICES + 2 * i, if i == 7 { 0 } else { -1 });
+    }
+    m.i16(t + T_ANIMATIONS + 0x22, 70);
+    // ... and the weapon's own: the primary recoil (the tenth) is the second animation, 5 frames
+    m.tag_block(a + 0x18, 1, T_WEAPON_ANIMATIONS);
+    m.tag_block(t + T_WEAPON_ANIMATIONS + 0x10, 10, T_WEAPON_INDICES);
+    for i in 0..10usize {
+        m.i16(t + T_WEAPON_INDICES + 2 * i, if i == 9 { 1 } else { -1 });
+    }
+    m.i16(t + T_ANIMATIONS + 0xB4 + 0x22, 5);
+
+    // what the map starts a Slayer player with: the one item collection, whose one item is the pistol
+    let se = t + T_STARTING;
+    m.i16(se + 4, game_type::SLAYER);
+    m.tag_ref(se + 0x3C, 1);
+    for i in 1..6usize {
+        m.u32(se + 0x3C + 0x10 * i + 0xC, NONE);
+    }
+    m.tag_block(t + T_ITEM_COLLECTION, 1, T_PERMUTATIONS);
+    m.f32(t + T_PERMUTATIONS + 0x20, 100.0);
+    m.tag_ref(t + T_PERMUTATIONS + 0x24, 7);
 
     let b = HEADER + TAG_DATA_SIZE; // structure bsp data, which the scenario locates
     let r = t + T_BSP_REFS;
@@ -314,6 +433,70 @@ fn the_players_movement_values_are_read_from_the_globals_and_the_multiplayer_bip
         (m.maximum_falling_velocity, m.minimum_damage_velocity, m.maximum_damage_velocity),
         (0.35, 0.125, 0.3125)
     );
+}
+
+#[test]
+fn the_weapons_and_the_players_body_are_read_from_the_tags() {
+    let c = HaloMap::from_bytes(&build().0).unwrap().combat;
+    assert_eq!(c.weapons.len(), 1);
+    let w = &c.weapons[0];
+    assert_eq!((w.tag_index, w.name.as_str(), w.reload_frames), (7, "weapons\\pistol\\pistol.weap", 70));
+    assert_eq!(w.recoil_frames, 5);
+    assert_eq!(w.melee_damage, None);
+    let m = &w.magazines[0];
+    assert_eq!((m.rounds_total_initial, m.rounds_total_maximum, m.rounds_loaded_maximum), (60, 120, 12));
+    assert_eq!((m.reload_time, m.rounds_reloaded), (2.17, 12));
+    let t = &w.triggers[0];
+    assert_eq!((t.initial_rate_of_fire, t.final_rate_of_fire, t.rate_of_fire_acceleration), (3.5, 3.5, 1.0));
+    assert_eq!((t.magazine_index, t.rounds_per_shot, t.projectiles_per_shot), (0, 1, 1));
+    let p = t.projectile.as_ref().expect("the trigger fires a projectile");
+    assert_eq!((p.maximum_range, p.initial_velocity), (40.0, 10.0));
+    let d = p.impact_damage.expect("the projectile has an impact damage");
+    assert_eq!((d.category, d.flags, d.minimum, d.lower, d.upper), (2, 2, 25.0, 25.0, 25.0));
+    assert_eq!((d.material_modifiers[21], d.material_modifiers[22], d.material_modifiers[0]), (1.5, 1.0, 0.0));
+
+    let r = &c.resistance;
+    assert_eq!((r.maximum_body_vitality, r.maximum_shield_vitality, r.shield_material_type), (75.0, 75.0, 22));
+    assert_eq!((r.shield_stun_time, r.shield_recharge_time, r.shield_recharge_velocity), (6.0, 4.0, 0.008_333_334));
+    assert_eq!((r.flags, r.indirect_damage_material_index, r.friendly_damage_resistance), (7, 1, 0.25));
+    assert_eq!(r.materials.len(), 2);
+    assert_eq!((r.materials[0].flags, r.materials[0].material_type), (1, 21));
+    assert_eq!(r.materials[1].body_damage_multiplier, 0.8);
+
+    assert_eq!(c.starting_equipment.len(), 1);
+    assert_eq!(c.starting_equipment[0].game_types[0], game_type::SLAYER);
+    assert_eq!(c.starting_equipment[0].collections, vec![vec![(100.0, 7)]]);
+    assert_eq!(c.weapon(7).map(|w| w.name.as_str()), Some("weapons\\pistol\\pistol.weap"));
+    assert!(c.weapon(8).is_none());
+}
+
+#[test]
+fn the_combat_values_survive_their_bytes_and_bytes_that_are_not_theirs_are_refused() {
+    let c = HaloMap::from_bytes(&build().0).unwrap().combat;
+    let bytes = c.to_bytes();
+    assert_eq!(halo_map::combat::Combat::from_bytes(&bytes).unwrap(), c);
+    for cut in [0, 3, 4, 5, bytes.len() / 2, bytes.len() - 1] {
+        assert!(halo_map::combat::Combat::from_bytes(&bytes[..cut]).is_err(), "cut at {cut}");
+    }
+    let mut longer = bytes.clone();
+    longer.push(0);
+    assert!(halo_map::combat::Combat::from_bytes(&longer).is_err());
+    let mut wrong = bytes;
+    wrong[0] = b'X';
+    assert!(halo_map::combat::Combat::from_bytes(&wrong).is_err());
+}
+
+#[test]
+fn a_weapon_with_no_first_person_animations_reloads_in_no_time_and_a_dangling_reference_is_refused() {
+    let mut image = build();
+    image.u32(HEADER + T_WEAPON + 0x46C + 0xC, NONE);
+    image.u32(HEADER + T_WEAPON + 0x38 + 0xC, NONE);
+    let weapon = &HaloMap::from_bytes(&image.0).unwrap().combat.weapons[0];
+    assert_eq!((weapon.reload_frames, weapon.recoil_frames), (0, 0));
+    // a damage that is a tag of the wrong kind
+    let mut image = build();
+    image.tag_ref(HEADER + T_PROJECTILE + 0x224, 7);
+    assert!(matches!(HaloMap::from_bytes(&image.0), Err(MapError::Malformed(_))));
 }
 
 #[test]

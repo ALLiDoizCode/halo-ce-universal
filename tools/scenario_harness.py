@@ -36,8 +36,20 @@ QUANTITIES = {
     "facing": "radians",
     "state": "bits that differ",
 }
+# ... and the quantities of a scenario of firing (a trace of version 2)
+COMBAT_QUANTITIES = {
+    "rounds": "rounds, loaded and left",
+    "heat": "of the weapon's heat",
+    "shield": "of the target's full shield",
+    "body": "of the target's full health",
+    "stun": "ticks of the target's shield stun",
+    "life": "1 where the target's death differs",
+    "hit": "1 where the part of the target that was hit differs",
+}
+ALL_QUANTITIES = {**QUANTITIES, **COMBAT_QUANTITIES}
 TRACE_COLUMNS = ("tick", "x", "y", "z", "vx", "vy", "vz", "yaw", "pitch", "state")
-INPUT_KEYS = ("forward", "strafe", "yaw", "pitch", "jump", "crouch")
+COMBAT_COLUMNS = ("rounds", "total", "heat", "shield", "body", "stun", "dead", "hit")
+INPUT_KEYS = ("forward", "strafe", "yaw", "pitch", "jump", "crouch", "fire", "part")
 
 
 class HarnessError(Exception):
@@ -63,11 +75,22 @@ class Scenario:
     tolerances: dict[str, float] = field(default_factory=dict)
     # (first tick, end tick, {key: value}), in file order
     inputs: list[tuple[int, int, dict[str, float]]] = field(default_factory=list)
+    # a scenario of firing: the weapon tag's name the player is given (such as
+    # weapons/pistol/pistol), the target's place (x, y, z, yaw), and how many
+    # ticks a shot takes to reach it
+    weapon: str | None = None
+    target: tuple[float, float, float, float] | None = None
+    flight: int = 0
+
+    @property
+    def firing(self) -> bool:
+        return self.weapon is not None or self.target is not None
 
     def tick_inputs(self) -> list[dict[str, float]]:
         """The inputs of every tick: what the game is given for it."""
         ticks = [
-            {"forward": 0.0, "strafe": 0.0, "yaw": self.start_yaw, "pitch": 0.0, "jump": 0.0, "crouch": 0.0}
+            {"forward": 0.0, "strafe": 0.0, "yaw": self.start_yaw, "pitch": 0.0, "jump": 0.0, "crouch": 0.0,
+             "fire": 0.0, "part": 1.0}
             for _ in range(self.ticks)
         ]
         for first, end, values in self.inputs:
@@ -97,9 +120,22 @@ def parse_scenario(text: str, source: str = "scenario") -> Scenario:
                 fields[keyword] = rest
             elif keyword == "ticks":
                 fields[keyword] = rest[:1]
+            elif keyword == "weapon":
+                if not rest:
+                    raise HarnessError(f"{where}: weapon takes a weapon tag's name")
+                # (the name may have spaces in it: weapons/assault rifle/assault rifle)
+                fields[keyword] = [" ".join(rest)]
+            elif keyword == "target":
+                if len(rest) != 4:
+                    raise HarnessError(f"{where}: target takes x, y, z and yaw")
+                fields[keyword] = rest
+            elif keyword == "flight":
+                if len(rest) != 1:
+                    raise HarnessError(f"{where}: flight takes a whole number")
+                fields[keyword] = [str(int(rest[0]))]
             elif keyword == "tolerance":
-                if len(rest) != 2 or rest[0] not in QUANTITIES:
-                    raise HarnessError(f"{where}: tolerance takes one of {', '.join(QUANTITIES)} and a number")
+                if len(rest) != 2 or rest[0] not in ALL_QUANTITIES:
+                    raise HarnessError(f"{where}: tolerance takes one of {', '.join(ALL_QUANTITIES)} and a number")
                 tolerances[rest[0]] = float(rest[1])
             elif keyword == "input":
                 values: dict[str, float] = {}
@@ -123,10 +159,14 @@ def parse_scenario(text: str, source: str = "scenario") -> Scenario:
         if not 0 <= first <= end <= ticks:
             raise HarnessError(f"{source}: input ticks {first} to {end} are outside 0 to {ticks}")
     start = fields["start"]
+    target = fields.get("target")
     return Scenario(
         name=fields["scenario"][0], map=fields["map"][0], start_name=start[0],
         start=(float(start[1]), float(start[2]), float(start[3])), start_yaw=float(start[4]),
         ticks=ticks, tolerances=tolerances, inputs=inputs,
+        weapon=fields["weapon"][0] if "weapon" in fields else None,
+        target=tuple(float(v) for v in target) if target else None,
+        flight=int(fields["flight"][0]) if "flight" in fields else 0,
     )
 
 
@@ -143,8 +183,13 @@ def load_scenario(path: Path) -> Scenario:
 @dataclass
 class Trace:
     header: dict[str, str]
-    # one row per tick, in TRACE_COLUMNS order after the tick number
+    # one row per tick, in TRACE_COLUMNS order after the tick number (and, in a
+    # trace of version 2, COMBAT_COLUMNS after those)
     rows: list[tuple[float, ...]]
+
+    @property
+    def firing(self) -> bool:
+        return self.header.get("halo-trace") == "2"
 
 
 def parse_trace(text: str, source: str = "trace") -> Trace:
@@ -160,23 +205,25 @@ def parse_trace(text: str, source: str = "trace") -> Trace:
         if not words:
             continue
         if not seen_columns:
-            if header.get("halo-trace") != "1":
-                raise HarnessError(f"{source}:{number}: not a halo-trace 1 file (no '# halo-trace 1' first)")
-            if tuple(words) != TRACE_COLUMNS:
-                raise HarnessError(f"{source}:{number}: columns must be {' '.join(TRACE_COLUMNS)}")
+            version = header.get("halo-trace")
+            if version not in ("1", "2"):
+                raise HarnessError(f"{source}:{number}: not a halo-trace file (no '# halo-trace 1' or 2 first)")
+            columns = TRACE_COLUMNS + (COMBAT_COLUMNS if version == "2" else ())
+            if tuple(words) != columns:
+                raise HarnessError(f"{source}:{number}: columns must be {' '.join(columns)}")
             seen_columns = True
             continue
         try:
             row = tuple(float(word) for word in words)
         except ValueError as error:
             raise HarnessError(f"{source}:{number}: unreadable ({error})") from error
-        if len(row) != len(TRACE_COLUMNS):
-            raise HarnessError(f"{source}:{number}: {len(row)} columns, not {len(TRACE_COLUMNS)}")
+        if len(row) != len(columns):
+            raise HarnessError(f"{source}:{number}: {len(row)} columns, not {len(columns)}")
         if row[0] != len(rows):
             raise HarnessError(f"{source}:{number}: tick {row[0]:g} where tick {len(rows)} is next")
         rows.append(row)
     if not seen_columns:
-        raise HarnessError(f"{source}: not a halo-trace 1 file (no column line)")
+        raise HarnessError(f"{source}: not a halo-trace file (no column line)")
     return Trace(header, rows)
 
 
@@ -196,12 +243,24 @@ def angle_difference(a: float, b: float) -> float:
 
 
 def row_differences(a: tuple[float, ...], b: tuple[float, ...]) -> dict[str, float]:
-    return {
+    differences = {
         "position": math.dist(a[1:4], b[1:4]),
         "velocity": math.dist(a[4:7], b[4:7]),
         "facing": max(abs(angle_difference(a[7], b[7])), abs(a[8] - b[8])),
         "state": float(bin(int(a[9]) ^ int(b[9])).count("1")),
     }
+    if len(a) > 10 and len(b) > 10:
+        # (rounds, total, heat, shield, body, stun, dead, hit)
+        differences.update({
+            "rounds": float(max(abs(a[10] - b[10]), abs(a[11] - b[11]))),
+            "heat": abs(a[12] - b[12]),
+            "shield": abs(a[13] - b[13]),
+            "body": abs(a[14] - b[14]),
+            "stun": abs(a[15] - b[15]),
+            "life": float(a[16] != b[16]),
+            "hit": float(a[17] != b[17]),
+        })
+    return differences
 
 
 @dataclass
@@ -230,12 +289,15 @@ def compare_traces(a: Trace, b: Trace, tolerances: dict[str, float] | None = Non
     """Every tick of two traces, a quantity at a time: pass when no quantity's
     difference at any tick is over its tolerance (default 0) and the traces
     are as long as each other."""
-    allowed = {name: 0.0 for name in QUANTITIES}
-    allowed.update(tolerances or {})
-    unknown = set(allowed) - set(QUANTITIES)
+    if a.firing != b.firing:
+        raise HarnessError("one trace is of a scenario of firing (version 2) and the other is not")
+    names = ALL_QUANTITIES if a.firing else QUANTITIES
+    allowed = {name: 0.0 for name in names}
+    allowed.update({name: value for name, value in (tolerances or {}).items() if name in names})
+    unknown = set(tolerances or {}) - set(ALL_QUANTITIES)
     if unknown:
         raise HarnessError(f"no such quantity: {', '.join(sorted(unknown))}")
-    results = {name: QuantityResult(allowed[name]) for name in QUANTITIES}
+    results = {name: QuantityResult(allowed[name]) for name in names}
     for tick, (row_a, row_b) in enumerate(zip(a.rows, b.rows)):
         for name, difference in row_differences(row_a, row_b).items():
             result = results[name]
@@ -252,7 +314,7 @@ def format_comparison(comparison: Comparison) -> str:
     if comparison.ticks[0] != comparison.ticks[1]:
         lines.append(f"FAIL ticks: {comparison.ticks[0]} in the first trace, {comparison.ticks[1]} in the second")
     for name, result in comparison.quantities.items():
-        unit = QUANTITIES[name]
+        unit = ALL_QUANTITIES[name]
         largest = f"largest {result.largest:.6g} at tick {result.largest_tick}" if result.largest_tick is not None else "no ticks"
         if result.passed:
             lines.append(f"pass {name}: {largest} (tolerance {result.tolerance:g} {unit})")
@@ -273,10 +335,11 @@ def default_binary() -> Path:
 
 
 def run_scenario(scenario_path: Path, trace_path: Path, binary: Path, data_root: Path,
-                 timeout: float = 120.0, save_root: Path | None = None) -> None:
+                 timeout: float = 120.0, save_root: Path | None = None, keep_log: Path | None = None) -> None:
     """Plays a scenario in the C engine headlessly (hidden window, no audio,
     one machine hosting a network test game) and leaves its trace at
-    trace_path. Raises HarnessError when the engine gives none."""
+    trace_path (and the game's log at keep_log, if given). Raises HarnessError
+    when the engine gives none."""
     scenario = load_scenario(scenario_path)
     if not binary.exists():
         raise HarnessError(f"no game at {binary} (build it: python configure.py && ninja linux)")
@@ -310,6 +373,8 @@ def run_scenario(scenario_path: Path, trace_path: Path, binary: Path, data_root:
                 ).returncode
             except subprocess.TimeoutExpired:
                 status = None
+        if keep_log:
+            keep_log.write_text(log.read_text(errors="replace"))
         if not trace_path.exists():
             tail = "".join(log.read_text(errors="replace").splitlines(keepends=True)[-8:])
             raise RunFailed(
@@ -324,11 +389,11 @@ def parse_tolerance_options(options: list[str]) -> dict[str, float]:
     for option in options:
         name, equals, value = option.partition("=")
         try:
-            if not equals or name not in QUANTITIES:
+            if not equals or name not in ALL_QUANTITIES:
                 raise ValueError(name)
             tolerances[name] = float(value)
         except ValueError:
-            raise HarnessError(f"--tolerance takes <{'|'.join(QUANTITIES)}>=<number>, not {option!r}") from None
+            raise HarnessError(f"--tolerance takes <{'|'.join(ALL_QUANTITIES)}>=<number>, not {option!r}") from None
     return tolerances
 
 
@@ -343,7 +408,8 @@ def find_data_root(option: str | None) -> Path:
 
 
 def command_run(arguments: argparse.Namespace) -> int:
-    run_scenario(arguments.scenario, arguments.trace, Path(arguments.binary), find_data_root(arguments.data))
+    run_scenario(arguments.scenario, arguments.trace, Path(arguments.binary), find_data_root(arguments.data),
+                 keep_log=arguments.log)
     print(f"wrote {arguments.trace}")
     return 0
 
@@ -387,6 +453,7 @@ def main(argv: list[str] | None = None) -> int:
     run = commands.add_parser("run", help="play a scenario in the C engine and write its trace")
     run.add_argument("scenario", type=Path)
     run.add_argument("trace", type=Path)
+    run.add_argument("--log", type=Path, help="keep the game's log here")
     engine_options(run)
     run.set_defaults(handler=command_run)
 

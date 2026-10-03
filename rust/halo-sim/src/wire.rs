@@ -59,6 +59,59 @@ pub fn decode_inputs(batch: &[u8]) -> Result<Vec<PlayerInput>, BadBatchLength> {
         .collect())
 }
 
+/// Bytes per hit report in a batch of them (see [`encode_hits`]).
+pub const HIT_SIZE: usize = 2 + 2 + 2 + 4 + 6 * 4;
+
+/// A batch of hit reports (a client's, which the server's `report_hits` takes
+/// over the client's own, reliable connection: see `halo_wire`'s documentation
+/// of where hit reports go and why), as fixed-size records:
+///
+/// ```text
+/// target          u16
+/// weapon          u16   the weapon's tag index
+/// material        i16   the part of the target that was hit, -1 for none
+/// host_tick       u32   the server tick the client had last heard of
+/// origin          f32 x 3   where the shot hit
+/// target_position f32 x 3   where the shooter saw the target
+/// ```
+///
+/// all little-endian, 34 bytes a record, floats as their IEEE-754 bits.
+pub fn encode_hits(hits: &[crate::combat::HitReport]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(hits.len() * HIT_SIZE);
+    for h in hits {
+        out.extend_from_slice(&h.target.to_le_bytes());
+        out.extend_from_slice(&h.weapon.to_le_bytes());
+        out.extend_from_slice(&h.material.to_le_bytes());
+        out.extend_from_slice(&h.host_tick.to_le_bytes());
+        for v in h.origin.iter().chain(&h.target_position) {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    out
+}
+
+pub fn decode_hits(batch: &[u8]) -> Result<Vec<crate::combat::HitReport>, BadBatchLength> {
+    if !batch.len().is_multiple_of(HIT_SIZE) {
+        return Err(BadBatchLength(batch.len()));
+    }
+    Ok(batch
+        .as_chunks::<HIT_SIZE>()
+        .0
+        .iter()
+        .map(|r| {
+            let f = |i: usize| f32::from_le_bytes(r[10 + 4 * i..14 + 4 * i].try_into().unwrap());
+            crate::combat::HitReport {
+                target: u16::from_le_bytes([r[0], r[1]]),
+                weapon: u16::from_le_bytes([r[2], r[3]]),
+                material: i16::from_le_bytes([r[4], r[5]]),
+                host_tick: u32::from_le_bytes([r[6], r[7], r[8], r[9]]),
+                origin: [f(0), f(1), f(2)],
+                target_position: [f(3), f(4), f(5)],
+            }
+        })
+        .collect())
+}
+
 /// The inputs of the batches that waited for this tick (oldest first) as one
 /// list. A tick that ran late finds several batches, each with the player's
 /// input of its own gateway tick: the newest says where the player is now, and
@@ -130,6 +183,38 @@ mod tests {
     fn two_inputs_of_a_player_in_one_batch_are_both_kept_for_the_step_to_refuse() {
         let inputs = collapse_batches(vec![vec![at(1, 1.0), at(1, 2.0)]]);
         assert_eq!(inputs.len(), 2);
+    }
+
+    #[test]
+    fn hit_reports_round_trip_bit_for_bit_and_have_a_fixed_layout() {
+        let hits = [
+            crate::combat::HitReport {
+                target: 0x0102,
+                weapon: 476,
+                material: -1,
+                host_tick: 0x0A0B0C0D,
+                origin: [1.0, -2.5, 3.25],
+                target_position: [f32::NAN, 0.0, -0.0],
+            },
+            crate::combat::HitReport {
+                target: 7,
+                weapon: 1,
+                material: 3,
+                host_tick: 5,
+                origin: [0.0; 3],
+                target_position: [9.0; 3],
+            },
+        ];
+        let bytes = encode_hits(&hits);
+        assert_eq!(bytes.len(), 2 * HIT_SIZE);
+        assert_eq!(HIT_SIZE, 34);
+        assert_eq!(&bytes[..10], [0x02, 0x01, 0xDC, 0x01, 0xFF, 0xFF, 0x0D, 0x0C, 0x0B, 0x0A]);
+        assert_eq!(&bytes[10..14], 1.0f32.to_le_bytes());
+        let back = decode_hits(&bytes).unwrap();
+        assert_eq!(encode_hits(&back), bytes);
+        assert_eq!(back[1], hits[1]);
+        assert_eq!(decode_hits(&bytes[..HIT_SIZE - 1]), Err(BadBatchLength(HIT_SIZE - 1)));
+        assert_eq!(decode_hits(&[]).unwrap(), []);
     }
 
     #[test]

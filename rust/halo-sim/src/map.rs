@@ -1,14 +1,15 @@
 use alloc::vec::Vec;
 
 use halo_map::collision::CollisionBsp;
+use halo_map::combat::Combat;
 use halo_map::{HaloMap, Movement};
 
 use crate::math::sqrt;
 use crate::spawn::Start;
 
 /// What the simulation reads from a map: its collision BSP and bounds, and
-/// the tags' movement values. The server keeps one per match and passes it by
-/// reference to every step.
+/// the tags' movement and combat values. The server keeps one per match and
+/// passes it by reference to every step.
 #[derive(Debug, Clone)]
 pub struct MapData {
     pub collision: CollisionBsp,
@@ -19,6 +20,9 @@ pub struct MapData {
     /// The player starting locations, settled on the ground (see
     /// [`crate::spawn`]). Where [`crate::rules`] spawns players.
     pub starts: Vec<Start>,
+    /// What the tags say of fighting: the weapons, and the player's health and
+    /// shields (see [`crate::combat`]).
+    pub combat: Combat,
 }
 
 impl MapData {
@@ -42,7 +46,7 @@ impl MapData {
     /// bounds and the [`Movement::COUNT`] movement values (all little-endian
     /// `f32`), the starting locations (a `u32` count, then for each its
     /// position and yaw as `f32`s, its team and four game types as `i16`s),
-    /// and
+    /// the combat values ([`Combat::to_bytes`], behind a `u32` length), and
     /// [`CollisionBsp::to_bytes`](halo_map::collision::CollisionBsp::to_bytes).
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -58,6 +62,9 @@ impl MapData {
                 out.extend_from_slice(&v.to_le_bytes());
             }
         }
+        let combat = self.combat.to_bytes();
+        out.extend_from_slice(&(combat.len() as u32).to_le_bytes());
+        out.extend_from_slice(&combat);
         out.extend_from_slice(&self.collision.to_bytes());
         out
     }
@@ -75,8 +82,13 @@ impl MapData {
         let short = || halo_map::MapError::Malformed("map data is shorter than its starting locations".into());
         let (count, rest) = rest.split_at_checked(4).ok_or_else(short)?;
         let count = u32::from_le_bytes(count.try_into().unwrap()) as usize;
-        let (start_bytes, collision) =
+        let (start_bytes, rest) =
             count.checked_mul(Start::BYTES).and_then(|n| rest.split_at_checked(n)).ok_or_else(short)?;
+        let short_combat = || halo_map::MapError::Malformed("map data is shorter than its combat values".into());
+        let (combat_len, rest) = rest.split_at_checked(4).ok_or_else(short_combat)?;
+        let combat_len = u32::from_le_bytes(combat_len.try_into().unwrap()) as usize;
+        let (combat_bytes, collision) = rest.split_at_checked(combat_len).ok_or_else(short_combat)?;
+        let combat = Combat::from_bytes(combat_bytes)?;
         let starts = start_bytes
             .as_chunks::<{ Start::BYTES }>()
             .0
@@ -99,7 +111,7 @@ impl MapData {
         if !movement.is_sane() {
             return Err(halo_map::MapError::Malformed("the map's movement values are not usable".into()));
         }
-        Ok(MapData { collision: CollisionBsp::from_bytes(collision)?, world_bounds, movement, starts })
+        Ok(MapData { collision: CollisionBsp::from_bytes(collision)?, world_bounds, movement, starts, combat })
     }
 }
 
@@ -110,6 +122,7 @@ impl From<HaloMap> for MapData {
             world_bounds: map.world_bounds,
             movement: map.movement,
             starts: Vec::new(),
+            combat: map.combat,
         };
         let starts: Vec<Start> = map
             .player_starts
@@ -132,6 +145,32 @@ mod tests {
         assert_eq!(back.world_bounds, map.world_bounds);
         assert_eq!(back.movement, map.movement);
         assert_eq!(back.collision, map.collision);
+        assert_eq!(back.combat, map.combat);
+    }
+
+    #[test]
+    fn a_map_with_fighting_survives_its_bytes() {
+        let mut map = crate::fixtures::flat_floor_map();
+        map.combat = crate::fixtures::combat_fixture();
+        let back = MapData::from_bytes(&map.to_bytes()).unwrap();
+        assert_eq!(back.combat, map.combat);
+        assert!(!back.combat.weapons.is_empty());
+    }
+
+    #[test]
+    fn combat_values_that_are_cut_short_or_not_numbers_are_refused() {
+        let mut map = crate::fixtures::flat_floor_map();
+        map.combat = crate::fixtures::combat_fixture();
+        let bytes = map.to_bytes();
+        // (cut anywhere in the combat values and what follows is no longer what they say)
+        let combat_at = 24 + 4 * Movement::COUNT + 4;
+        assert!(MapData::from_bytes(&bytes[..combat_at + 6]).is_err());
+        let mut broken = map.clone();
+        broken.combat.resistance.maximum_body_vitality = f32::NAN;
+        assert!(MapData::from_bytes(&broken.to_bytes()).is_err());
+        let mut broken = map;
+        broken.combat.weapons[0].triggers[0].magazine_index = 7;
+        assert!(MapData::from_bytes(&broken.to_bytes()).is_err());
     }
 
     #[test]
