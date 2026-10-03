@@ -449,8 +449,6 @@ fn players_in_range_fire_the_weapons_they_are_said_to_and_the_game_plays_what_is
     assert_eq!((shooter_id, victim_id, flanker_id), (0, 1, 2));
     // (where the server put them: the ground under the spawn point, which the wire's inputs must be on)
     let (shooter_at, flanker_at) = (a.standing(shooter_id), a.standing(flanker_id));
-    let shooter_wire = a.wire(shooter_id, 8);
-    let flanker_wire = a.wire(flanker_id, 8);
     let pistol = a.pistol();
     let (game, log) = a.start_game(90, &[]);
     let me = wait_for("the game's seat", 60, || {
@@ -461,6 +459,9 @@ fn players_in_range_fire_the_weapons_they_are_said_to_and_the_game_plays_what_is
     // after, in which it fires nothing)
     wait_for("the weapons", 20, || (read(&log).matches("holds weapons\\pistol\\pistol").count() >= 3).then_some(()));
     std::thread::sleep(Duration::from_millis(2500));
+    // (the wires are opened now: the gateway lets a player's session go when it hears nothing for a while,
+    // and the game took some seconds to start)
+    let shooter_wire = a.wire(shooter_id, 8);
     let began = Instant::now();
     let stamp = |what: &str| println!("[{:6.1} s] {what}", began.elapsed().as_secs_f32());
 
@@ -511,6 +512,7 @@ fn players_in_range_fire_the_weapons_they_are_said_to_and_the_game_plays_what_is
 
     // the flanker hits the game's own player five times: the screen, the sounds of being hit, and the death
     wait_for("the game's player alive", 30, || (a.owner.standings()[&me].state == STATE_ALIVE).then_some(()));
+    let flanker_wire = a.wire(flanker_id, 8);
     stamp("two hits on the game's player");
     let mut reported = 0;
     fire_for(
