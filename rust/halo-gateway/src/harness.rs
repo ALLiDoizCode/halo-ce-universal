@@ -571,11 +571,34 @@ impl Truth {
 /// a fresh `truth` starts at the present: the ticks queued from before it
 /// (while the players were still joining, and nobody was sent to) are not
 /// part of what the walk is measured against.
-pub fn run_walk(client: &MatchClient, walkers: &mut Walkers, crowd: &Crowd, truth: &mut Truth, duration: Duration) {
+///
+/// Returns the rounds of inputs sent (one for each wait that ended with a tick, however many were waiting).
+pub fn run_walk(
+    client: &MatchClient,
+    walkers: &mut Walkers,
+    crowd: &Crowd,
+    truth: &mut Truth,
+    duration: Duration,
+) -> usize {
+    run_walk_stalling(client, walkers, crowd, truth, duration, 0, Duration::ZERO)
+}
+
+/// [`run_walk`], with the walk stopped for `stall` after every `every` rounds (none if 0): a client on a
+/// machine that stops it for a while, which then has a backlog of ticks to catch up on.
+pub fn run_walk_stalling(
+    client: &MatchClient,
+    walkers: &mut Walkers,
+    crowd: &Crowd,
+    truth: &mut Truth,
+    duration: Duration,
+    every: usize,
+    stall: Duration,
+) -> usize {
     if truth.ticks.is_empty() {
         client.discard_ticks();
     }
     let until = Instant::now() + duration;
+    let mut rounds = 0;
     while Instant::now() < until {
         let Some(mut seen) = client.next_tick(Duration::from_secs(10)) else { panic!("no tick for 10 s") };
         truth.record(&seen);
@@ -585,7 +608,12 @@ pub fn run_walk(client: &MatchClient, walkers: &mut Walkers, crowd: &Crowd, trut
         }
         walkers.sync_with_server(seen.players.values());
         crowd.send_inputs(&walkers.next_inputs());
+        rounds += 1;
+        if every > 0 && rounds % every == 0 {
+            std::thread::sleep(stall);
+        }
     }
+    rounds
 }
 
 /// How many near players a recipient can have and still be sent all of them every tick, at `budget`

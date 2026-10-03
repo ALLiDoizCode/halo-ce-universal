@@ -54,6 +54,16 @@ pub struct Walkers {
     moved_at: BTreeMap<u16, u64>,
 }
 
+/// What [`Walkers::apply`] changes, kept so that a try can be taken back ([`Walkers::save`]).
+#[derive(Clone)]
+pub struct Saved {
+    mirror: MemoryStore,
+    headings: Vec<f32>,
+    bodies: Vec<Body>,
+    rng: Rng,
+    moved_at: BTreeMap<u16, u64>,
+}
+
 /// The copy's store, told how long ago each player last moved, as the module's store is.
 struct Timed<'a> {
     store: &'a mut MemoryStore,
@@ -254,6 +264,26 @@ impl Walkers {
                 self.headings[index] = self.rng.next_f32() * core::f32::consts::TAU;
             }
         }
+    }
+
+    /// The copy as it is now, to [`Walkers::restore`] after trying some inputs on it.
+    pub fn save(&self) -> Saved {
+        Saved {
+            mirror: self.mirror.clone(),
+            headings: self.headings.clone(),
+            bodies: self.bodies.clone(),
+            rng: self.rng.clone(),
+            moved_at: self.moved_at.clone(),
+        }
+    }
+
+    /// Go back to a state kept by [`Walkers::save`].
+    pub fn restore(&mut self, saved: Saved) {
+        self.mirror = saved.mirror;
+        self.headings = saved.headings;
+        self.bodies = saved.bodies;
+        self.rng = saved.rng;
+        self.moved_at = saved.moved_at;
     }
 
     /// Apply a tick's inputs to the local copy, as the server will.
