@@ -435,7 +435,8 @@ fn a_plasma_pistols_two_triggers_each_deal_their_own_damage_and_the_charged_one_
     // a charge takes 18 ticks and a heat gauge only lets one go a second: ten at once are mostly too many
     let bolt = HitReport { damage: PLASMA_PISTOL_CHARGED_DAMAGE, ..f.hit_on_target() };
     f.report(&[bolt; 10]);
-    wait_until("the verdicts", || f.rejected_hits() >= 4);
+    // (two reports came before: all twelve are judged when the table says so)
+    wait_until("the verdicts", || f.fighter(TARGET).hurt_count as u64 + f.rejected_hits() == 12);
     let rejected = f.rejected_hits();
     assert!((4..=6).contains(&rejected), "about 5 of 10 pass: {rejected} were rejected");
 }
