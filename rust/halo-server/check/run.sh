@@ -39,6 +39,9 @@
 #                   GAME_ENV extra "NAME=value" settings for it, space separated;
 #                   GAME_LOSS: e.g. 0.02, to put the game behind a relay (halo-udp-loss) that
 #                   loses that share of its datagrams, each way
+#   NO_BUILD [unset]  1: do not build anything (MATCH_WASM [the module's release build] is the match module to run)
+#   MODULE_FEATURES [none]  cargo features for the match module, e.g. stage-timing (module-logs/ gets the
+#                   host's timing lines; python3 check/stages.py module-logs/* summarises them)
 #   OUT             where logs and reports go [rust/halo-server/target/slayer-check/<time>]
 #
 # The script builds the modules and programs it needs.
@@ -76,9 +79,15 @@ mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
 ulimit -n 65536
 
-(cd "$rust/halo-match-module" && cargo build --locked --release --target wasm32-unknown-unknown 2>&1 | tail -1)
-(cd "$rust/halo-root-module" && cargo build --locked --release --target wasm32-unknown-unknown 2>&1 | tail -1)
-(cd "$rust/halo-server" && cargo build --locked --release 2>&1 | tail -1)
+# NO_BUILD=1 skips the builds (they are done beforehand, so that a run that holds the machine does not
+# also hold it for a compile); MATCH_WASM names the match module to run then.
+# MODULE_FEATURES=stage-timing: the match module times the stages of its tick (see stages.py)
+if [ -z "${NO_BUILD:-}" ]; then
+  (cd "$rust/halo-match-module" && cargo build --locked --release --target wasm32-unknown-unknown ${MODULE_FEATURES:+--features "$MODULE_FEATURES"} 2>&1 | tail -1)
+  (cd "$rust/halo-root-module" && cargo build --locked --release --target wasm32-unknown-unknown 2>&1 | tail -1)
+  (cd "$rust/halo-server" && cargo build --locked --release 2>&1 | tail -1)
+fi
+MATCH_WASM=${MATCH_WASM:-$rust/halo-match-module/target/wasm32-unknown-unknown/release/halo_match_module.wasm}
 bin="$rust/halo-server/target/release"
 
 # the server's configuration: one server, one rotation entry
@@ -93,7 +102,7 @@ database = "halo-root"
 module = "$rust/halo-root-module/target/wasm32-unknown-unknown/release/halo_root_module.wasm"
 
 [match]
-module = "$rust/halo-match-module/target/wasm32-unknown-unknown/release/halo_match_module.wasm"
+module = "$MATCH_WASM"
 maps_dir = "$HALO_MAP_DIR"
 
 [[server]]
@@ -210,6 +219,11 @@ if [ "$GAME" = 1 ]; then
 fi
 
 wait "$load" || echo "the load program failed: see $OUT/load.log"
+if [ -n "${MODULE_FEATURES:-}" ]; then
+  # the module's own log (the stage timings): the match's database is gone once the server stops
+  mkdir -p "$OUT/module-logs"
+  find "$OUT/stdb/data" -name '*.log' -path '*module_logs*' -exec cp {} "$OUT/module-logs/" \; 2>/dev/null || true
+fi
 if [ -n "$game" ]; then kill -TERM "$game" 2>/dev/null || true; wait "$game" 2>/dev/null || true; fi
 if [ -n "$relay" ]; then kill -TERM "$relay" 2>/dev/null || true; fi
 cleanup

@@ -683,14 +683,40 @@ fn add_to_roster(ctx: &ReducerContext, id: u16, identity: Option<Identity>) {
 
 /// `halo_sim::Store` over the `player` table. Position writes keep the
 /// rejection counters.
+///
+/// A move reads the player's row, then asks how long since it moved, then writes it: the row from the
+/// read is kept for the other two, so that a move is one lookup and one write and not three lookups
+/// and a write (each of which is a call to the host). The kept row is only ever one the last read
+/// returned, and any write or removal through the store drops it.
 struct TableStore<'a> {
     ctx: &'a ReducerContext,
     tick: u64,
+    read: RefCell<Option<PlayerRow>>,
+}
+
+impl<'a> TableStore<'a> {
+    fn new(ctx: &'a ReducerContext, tick: u64) -> TableStore<'a> {
+        TableStore { ctx, tick, read: RefCell::new(None) }
+    }
+
+    /// The row the last read of `id` returned, if that was the last thing the store did: taken, as the
+    /// write that follows replaces it.
+    fn take_kept(&self, id: PlayerId) -> Option<PlayerRow> {
+        let mut read = self.read.borrow_mut();
+        if read.as_ref().is_some_and(|row| row.id == id) {
+            read.take()
+        } else {
+            None
+        }
+    }
 }
 
 impl Store for TableStore<'_> {
     fn player(&self, id: PlayerId) -> Option<Player> {
-        self.ctx.db.player().id().find(id).as_ref().map(to_player)
+        let row = self.ctx.db.player().id().find(id);
+        let player = row.as_ref().map(to_player);
+        *self.read.borrow_mut() = row;
+        player
     }
 
     fn set_player(&mut self, p: Player) {
@@ -710,7 +736,9 @@ impl Store for TableStore<'_> {
             free_z: p.free_z,
             ..row
         };
-        match table.id().find(p.id) {
+        let known = self.take_kept(p.id).or_else(|| table.id().find(p.id));
+        *self.read.borrow_mut() = None;
+        match known {
             Some(row) => {
                 table.id().update(moved(row));
             }
@@ -738,6 +766,7 @@ impl Store for TableStore<'_> {
     }
 
     fn remove_player(&mut self, id: PlayerId) -> bool {
+        *self.read.borrow_mut() = None;
         self.ctx.db.player().id().delete(id)
     }
 
@@ -754,7 +783,9 @@ impl Store for TableStore<'_> {
     }
 
     fn ticks_since_move(&self, id: PlayerId) -> u32 {
-        let since = self.ctx.db.player().id().find(id).map_or(1, |row| self.tick.saturating_sub(row.updated_tick));
+        let kept = self.read.borrow().as_ref().filter(|row| row.id == id).map(|row| row.updated_tick);
+        let updated = kept.or_else(|| self.ctx.db.player().id().find(id).map(|row| row.updated_tick));
+        let since = updated.map_or(1, |updated| self.tick.saturating_sub(updated));
         since.clamp(1, u32::MAX as u64) as u32
     }
 }
@@ -1477,7 +1508,7 @@ pub fn join(ctx: &ReducerContext, udp_key: Vec<u8>) -> Result<(), String> {
         add_to_roster(ctx, id, Some(ctx.sender()));
         let mut game = TableGame { ctx };
         rules::enter(&mut game, id, roster_team(ctx, id), tick);
-        let mut store = TableStore { ctx, tick };
+        let mut store = TableStore::new(ctx, tick);
         let mut rng = Rng::seeded(tick ^ ((id as u64) << 32) ^ 0x5EED);
         let events = rules::spawn_due(&mut store, &mut game, &map, &mut rng, tick);
         log_events(&events);
@@ -1875,6 +1906,27 @@ pub fn report_death(ctx: &ReducerContext, victim: u16, killer: u16) -> Result<()
     Ok(())
 }
 
+/// A timed stage of the tick, for the profile of where its time goes (`--features stage-timing`; the
+/// host logs "Timing span" lines with each stage's duration, see `rust/halo-server/check/stages.py`).
+/// Without the feature it is nothing and costs nothing.
+#[cfg(feature = "stage-timing")]
+struct Stage(#[allow(dead_code)] spacetimedb::log_stopwatch::LogStopwatch);
+#[cfg(not(feature = "stage-timing"))]
+struct Stage;
+
+impl Stage {
+    #[cfg(feature = "stage-timing")]
+    fn begin(name: &str) -> Stage {
+        Stage(spacetimedb::log_stopwatch::LogStopwatch::new(name))
+    }
+    #[cfg(not(feature = "stage-timing"))]
+    fn begin(_name: &str) -> Stage {
+        Stage
+    }
+    /// Stop the stage here (it stops by itself at the end of its scope).
+    fn end(self) {}
+}
+
 /// One simulation tick (scheduled; the server calls it, nobody else may).
 #[reducer]
 pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
@@ -1885,6 +1937,7 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
     marker.tick += 1;
     marker.stamped_us = ctx.timestamp.to_micros_since_unix_epoch();
 
+    let stage = Stage::begin("tick.1 read inputs");
     let mut batches: Vec<InputBatch> = ctx.db.input_batch().iter().collect();
     batches.sort_unstable_by_key(|b| b.id);
     let mut decoded = Vec::with_capacity(batches.len());
@@ -1896,7 +1949,9 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
         }
     }
     let inputs = halo_sim::wire::collapse_batches(decoded);
+    stage.end();
 
+    let stage = Stage::begin("tick.2 read deaths and hit reports");
     let mut deaths: Vec<PendingDeath> = ctx.db.pending_death().iter().collect();
     deaths.sort_unstable_by_key(|d| d.id);
     for death in &deaths {
@@ -1919,16 +1974,19 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
         }
     }
 
+    stage.end();
+
     let mut rejected = 0u32;
     let (mut hits, mut rejected_hits, mut not_where_seen) = (0u32, 0u32, 0u64);
     if let Some(map) = current_map(ctx) {
-        let mut store = TableStore { ctx, tick: marker.tick };
+        let mut store = TableStore::new(ctx, marker.tick);
         let mut game = TableGame { ctx };
         let mut rng = Rng::seeded(marker.tick);
         if marker.tick.is_multiple_of(TICKS_PER_SECOND as u64) {
             ensure_fighters(ctx, &map, marker.tick);
         }
         // the hits first: the damage they do, and the deaths, are this tick's
+        let stage = Stage::begin("tick.3 combat resolve");
         let dealt = TRAILS.with(|t| {
             halo_sim::combat::resolve(
                 &store,
@@ -1952,8 +2010,12 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
             }
         }
         deaths.extend(dealt.deaths);
+        stage.end();
+        let stage = Stage::begin("tick.4 rules play");
         let outcome = rules::play(&mut store, &mut game, &map, &mut rng, marker.tick, &deaths, &inputs);
+        stage.end();
         log_events(&outcome.events);
+        let stage = Stage::begin("tick.5 deaths and spawns");
         // a player who died puts their weapons down; a player who spawned has the weapon
         // and the rounds the match starts them with
         let mut item_events: Vec<ItemEvent> = Vec::new();
@@ -1976,7 +2038,9 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
                 spawn_combat(ctx, &map, *player, marker.tick);
             }
         }
+        stage.end();
         // the items: what the placements make, what falls, what the players take
+        let stage = Stage::begin("tick.6 items");
         let mut requests: Vec<Request> =
             ctx.db.use_request().iter().map(|r| Request { player: r.player, slot: r.slot }).collect();
         requests.sort_unstable_by_key(|r| r.player);
@@ -1994,6 +2058,8 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
             &requests,
         ));
         log_item_events(&item_events);
+        stage.end();
+        let stage = Stage::begin("tick.7 rejected moves");
         for event in outcome.moves {
             let Event::MoveRejected { player, reason } = event else { continue };
             rejected += 1;
@@ -2020,14 +2086,18 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
                 ctx.db.player().id().update(row);
             }
         }
+        stage.end();
         // where the server saw everyone, for the next ticks' hit reports
+        let stage = Stage::begin("tick.8 trails");
         TRAILS.with(|t| {
             t.borrow_mut().record(marker.tick, ctx.db.player().iter().map(|p| (p.id, [p.x, p.y, p.z])));
         });
+        stage.end();
     } else if !inputs.is_empty() {
         log::warn!("no map is loaded: dropped {} inputs", inputs.len());
     }
 
+    let stage = Stage::begin("tick.9 upkeep and marker");
     // once a second: seats whose player has been away for the grace period go
     if marker.tick.is_multiple_of(TICKS_PER_SECOND as u64) {
         let grace = ctx.db.match_config().id().find(ONLY).map_or(DEFAULT_AWAY_GRACE_TICKS, |c| c.away_grace_ticks);
@@ -2059,5 +2129,6 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
     marker.hits_total += hits as u64;
     marker.rejected_not_where_seen_total += not_where_seen;
     ctx.db.match_tick().id().update(marker);
+    stage.end();
     Ok(())
 }
