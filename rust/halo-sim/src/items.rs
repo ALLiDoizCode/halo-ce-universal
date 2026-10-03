@@ -576,6 +576,11 @@ pub fn tick(
             working.insert(row.id, row);
             continue;
         }
+        // one put down this very tick has begun to fall at its end, and is not stepped yet
+        if row.tick >= tick {
+            working.insert(row.id, row);
+            continue;
+        }
         // (where it was at the end of the last tick: the store's, or from the row)
         let before = match items.flight(row.id) {
             Some(known) if known.tick + 1 >= tick => known,
