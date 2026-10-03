@@ -320,6 +320,8 @@ static struct
 	boolean vitals_short;
 	long reports_logged;
 	boolean autofire;
+	/* ... or the melee button, which it presses (large.automelee) a tick in forty, a blow's length */
+	boolean automelee;
 	/* ... with the trigger let go for a tick after this many (large.autofire_cycle), 0 for never */
 	long autofire_cycle;
 
@@ -374,6 +376,7 @@ static void large_mode_read_settings(
 		large.scoreboard_always = config_boolean("large.scoreboard") != 0;
 		large.autofire = config_boolean("large.autofire") != 0;
 		large.autofire_cycle = (long)config_real("large.autofire_cycle");
+		large.automelee = config_boolean("large.automelee") != 0;
 		large.autouse_after = (real)config_real("large.autouse");
 		if (large.root[0])
 		{
@@ -391,6 +394,7 @@ static void large_mode_read_settings(
 	large.scoreboard_always = config_boolean("large.scoreboard") != 0;
 	large.autofire = config_boolean("large.autofire") != 0;
 	large.autofire_cycle = (long)config_real("large.autofire_cycle");
+	large.automelee = config_boolean("large.automelee") != 0;
 	large.autouse_after = (real)config_real("large.autouse");
 	if (!large.database[0])
 	{
@@ -1809,6 +1813,13 @@ static void large_mode_autofire(
 	aim.j = dy / length;
 	aim.k = dz / length;
 	player_control_set_facing(0, &aim);
+	if (large.automelee)
+	{
+		/* (the melee button is the engine's "use equipment" control) */
+		if (game_time_get() % 40 == 0)
+			SET_FLAG(unit->unit.control_flags, _unit_control_use_equipment_bit, TRUE);
+		return;
+	}
 	if (large.autofire_cycle > 0 && game_time_get() % (large.autofire_cycle + 1) == large.autofire_cycle)
 		return;
 	SET_FLAG(unit->unit.control_flags, _unit_control_weapon_primary_trigger_bit, TRUE);
@@ -2642,7 +2653,7 @@ void large_mode_game_tick(
 		else
 		{
 			/* (the test's trigger is held before the library is told of it, as a player's is) */
-			if (large.autofire)
+			if (large.autofire || large.automelee)
 				large_mode_autofire(unit);
 			large_mode_fire_local(unit_index, unit);
 			large_mode_move_local(unit_index, unit);

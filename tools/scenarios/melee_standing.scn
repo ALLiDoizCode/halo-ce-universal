@@ -1,0 +1,30 @@
+# The pistol's butt, struck at a target eight tenths of a unit away that stands
+# still, twice (the first-person animation is 45 frames, less a quarter, and the
+# blow lands four frames in, less a quarter): a blow dealt by a player who is
+# standing is at the damage's scale of 0, which is its minimum of 40; the shield
+# takes it, then the body. The target is left alive: the weapon of a body is
+# picked up by whoever stands over it, which the simulation does not do.
+scenario melee_standing
+map bloodgulch
+start flat_field 77.9 -166.2 0.32 0.0
+target 78.8 -166.2 0.32 3.14159265
+weapon weapons/pistol/pistol
+ticks 200
+# aim at the body
+input 0 200 pitch=-0.2
+input 60 61 melee=1
+input 110 111 melee=1
+
+tolerance position 0
+tolerance velocity 0
+tolerance facing 0
+tolerance state 0
+tolerance rounds 0
+tolerance heat 0
+tolerance shield 0
+tolerance body 0
+tolerance stun 0
+tolerance life 0
+tolerance hit 0
+tolerance shots 0
+tolerance age 0

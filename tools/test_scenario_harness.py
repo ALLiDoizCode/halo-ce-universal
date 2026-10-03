@@ -341,7 +341,7 @@ FIRING_SCENARIOS = sorted(path.stem for path in harness.SCENARIOS.glob("*.scn")
 def test_there_are_scenarios_of_firing_for_the_weapons_rate_damage_and_shield():
     assert {"pistol_kill", "pistol_magazine", "pistol_shield", "rifle_burst", "sniper_kill", "shotgun_blast",
             "shotgun_reload", "plasma_rifle_heat", "plasma_pistol_taps", "plasma_pistol_charge",
-            "rocket_blast", "needler_burst"} <= set(FIRING_SCENARIOS)
+            "rocket_blast", "needler_burst", "melee_standing", "melee_running", "melee_airborne"} <= set(FIRING_SCENARIOS)
 
 
 @needs_engine
@@ -361,5 +361,5 @@ def test_the_simulation_matches_the_engine_on_a_scenario_of_firing(name, tmp_pat
     assert comparison.passed, harness.format_comparison(comparison)
     # (the engine's trace is of something happening: shots were fired, and a hit landed if there is a target)
     rows = harness.load_trace(engine).rows
-    assert rows[-1][18] > 0  # (the weapon fired)
+    assert rows[-1][18] > 0 or any(r[17] != -1 for r in rows)  # (the weapon fired, or a blow landed)
     assert any(r[17] != -1 for r in rows) == (harness.load_scenario(scenario).target is not None)

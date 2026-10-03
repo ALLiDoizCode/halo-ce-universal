@@ -314,8 +314,8 @@ fn weapon_tag(data: &Path, name: &str) -> u16 {
 /// server gives a player who spawns the starting weapon, and the game takes the weapon the server says when its unit
 /// first spawns, so the weapon has to be there when it does), shoots the player in front of it dead with it, and
 /// the server counts the kill as the game's; `what` says what the weapon is for the log.
-fn the_game_kills_with(name: &str, weapon: &str, what: &str, extra: &[(&str, &str)]) {
-    let Some(a) = arena(name, &[at(84.0, -166.2, std::f32::consts::PI), at(80.0, -166.2, 0.0)]) else {
+fn the_game_kills_with(name: &str, weapon: &str, what: &str, extra: &[(&str, &str)], target_x: f32) {
+    let Some(a) = arena(name, &[at(target_x, -166.2, std::f32::consts::PI), at(80.0, -166.2, 0.0)]) else {
         return;
     };
     let (_target, target_id) = a.seat(1);
@@ -356,7 +356,13 @@ fn the_game_kills_with(name: &str, weapon: &str, what: &str, extra: &[(&str, &st
 
 #[test]
 fn the_game_shoots_a_player_dead_with_the_plasma_rifle_whose_bolts_take_time_to_fly() {
-    the_game_kills_with("combat-plasma-rifle", "weapons\\plasma rifle\\plasma rifle.weap", "the plasma rifle", &[]);
+    the_game_kills_with(
+        "combat-plasma-rifle",
+        "weapons\\plasma rifle\\plasma rifle.weap",
+        "the plasma rifle",
+        &[],
+        84.0,
+    );
 }
 
 #[test]
@@ -367,6 +373,7 @@ fn the_game_shoots_a_player_dead_with_the_plasma_pistol_tapped_and_charged() {
         "weapons\\plasma pistol\\plasma pistol.weap",
         "the plasma pistol, tapped",
         &[("HALO_LARGE_AUTOFIRE_CYCLE", "1")],
+        84.0,
     );
     // ... and held for 40 ticks (a charge of 18 is full) before it is let go: overcharged bolts of 70
     the_game_kills_with(
@@ -374,6 +381,7 @@ fn the_game_shoots_a_player_dead_with_the_plasma_pistol_tapped_and_charged() {
         "weapons\\plasma pistol\\plasma pistol.weap",
         "the plasma pistol, charged",
         &[("HALO_LARGE_AUTOFIRE_CYCLE", "40")],
+        84.0,
     );
 }
 
@@ -385,12 +393,25 @@ fn the_game_shoots_a_player_dead_with_a_rocket_whose_blast_is_one_explosion() {
         "weapons\\rocket launcher\\rocket launcher.weap",
         "the rocket launcher",
         &[("HALO_LARGE_AUTOFIRE_CYCLE", "1")],
+        84.0,
     );
 }
 
 #[test]
 fn the_game_shoots_a_player_dead_with_needles_that_stick_and_explode() {
-    the_game_kills_with("combat-needler", "weapons\\needler\\needler.weap", "the needler", &[]);
+    the_game_kills_with("combat-needler", "weapons\\needler\\needler.weap", "the needler", &[], 84.0);
+}
+
+#[test]
+fn the_game_strikes_a_player_dead_with_its_melee_blows() {
+    // nine tenths of a unit from the target, which the game faces: the blow reaches that far
+    the_game_kills_with(
+        "combat-melee",
+        "weapons\\pistol\\pistol.weap",
+        "the pistol, struck in melee",
+        &[("HALO_LARGE_AUTOMELEE", "1")],
+        80.9,
+    );
 }
 
 #[test]

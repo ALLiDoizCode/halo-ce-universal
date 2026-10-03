@@ -1,0 +1,31 @@
+# A blow struck on the run, at a target that stands still ahead: the damage's
+# scale is how fast the player moves ahead against how fast they run (a full run
+# is 1, and then the damage is the tag's 50 to 60, rolled), and the player goes on
+# running through the blow (the engine's blow has no lunge of its own: the
+# simulation's movement matches it to the last bit). One blow is enough: the
+# shield, which takes a blow's damage and a bit more, is nearly gone.
+scenario melee_running
+map bloodgulch
+start flat_field 77.9 -166.2 0.32 0.0
+target 81.3 -166.2 0.32 3.14159265
+weapon weapons/pistol/pistol
+ticks 200
+# aim at the body
+input 0 200 pitch=-0.2
+input 30 66 forward=1.0
+input 60 61 melee=1
+# (a run's speed is held to a last digit of the engine's, as the walking scenarios do)
+
+tolerance position 0
+tolerance velocity 0.005
+tolerance facing 0
+tolerance state 0
+tolerance rounds 0
+tolerance heat 0
+tolerance shield 0
+tolerance body 0
+tolerance stun 0
+tolerance life 0
+tolerance hit 0
+tolerance shots 0
+tolerance age 0

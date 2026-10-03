@@ -24,7 +24,7 @@ use halo_sim::fixtures::{
     combat_fixture, flat_floor_map, needler, plasma_pistol, plasma_rifle, rocket_launcher, shotgun, sniper_rifle,
     start_at, with_starts, NEEDLER, NEEDLER_ATTACHED_DAMAGE, NEEDLER_BLAST, PISTOL, PISTOL_DAMAGE, PLASMA_PISTOL,
     PLASMA_PISTOL_CHARGED_DAMAGE, PLASMA_PISTOL_DAMAGE, PLASMA_RIFLE, PLASMA_RIFLE_DAMAGE, ROCKET_BLAST,
-    ROCKET_LAUNCHER, SHOTGUN, SHOTGUN_DAMAGE, SNIPER_RIFLE, SNIPER_RIFLE_DAMAGE,
+    ROCKET_LAUNCHER, SHOTGUN, SHOTGUN_DAMAGE, SHOTGUN_MELEE, SNIPER_RIFLE, SNIPER_RIFLE_DAMAGE,
 };
 use halo_sim::rules::Rules;
 use halo_sim::TICKS_PER_SECOND;
@@ -484,4 +484,38 @@ fn a_needler_needle_stuck_to_a_target_hurts_it_and_seven_make_a_blast_of_sixty()
     // 60 more of the 65 that are left of the shield
     assert!((f.fighter(TARGET).shield - 5.0 / 75.0).abs() < 1.0e-4, "{}", f.fighter(TARGET).shield);
     assert_eq!(f.rejected_hits(), 0);
+}
+
+#[test]
+fn a_melee_blow_deals_the_damage_at_the_scale_it_was_struck_at_and_only_to_what_is_in_reach() {
+    // a metre apart (the players spawn that far from each other), one with a shotgun's butt
+    let Some(f) = armed_fight_apart("hit-melee", 1.0, SHOTGUN, 1.0e3) else { return };
+    let head = |f: &Fight, scale: f32| {
+        let me = f.position(SHOOTER);
+        HitReport {
+            damage: SHOTGUN_MELEE,
+            material: -1,
+            scale,
+            // the engine's origin of a blow is the shooter's head
+            origin: [me[0], me[1], me[2] + 0.6],
+            ..f.hit_on_target()
+        }
+    };
+    // a blow struck standing still has no scale: the damage's minimum, 40
+    f.report(&[head(&f, 0.0)]);
+    wait_until("the standing blow", || f.fighter(TARGET).hurt_count == 1);
+    let lost = |f: &Fight| (1.0 - f.fighter(TARGET).shield) * 75.0e3;
+    assert!((lost(&f) - 40.0).abs() < 1.0e-2, "{}", lost(&f));
+    // one struck at a run is 50 to 60, whatever more the client says it was
+    f.report(&[head(&f, 9.0)]);
+    wait_until("the running blow", || f.fighter(TARGET).hurt_count == 2);
+    let dealt = lost(&f) - 40.0;
+    assert!((50.0..=60.0).contains(&dealt), "a blow at the most a ground blow's: {dealt}");
+    assert_eq!(f.rejected_hits(), 0);
+    // a blow at a target ten units away is no blow
+    let mut far = head(&f, 1.0);
+    far.target_position[0] += 10.0;
+    f.report(&[far]);
+    wait_until("the refusal", || f.rejected_hits() == 1);
+    assert_eq!(f.fighter(TARGET).hurt_count, 2);
 }
