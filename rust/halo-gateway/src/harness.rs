@@ -602,11 +602,21 @@ pub struct BandStats {
     pub hz: f64,
     /// The fraction of pairs updated in a tick, 0 to 1.
     pub fraction_updated: f64,
-    /// The most ticks between two updates of the same pair.
+    /// The most ticks between two updates of a pair that was in this band
+    /// for the whole gap. A pair that changed band, or of which either player
+    /// left the world, starts afresh: see `longest_entry_gap_ticks`.
     pub longest_gap_ticks: u32,
-    /// Updates that came more than 100 ms (four ticks or more) after the pair's previous one.
+    /// Updates that came more than 100 ms (four ticks or more) after the
+    /// pair's previous one, with the pair in this band throughout.
     pub stalls_over_100ms: u64,
     pub stall_fraction: f64,
+    /// The most ticks between a pair's last update before it changed band
+    /// (it may have left this band and come back) and its first update in
+    /// this one, both players in the world throughout. Reported
+    /// apart from the gaps above: a far player updated every 15 ticks that
+    /// jumps close waits that long for its first near update, which says
+    /// nothing about how near players are served.
+    pub longest_entry_gap_ticks: u32,
 }
 
 /// The largest age, in ticks, the report tells apart: older ones are counted as this.
@@ -668,14 +678,15 @@ impl fmt::Display for Report {
         for b in &self.bands {
             writeln!(
                 f,
-                "  {:>5.0} to {:<5} wu   {:>6.2} Hz   updated in {:>6.2}% of ticks   longest gap {:>3} ticks   gaps over 100 ms {:.3}%   ({} pairs)",
+                "  {:>5.0} to {:<5} wu   {:>6.2} Hz   updated in {:>6.2}% of ticks   longest gap {:>3} ticks   gaps over 100 ms {:.3}%   ({} pairs)   longest wait on entry {:>3} ticks",
                 b.from,
                 if b.to.is_finite() { format!("{:.0}", b.to) } else { "...".into() },
                 b.hz,
                 b.fraction_updated * 100.0,
                 b.longest_gap_ticks,
                 b.stall_fraction * 100.0,
-                b.pairs
+                b.pairs,
+                b.longest_entry_gap_ticks
             )?;
         }
         writeln!(
@@ -690,6 +701,75 @@ impl fmt::Display for Report {
     }
 }
 
+/// Gaps between updates, by band, of every (recipient, other player) pair.
+///
+/// A gap belongs to a band only if the pair was in it for the whole gap. A
+/// pair that changes band starts afresh in its new band, and so does one of
+/// which either player is out of the world for a tick; the first update after
+/// a band change is kept as a wait on entry, apart from the band's own gaps.
+struct GapTracker {
+    capacity: usize,
+    pairs: Vec<PairGap>,
+    longest: Vec<u32>,
+    stalls: Vec<u64>,
+    longest_entry: Vec<u32>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct PairGap {
+    /// The tick of the pair's last update (0 if none yet, or it was forgotten).
+    last_update: u32,
+    /// The tick the pair was last in the world together on.
+    seen: u32,
+    band: usize,
+    /// No band change since `last_update`.
+    in_one_band: bool,
+}
+
+impl GapTracker {
+    fn new(capacity: usize, bands: usize) -> GapTracker {
+        GapTracker {
+            capacity,
+            pairs: vec![PairGap::default(); capacity * capacity],
+            longest: vec![0; bands],
+            stalls: vec![0; bands],
+            longest_entry: vec![0; bands],
+        }
+    }
+
+    /// The pair is in the world together in `band` at `tick`, whose
+    /// predecessor in the record is `previous` (`None` for the first), and was
+    /// `updated` this tick or not.
+    fn observe(&mut self, me: usize, other: usize, tick: u32, previous: Option<u32>, band: usize, updated: bool) {
+        let pair = &mut self.pairs[me * self.capacity + other];
+        if previous != Some(pair.seen) {
+            *pair = PairGap { band, in_one_band: true, ..PairGap::default() };
+        }
+        pair.seen = tick;
+        if pair.band != band {
+            pair.band = band;
+            pair.in_one_band = false;
+        }
+        if !updated {
+            return;
+        }
+        if pair.last_update != 0 {
+            let gap = tick - pair.last_update;
+            if pair.in_one_band {
+                self.longest[band] = self.longest[band].max(gap);
+                // a gap of g ticks is g / 30 s
+                if gap as f64 * 1000.0 / TICKS_PER_SECOND as f64 > 100.0 {
+                    self.stalls[band] += 1;
+                }
+            } else {
+                self.longest_entry[band] = self.longest_entry[band].max(gap);
+            }
+        }
+        pair.last_update = tick;
+        pair.in_one_band = true;
+    }
+}
+
 /// Compare what the crowd received with the truth, over the ticks in `window`.
 /// `edges` are the upper bounds of the distance bands, ascending (see
 /// [`DEFAULT_BANDS`]); a last band has no upper bound.
@@ -700,8 +780,8 @@ pub fn analyze(crowd: &Crowd, truth: &Truth, window: Range<u32>, edges: &[f32]) 
     let band_of = |d2: f32| edges.iter().position(|e| d2 < e * e).unwrap_or(edges.len());
     let mut pairs = vec![0u64; bands];
     let mut updated = vec![0u64; bands];
-    let mut longest = vec![0u32; bands];
-    let mut stalls = vec![0u64; bands];
+    let mut gaps = GapTracker::new(capacity, bands);
+    // for the age figures, which carry on across band changes and absences
     let mut last_update = vec![0u32; capacity * capacity];
     let mut age_counts = vec![0u64; MAX_AGE_TICKS + 1];
     let mut max_age = 0u32;
@@ -709,7 +789,9 @@ pub fn analyze(crowd: &Crowd, truth: &Truth, window: Range<u32>, edges: &[f32]) 
     let mut ages = Vec::new();
     let mut bytes = vec![0u64; crowd.players.len()];
     let (mut missed, mut expected) = (0u64, 0u64);
+    let mut previous = None;
     for &(&tick, at) in &ticks {
+        let before = previous.replace(tick);
         for (index, player) in crowd.players.iter().enumerate() {
             let me = player.id as usize;
             let receipt = player.receipt(tick);
@@ -733,16 +815,10 @@ pub fn analyze(crowd: &Crowd, truth: &Truth, window: Range<u32>, edges: &[f32]) 
                 let band = band_of(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
                 pairs[band] += 1;
                 let slot = &mut last_update[me * capacity + other];
-                if receipt.as_ref().is_some_and(|r| r.has_state_of(other as u16)) {
+                let was_updated = receipt.as_ref().is_some_and(|r| r.has_state_of(other as u16));
+                gaps.observe(me, other, tick, before, band, was_updated);
+                if was_updated {
                     updated[band] += 1;
-                    if *slot != 0 {
-                        let gap = tick - *slot;
-                        longest[band] = longest[band].max(gap);
-                        // a gap of g ticks is g / 30 s
-                        if gap as f64 * 1000.0 / TICKS_PER_SECOND as f64 > 100.0 {
-                            stalls[band] += 1;
-                        }
-                    }
                     *slot = tick;
                 }
                 if *slot != 0 {
@@ -780,9 +856,10 @@ pub fn analyze(crowd: &Crowd, truth: &Truth, window: Range<u32>, edges: &[f32]) 
                 updated: updated[i],
                 hz: updated[i] as f64 / pairs[i].max(1) as f64 * TICKS_PER_SECOND as f64,
                 fraction_updated: updated[i] as f64 / pairs[i].max(1) as f64,
-                longest_gap_ticks: longest[i],
-                stalls_over_100ms: stalls[i],
-                stall_fraction: stalls[i] as f64 / updated[i].max(1) as f64,
+                longest_gap_ticks: gaps.longest[i],
+                stalls_over_100ms: gaps.stalls[i],
+                stall_fraction: gaps.stalls[i] as f64 / updated[i].max(1) as f64,
+                longest_entry_gap_ticks: gaps.longest_entry[i],
             })
             .collect(),
         age_counts,
@@ -852,5 +929,83 @@ impl Rig {
         let transport = Arc::new(UdpTransport::bind("127.0.0.1:0".parse().unwrap()).unwrap());
         let gateway = Gateway::start(config, transport).expect("start the gateway");
         Rig { gateway, client, walkers, seats, capacity: players as usize, server, gateway_account }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NEAR: usize = 0;
+    const FAR: usize = 3;
+
+    /// Feed a tracker one pair (0, 1): `at(tick)` is `Some((band, updated))`
+    /// when both are in the world.
+    fn run(ticks: Range<u32>, at: impl Fn(u32) -> Option<(usize, bool)>) -> GapTracker {
+        let mut t = GapTracker::new(2, 4);
+        let mut previous = None;
+        for tick in ticks {
+            if let Some((band, updated)) = at(tick) {
+                t.observe(0, 1, tick, previous, band, updated);
+            }
+            previous = Some(tick);
+        }
+        t
+    }
+
+    #[test]
+    fn a_pair_that_jumps_into_a_band_has_no_gap_there_only_a_wait_on_entry() {
+        // far (over 60 wu) and updated every 15 ticks, then within 10 wu from tick 61 and updated every tick
+        let t = run(1..100, |tick| if tick < 61 { Some((FAR, tick % 15 == 0)) } else { Some((NEAR, true)) });
+        assert_eq!(t.longest[NEAR], 1);
+        assert_eq!(t.longest[FAR], 15);
+        assert_eq!(t.longest_entry[NEAR], 1, "last far update at 60, first near one at 61");
+        assert_eq!(t.longest_entry[FAR], 0);
+    }
+
+    #[test]
+    fn a_long_wait_on_entry_is_kept_apart_from_the_bands_gaps() {
+        // updated at tick 45 far away, close from 59, first near update at 60
+        let t = run(1..100, |tick| match tick {
+            ..=44 => Some((FAR, false)),
+            45 => Some((FAR, true)),
+            46..=58 => Some((FAR, false)),
+            59 => Some((NEAR, false)),
+            _ => Some((NEAR, true)),
+        });
+        assert_eq!(t.longest_entry[NEAR], 15);
+        assert_eq!(t.longest[NEAR], 1);
+    }
+
+    #[test]
+    fn a_player_out_of_the_world_for_100_ticks_leaves_no_gap_of_100() {
+        let t = run(1..300, |tick| match tick {
+            101..=200 => None,
+            _ => Some((NEAR, true)),
+        });
+        assert!(t.longest.iter().all(|g| *g < 100), "{:?}", t.longest);
+        assert!(t.longest_entry.iter().all(|g| *g < 100), "{:?}", t.longest_entry);
+        assert_eq!(t.longest[NEAR], 1);
+    }
+
+    #[test]
+    fn a_pair_that_returns_to_the_band_it_left_does_not_count_the_trip_as_a_gap_there() {
+        let t = run(1..100, |tick| match tick {
+            1 => Some((NEAR, true)),
+            2..=29 => Some((FAR, false)),
+            30..=40 => Some((NEAR, false)),
+            _ => Some((NEAR, true)),
+        });
+        assert_eq!(t.longest[NEAR], 1);
+        assert_eq!(t.longest_entry[NEAR], 40, "from the update at tick 1 to the next one at 41");
+    }
+
+    #[test]
+    fn a_pair_that_stays_in_a_band_and_misses_updates_is_reported_there() {
+        // updated every 5 ticks
+        let t = run(1..100, |tick| Some((1, tick % 5 == 0)));
+        assert_eq!(t.longest[1], 5);
+        assert_eq!(t.stalls[1], 18, "gaps of 5 ticks (167 ms), from tick 10 to 95");
+        assert_eq!(t.longest_entry[1], 0);
     }
 }
