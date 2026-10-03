@@ -140,6 +140,9 @@ symbols in this file:
 
 /* port/linux/game/scenario_harness.c's: the part of a unit a hit is on, for the trace */
 void scenario_harness_damage(long object_index, short material_index);
+/* port/linux/game/large_mode.c's: whether this machine deals the damage (the large-scale mode's
+server does, and is told of the hits the local player's weapon makes) */
+boolean large_mode_damage_deals(struct damage_data const *damage, long object_index, short material_index);
 /* network_game_globals.c's */
 boolean network_game_distributed_client(void);
 /* port/linux/game/network_damage.c's */
@@ -1392,6 +1395,8 @@ void object_cause_damage(
 	{
 		return;
 	}
+	if (!large_mode_damage_deals(damage, object_index, material_index))
+		return;
 	scenario_harness_damage(object_index, material_index);
 
 	damage_effect = damage_effect_definition_get(damage->definition_index);

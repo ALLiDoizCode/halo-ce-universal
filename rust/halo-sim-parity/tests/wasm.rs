@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use halo_sim_parity::{event_counts, match_event_counts, run, run_match};
+use halo_sim_parity::{event_counts, fight_counts, match_event_counts, run, run_fight, run_match};
 use wasmi::{Engine, Linker, Module, Store};
 
 const TICKS: u32 = 10_000;
@@ -59,6 +59,10 @@ impl Wasm {
 
     fn run_match(&mut self, seed: u64, ticks: u32) -> Vec<u8> {
         self.call("parity_match_run", seed, ticks)
+    }
+
+    fn run_fight(&mut self, seed: u64, ticks: u32) -> Vec<u8> {
+        self.call("parity_fight_run", seed, ticks)
     }
 
     fn call(&mut self, export: &str, seed: u64, ticks: u32) -> Vec<u8> {
@@ -112,4 +116,24 @@ fn different_seeds_give_different_results() {
     // guards the comparison above against comparing two empty or constant results
     assert_ne!(run(1, 300), run(2, 300));
     assert_ne!(run_match(1, 600), run_match(3, 600));
+    assert_ne!(run_fight(1, 600), run_fight(2, 600));
+}
+
+/// Fighting: weapons that fire at their rate, damage drawn from the random source, hit reports judged by
+/// distances and square roots, shields recharged, and the rules' deaths and respawns.
+#[test]
+fn the_wasm_build_fights_byte_identically_to_the_native_build() {
+    let mut wasm = Wasm::load(&build_wasm());
+    for seed in [1, 2, 0xDEAD_BEEF_0BAD_F00D] {
+        let native = run_fight(seed, 3_000);
+        let wasm_result = wasm.run_fight(seed, 3_000);
+        assert_eq!(wasm_result.len(), native.len(), "seed {seed:#x}");
+        assert!(wasm_result == native, "seed {seed:#x}: the wasm and native fights differ");
+
+        // the fight really happened: hits, deaths, and the reports refused
+        let counts = fight_counts(&native);
+        assert!(counts[0] > 100 && counts[13] > 5 && counts[14] > 100, "seed {seed:#x}: too thin: {counts:?}");
+        let refused: u32 = counts[1..13].iter().sum();
+        assert!(refused > 20, "seed {seed:#x}: too few refused: {counts:?}");
+    }
 }

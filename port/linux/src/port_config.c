@@ -221,6 +221,9 @@ static const struct config_setting config_settings[] =
 		"Keep the large-scale mode's scoreboard (every player of the match) on\n"
 		"screen, as if the score button were held (for tests' pictures; it comes up\n"
 		"by itself when the game has ended)." },
+	{ "large.autofire", _config_boolean, "false", "HALO_LARGE_AUTOFIRE", _environment_set_is_true, _platform_desktop,
+		"The large-scale mode's player aims at the nearest other player in the world\n"
+		"and holds the trigger down (for the automated tests' shooter)." },
 	{ "debug.network_test", _config_string, "\"\"", "HALO_NETWORK_TEST", _environment_value, _platform_all,
 		"Automated system link sessions for testing (port/linux/game/network_test.c):\n"
 		"\"host:<map>\" hosts a game on that map, \"join\" joins the first game found;\n"

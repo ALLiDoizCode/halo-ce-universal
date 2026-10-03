@@ -26,6 +26,12 @@
 //!   dies or spawns (the clock in `game_state.tick` twice a second): clients
 //!   subscribe to all of them for the scoreboard and for the player's own
 //!   respawn, and the orchestration reads `game_state` for the match's end.
+//! - `fighter` (public) is each living player's shield and health as of a tick
+//!   (clients and the module count the recharge forward: nothing is written
+//!   while a shield recharges), their weapons, and the last hit that hurt them.
+//!   `shooter` and `hit_report` (private) are a shooter's bucket of hits and
+//!   record of rejected reports, and the batches of reports waiting for the
+//!   next tick.
 //!
 //! # The game
 //!
@@ -34,9 +40,22 @@
 //! limits, the respawn times and the waves) and starts its clock (`begin_game`).
 //! A player who `join`s spawns at a starting location of the map, which the
 //! map's data carries, by the engine's rules, or is told to wait for the next
-//! wave when none is free. A death is applied by the next tick (`report_death`
-//! queues it: the owner's way to kill until hit reports are validated into the
-//! same `halo_sim::rules::Death`).
+//! wave when none is free. A death is applied by the next tick: `report_death`
+//! queues it (the owner's way to kill), and the hits that kill become the same
+//! `halo_sim::rules::Death`.
+//!
+//! # Fighting
+//!
+//! A player's own client decides its hits and says so with [`report_hits`]
+//! (a reliable reducer on the player's own connection: a hit lost is a kill
+//! lost, and the connection says who shot; at most 64 reports of 34 bytes a
+//! call). The next tick judges them (`halo_sim::combat::resolve`, against where
+//! the module saw the players over the last second, kept in module memory), deals
+//! the damage of those that pass to the target's shield and health, and
+//! passes a death to the rules with the shooter as killer. A report that fails
+//! is counted in `shooter` and in `match_tick.rejected_hits` and logged. Each
+//! spawn gives the player a fresh `fighter` with the starting weapon (the
+//! owner's `set_loadout` replaces the weapons).
 //!
 //! # Who may call what
 //!
@@ -75,8 +94,10 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use halo_map::MapError;
+use halo_sim::combat::{CombatStore, Fighter, HitEvent, Loadout, Shooter, Trails};
+use halo_sim::damage::Vitals;
 use halo_sim::rules::{self, Contestant, Death, EndReason, Ending, Game, GameEvent, GameStore, Life, Rules, Winner};
-use halo_sim::wire::{decode_inputs, INPUT_SIZE};
+use halo_sim::wire::{decode_hits, decode_inputs, HIT_SIZE, INPUT_SIZE, MAX_HITS_PER_CALL};
 use halo_sim::{Event, MapData, Player, PlayerId, RejectReason, Rng, Store, TICKS_PER_SECOND};
 use spacetimedb::{reducer, table, ConnectionId, Identity, ReducerContext, ScheduleAt, Table};
 
@@ -85,6 +106,10 @@ const TICK_INTERVAL_US: u64 = 1_000_000 / TICKS_PER_SECOND as u64;
 
 /// Batches that may wait for a tick before `submit_inputs` refuses more.
 const MAX_PENDING_BATCHES: u64 = 16;
+
+/// Hit reports in one `report_hits` call, and calls that may wait for a tick:
+/// a client sends one call a tick with the hits of that tick.
+const MAX_PENDING_HIT_CALLS: u64 = 4096;
 
 /// The one row of a single-row table.
 const ONLY: u8 = 0;
@@ -123,6 +148,12 @@ pub struct MatchTick {
     rejected: u32,
     /// Rejections since the match was reset.
     rejected_total: u64,
+    /// Hit reports this tick took that passed the server's checks and hurt
+    /// someone, and those it refused (`halo_sim::combat::Reject`).
+    hits: u32,
+    rejected_hits: u32,
+    /// Refused hit reports since the match was reset.
+    rejected_hits_total: u64,
 }
 
 /// One player. Position and facing are the last move the server accepted.
@@ -293,6 +324,71 @@ pub const WINNER_NOBODY: u8 = 0;
 pub const WINNER_PLAYER: u8 = 1;
 pub const WINNER_TEAM: u8 = 2;
 
+/// A player's health and shields, and what they carry. One row per player in
+/// the match; public, and slow state: it is written when the player spawns,
+/// is hurt, or changes what they carry, and not when their shield recharges
+/// (a client counts that: see `halo_sim::damage`). Clients subscribe to all of
+/// it, to show a player's shield and health and what they are holding.
+#[table(accessor = fighter, public)]
+pub struct FighterRow {
+    #[primary_key]
+    player: u16,
+    /// Fractions of a full shield and of full health (a shield beyond 1 is an
+    /// overshield; a body below 0 is dead), as of the match tick `tick`.
+    shield: f32,
+    body: f32,
+    /// Ticks the shield will not recharge for.
+    shield_stun_ticks: i16,
+    /// `halo_sim::damage`'s `SHIELD_DEPLETED`, `DEAD`, `SHIELD_OVER_CHARGING`
+    /// and `SHIELD_CHARGING`.
+    flags: u8,
+    tick: u64,
+    /// The weapons the player carries, by tag index (`NO_WEAPON`, 65535, for
+    /// none), and the ones they put down lately, with the tick.
+    weapon0: u16,
+    weapon1: u16,
+    dropped0: u16,
+    dropped0_tick: u64,
+    dropped1: u16,
+    dropped1_tick: u64,
+    /// The tick of the hit that last hurt the player, who it was by (65535 if
+    /// none has), and how many hits have hurt them since they spawned: a
+    /// client shows a player is hit when the count changes.
+    hurt_tick: u64,
+    hurt_by: u16,
+    hurt_count: u32,
+}
+
+/// What became of a shooter's hit reports. One row per player who has had one
+/// judged; private (the operator's log has the counts, and the owner's
+/// reducers read them).
+#[table(accessor = shooter)]
+pub struct ShooterRow {
+    #[primary_key]
+    player: u16,
+    /// Seconds of fire in the bucket their hits draw from, as of `hit_seconds_tick`.
+    hit_seconds: f32,
+    hit_seconds_tick: u64,
+    /// Reports that passed the checks and reports that did not.
+    accepted: u64,
+    rejected: u64,
+    /// Why the latest refusal was (`halo_sim::combat::Reject::code`) and when.
+    last_reject: u8,
+    last_reject_tick: u64,
+}
+
+/// A client's `report_hits` call, waiting for the next tick: the player it
+/// came from (by their seat) and the hits (`halo_sim::wire::encode_hits`).
+/// Private.
+#[table(accessor = hit_report)]
+pub struct HitReportRow {
+    #[primary_key]
+    #[auto_inc]
+    id: u64,
+    shooter: u16,
+    data: Vec<u8>,
+}
+
 /// What `report_death` was told to apply at the next tick. Private.
 #[table(accessor = pending_death)]
 pub struct PendingDeath {
@@ -411,6 +507,12 @@ thread_local! {
     /// The decoded map and the `map_version` it was decoded for. Module memory
     /// only; the tables above are the truth.
     static MAP_CACHE: RefCell<Option<(u64, Rc<MapData>)>> = const { RefCell::new(None) };
+    /// Where the server saw the players over the last second, for the check
+    /// of where a hit report says its target was. Module memory only, and only
+    /// a cache of what a check looks back over: with none (a module whose
+    /// memory is fresh) a report's target is checked against where it is now
+    /// (see `halo_sim::combat`).
+    static TRAILS: RefCell<Trails> = RefCell::new(Trails::new());
 }
 
 fn match_state(ctx: &ReducerContext) -> MatchState {
@@ -740,6 +842,137 @@ impl GameStore for TableGame<'_> {
     }
 }
 
+fn fighter_of(row: &FighterRow) -> Fighter {
+    Fighter {
+        id: row.player,
+        vitals: Vitals {
+            shield: row.shield,
+            body: row.body,
+            shield_stun_ticks: row.shield_stun_ticks,
+            flags: row.flags,
+        },
+        tick: row.tick,
+        loadout: Loadout {
+            weapons: [row.weapon0, row.weapon1],
+            dropped: [(row.dropped0, row.dropped0_tick), (row.dropped1, row.dropped1_tick)],
+        },
+        hurt_tick: row.hurt_tick,
+        hurt_by: row.hurt_by,
+        hurt_count: row.hurt_count,
+    }
+}
+
+fn fighter_row(f: &Fighter) -> FighterRow {
+    FighterRow {
+        player: f.id,
+        shield: f.vitals.shield,
+        body: f.vitals.body,
+        shield_stun_ticks: f.vitals.shield_stun_ticks,
+        flags: f.vitals.flags,
+        tick: f.tick,
+        weapon0: f.loadout.weapons[0],
+        weapon1: f.loadout.weapons[1],
+        dropped0: f.loadout.dropped[0].0,
+        dropped0_tick: f.loadout.dropped[0].1,
+        dropped1: f.loadout.dropped[1].0,
+        dropped1_tick: f.loadout.dropped[1].1,
+        hurt_tick: f.hurt_tick,
+        hurt_by: f.hurt_by,
+        hurt_count: f.hurt_count,
+    }
+}
+
+fn shooter_of(row: &ShooterRow) -> Shooter {
+    Shooter {
+        id: row.player,
+        hit_seconds: row.hit_seconds,
+        hit_seconds_tick: row.hit_seconds_tick,
+        accepted: row.accepted,
+        rejected: row.rejected,
+        last_reject: row.last_reject,
+        last_reject_tick: row.last_reject_tick,
+    }
+}
+
+fn shooter_row(s: &Shooter) -> ShooterRow {
+    ShooterRow {
+        player: s.id,
+        hit_seconds: s.hit_seconds,
+        hit_seconds_tick: s.hit_seconds_tick,
+        accepted: s.accepted,
+        rejected: s.rejected,
+        last_reject: s.last_reject,
+        last_reject_tick: s.last_reject_tick,
+    }
+}
+
+/// `halo_sim::combat::CombatStore` over the `fighter` and `shooter` tables.
+/// Rows are written only when they change: `fighter` is public, and what
+/// subscribers are sent.
+struct TableCombat<'a> {
+    ctx: &'a ReducerContext,
+}
+
+impl CombatStore for TableCombat<'_> {
+    fn fighter(&self, id: PlayerId) -> Option<Fighter> {
+        self.ctx.db.fighter().player().find(id).as_ref().map(fighter_of)
+    }
+
+    fn set_fighter(&mut self, fighter: Fighter) {
+        let table = self.ctx.db.fighter();
+        match table.player().find(fighter.id) {
+            Some(old) if fighter_of(&old) == fighter => {}
+            Some(_) => {
+                table.player().update(fighter_row(&fighter));
+            }
+            None => {
+                table.insert(fighter_row(&fighter));
+            }
+        }
+    }
+
+    fn remove_fighter(&mut self, id: PlayerId) -> bool {
+        self.ctx.db.fighter().player().delete(id)
+    }
+
+    fn shooter(&self, id: PlayerId) -> Shooter {
+        self.ctx.db.shooter().player().find(id).as_ref().map_or_else(|| Shooter::new(id), shooter_of)
+    }
+
+    fn set_shooter(&mut self, shooter: Shooter) {
+        let table = self.ctx.db.shooter();
+        match table.player().find(shooter.id) {
+            Some(old) if shooter_of(&old) == shooter => {}
+            Some(_) => {
+                table.player().update(shooter_row(&shooter));
+            }
+            None => {
+                table.insert(shooter_row(&shooter));
+            }
+        }
+    }
+
+    fn remove_shooter(&mut self, id: PlayerId) -> bool {
+        self.ctx.db.shooter().player().delete(id)
+    }
+}
+
+/// A player has spawned: full health and shields and the starting weapon.
+fn spawn_combat(ctx: &ReducerContext, map: &MapData, id: PlayerId, tick: u64) {
+    TRAILS.with(|t| halo_sim::combat::spawn(&mut TableCombat { ctx }, &mut t.borrow_mut(), map, id, tick));
+}
+
+/// A fighter for every player who is in the world and has none: one who
+/// spawned before the map was loaded, or whose fighter was lost.
+fn ensure_fighters(ctx: &ReducerContext, map: &MapData, tick: u64) {
+    let alive: Vec<u16> = ctx.db.standing().state().filter(STATE_ALIVE).map(|s| s.player).collect();
+    for id in alive {
+        if ctx.db.fighter().player().find(id).is_none() {
+            spawn_combat(ctx, map, id, tick);
+        }
+    }
+}
+
 /// What the rules did, for the log: deaths, the end, players told to wait. (Spawns
 /// are too many to log: a player's row says.)
 fn log_events(events: &[GameEvent]) {
@@ -783,6 +1016,9 @@ pub fn init(ctx: &ReducerContext) {
         inputs: 0,
         rejected: 0,
         rejected_total: 0,
+        hits: 0,
+        rejected_hits: 0,
+        rejected_hits_total: 0,
     });
 }
 
@@ -811,6 +1047,7 @@ pub fn load_map(ctx: &ReducerContext, data: Vec<u8>) -> Result<(), String> {
     // the cache is refilled from the row by the next tick, so it can never disagree with the table
     MAP_CACHE.with(|c| *c.borrow_mut() = None);
     ctx.db.match_state().id().update(state);
+    ensure_fighters(ctx, &map, match_tick_of(ctx));
     Ok(())
 }
 
@@ -832,6 +1069,9 @@ pub fn add_players(ctx: &ReducerContext, batch: Vec<u8>) -> Result<(), String> {
     for p in players {
         add_to_roster(ctx, p.player, None);
         rules::enter_placed(&mut TableGame { ctx }, p.player, roster_team(ctx, p.player), p.position, p.yaw);
+        if let Some(map) = current_map(ctx) {
+            spawn_combat(ctx, &map, p.player, tick);
+        }
         ctx.db.player().insert(PlayerRow {
             id: p.player,
             x: p.position[0],
@@ -868,6 +1108,11 @@ fn remove_player(ctx: &ReducerContext, id: u16) {
     ctx.db.seat().player().delete(id);
     ctx.db.roster().player().delete(id);
     rules::leave(&mut TableGame { ctx }, id);
+    TRAILS.with(|t| halo_sim::combat::leave(&mut TableCombat { ctx }, &mut t.borrow_mut(), id));
+    let reports: Vec<u64> = ctx.db.hit_report().iter().filter(|r| r.shooter == id).map(|r| r.id).collect();
+    for report in reports {
+        ctx.db.hit_report().id().delete(report);
+    }
 }
 
 /// The team the roster has a player on.
@@ -938,6 +1183,9 @@ pub fn join(ctx: &ReducerContext, udp_key: Vec<u8>) -> Result<(), String> {
         });
         add_to_roster(ctx, id, Some(ctx.sender()));
         rules::enter_placed(&mut TableGame { ctx }, id, roster_team(ctx, id), [x, y, z], spawn.yaw);
+        if let Some(map) = current_map(ctx) {
+            spawn_combat(ctx, &map, id, tick);
+        }
     } else {
         // the game's rules say where: at a free starting location now, or in the next wave
         let map = current_map(ctx).ok_or("the match has no map yet")?;
@@ -951,6 +1199,11 @@ pub fn join(ctx: &ReducerContext, udp_key: Vec<u8>) -> Result<(), String> {
         let mut rng = Rng::seeded(tick ^ ((id as u64) << 32) ^ 0x5EED);
         let events = rules::spawn_due(&mut store, &mut game, &map, &mut rng, tick);
         log_events(&events);
+        for event in &events {
+            if let GameEvent::Spawned { player, .. } = event {
+                spawn_combat(ctx, &map, *player, tick);
+            }
+        }
     }
     ctx.db.seat().insert(Seat {
         player: id,
@@ -1151,7 +1404,31 @@ pub fn reset(ctx: &ReducerContext) -> Result<(), String> {
     for id in deaths {
         ctx.db.pending_death().id().delete(id);
     }
-    let blank = MatchTick { id: ONLY, tick: 0, stamped_us: 0, players: 0, inputs: 0, rejected: 0, rejected_total: 0 };
+    let reports: Vec<u64> = ctx.db.hit_report().iter().map(|r| r.id).collect();
+    for id in reports {
+        ctx.db.hit_report().id().delete(id);
+    }
+    let shooters: Vec<u16> = ctx.db.shooter().iter().map(|s| s.player).collect();
+    for id in shooters {
+        ctx.db.shooter().player().delete(id);
+    }
+    let fighters: Vec<u16> = ctx.db.fighter().iter().map(|f| f.player).collect();
+    for id in fighters {
+        ctx.db.fighter().player().delete(id);
+    }
+    TRAILS.with(|t| *t.borrow_mut() = Trails::new());
+    let blank = MatchTick {
+        id: ONLY,
+        tick: 0,
+        stamped_us: 0,
+        players: 0,
+        inputs: 0,
+        rejected: 0,
+        rejected_total: 0,
+        hits: 0,
+        rejected_hits: 0,
+        rejected_hits_total: 0,
+    };
     ctx.db.match_tick().id().update(blank);
     rules::begin(&mut TableGame { ctx }, 0);
     Ok(())
@@ -1203,6 +1480,43 @@ pub fn begin_game(ctx: &ReducerContext) -> Result<(), String> {
     Ok(())
 }
 
+/// The hits the caller's player reports, as a batch of `halo_sim::wire`'s hit
+/// records (a client calls it once a tick with the tick's hits, over its own
+/// connection, which is reliable: a hit report lost to UDP loss is a kill that
+/// did not count, and the connection says who the shooter is, by their seat).
+/// The next tick judges each against the checks of `halo_sim::combat` (the
+/// shooter owns the weapon, the target was where the shooter says, the rate of
+/// fire is possible, the report is recent, ...), and deals the damage of those
+/// that pass; a report that fails is counted (`shooter`, `match_tick`) and
+/// does nothing. Fails, queuing nothing, for a caller with no seat or a batch
+/// of the wrong size, or too many calls waiting for a tick.
+#[reducer]
+pub fn report_hits(ctx: &ReducerContext, batch: Vec<u8>) -> Result<(), String> {
+    let seat = ctx.db.seat().owner().find(ctx.sender()).ok_or("you have no seat in this match")?;
+    if !batch.len().is_multiple_of(HIT_SIZE) {
+        return Err(format!("batch of {} bytes is not whole {HIT_SIZE}-byte records", batch.len()));
+    }
+    if batch.len() > MAX_HITS_PER_CALL * HIT_SIZE {
+        return Err(format!("{} hits in one call, at most {MAX_HITS_PER_CALL}", batch.len() / HIT_SIZE));
+    }
+    if ctx.db.hit_report().count() >= MAX_PENDING_HIT_CALLS {
+        return Err(format!("{MAX_PENDING_HIT_CALLS} calls are already waiting for a tick"));
+    }
+    ctx.db.hit_report().insert(HitReportRow { id: 0, shooter: seat.player, data: batch });
+    Ok(())
+}
+
+/// What a player carries, for tests and tools: the weapons by tag index
+/// (65535 for none). The player's health and shields are as they are.
+#[reducer]
+pub fn set_loadout(ctx: &ReducerContext, player: u16, weapon0: u16, weapon1: u16) -> Result<(), String> {
+    require_owner(ctx)?;
+    let mut fighter = TableCombat { ctx }.fighter(player).ok_or_else(|| format!("player {player} has no fighter"))?;
+    fighter.loadout = Loadout { weapons: [weapon0, weapon1], ..fighter.loadout };
+    TableCombat { ctx }.set_fighter(fighter);
+    Ok(())
+}
+
 /// Kill a player: the server's way for a death to happen and a kill to be
 /// credited. `killer` is the player who gets the credit, or `NO_KILLER`
 /// (65535) for a death nobody caused (which is the victim's own, as the
@@ -1247,18 +1561,62 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
     for death in &deaths {
         ctx.db.pending_death().id().delete(death.id);
     }
-    let deaths: Vec<Death> = deaths
+    let mut deaths: Vec<Death> = deaths
         .iter()
         .map(|d| Death { victim: d.victim, killer: (d.killer != NO_KILLER).then_some(d.killer) })
         .collect();
 
+    // the hit reports clients made since the last tick: each in the order it came
+    let mut reports: Vec<HitReportRow> = ctx.db.hit_report().iter().collect();
+    reports.sort_unstable_by_key(|r| r.id);
+    let mut judged = Vec::new();
+    for report in &reports {
+        ctx.db.hit_report().id().delete(report.id);
+        match decode_hits(&report.data) {
+            Ok(hits) => judged.extend(hits.into_iter().map(|h| (report.shooter, h))),
+            Err(e) => log::warn!("dropped a hit report of {} bytes", e.0),
+        }
+    }
+
     let mut rejected = 0u32;
+    let (mut hits, mut rejected_hits) = (0u32, 0u32);
     if let Some(map) = current_map(ctx) {
         let mut store = TableStore { ctx, tick: marker.tick };
         let mut game = TableGame { ctx };
-        let outcome =
-            rules::play(&mut store, &mut game, &map, &mut Rng::seeded(marker.tick), marker.tick, &deaths, &inputs);
+        let mut rng = Rng::seeded(marker.tick);
+        if marker.tick.is_multiple_of(TICKS_PER_SECOND as u64) {
+            ensure_fighters(ctx, &map, marker.tick);
+        }
+        // the hits first: the damage they do, and the deaths, are this tick's
+        let dealt = TRAILS.with(|t| {
+            halo_sim::combat::resolve(
+                &store,
+                &game,
+                &mut TableCombat { ctx },
+                &t.borrow(),
+                &map,
+                &mut rng,
+                marker.tick,
+                &judged,
+            )
+        });
+        for event in &dealt.events {
+            match event {
+                HitEvent::Hit { .. } => hits += 1,
+                HitEvent::Rejected { shooter, reason } => {
+                    rejected_hits += 1;
+                    log::warn!("rejected a hit report of player {shooter} ({reason:?}) at tick {}", marker.tick);
+                }
+            }
+        }
+        deaths.extend(dealt.deaths);
+        let outcome = rules::play(&mut store, &mut game, &map, &mut rng, marker.tick, &deaths, &inputs);
         log_events(&outcome.events);
+        for event in &outcome.events {
+            if let GameEvent::Spawned { player, .. } = event {
+                spawn_combat(ctx, &map, *player, marker.tick);
+            }
+        }
         for event in outcome.moves {
             let Event::MoveRejected { player, reason } = event else { continue };
             rejected += 1;
@@ -1285,6 +1643,10 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
                 ctx.db.player().id().update(row);
             }
         }
+        // where the server saw everyone, for the next ticks' hit reports
+        TRAILS.with(|t| {
+            t.borrow_mut().record(marker.tick, ctx.db.player().iter().map(|p| (p.id, [p.x, p.y, p.z])));
+        });
     } else if !inputs.is_empty() {
         log::warn!("no map is loaded: dropped {} inputs", inputs.len());
     }
@@ -1314,6 +1676,9 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
     marker.inputs = inputs.len() as u32;
     marker.rejected = rejected;
     marker.rejected_total += rejected as u64;
+    marker.hits = hits;
+    marker.rejected_hits = rejected_hits;
+    marker.rejected_hits_total += rejected_hits as u64;
     ctx.db.match_tick().id().update(marker);
     Ok(())
 }

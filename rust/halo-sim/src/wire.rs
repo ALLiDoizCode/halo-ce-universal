@@ -62,6 +62,9 @@ pub fn decode_inputs(batch: &[u8]) -> Result<Vec<PlayerInput>, BadBatchLength> {
 /// Bytes per hit report in a batch of them (see [`encode_hits`]).
 pub const HIT_SIZE: usize = 2 + 2 + 2 + 4 + 6 * 4;
 
+/// The most hit reports the match module takes in one call.
+pub const MAX_HITS_PER_CALL: usize = 64;
+
 /// A batch of hit reports (a client's, which the server's `report_hits` takes
 /// over the client's own, reliable connection: see `halo_wire`'s documentation
 /// of where hit reports go and why), as fixed-size records:

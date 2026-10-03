@@ -194,7 +194,7 @@ the setting for one start of the game. It has priority over the file.
 | `debug.gpu_skip_vertex_shaders`, `debug.gpu_debug_expression`, `debug.gpu_debug_flat`, `debug.gpu_debug_texture0` | off | `HALO_GPU_SKIP_VS`, `HALO_GPU_DEBUG_EXPR`, `HALO_GPU_DEBUG_FLAT`, `HALO_GPU_DEBUG_T0` | Tools to find problems in the graphics: skip the draws of a vertex shader, or replace the output of all pixel shaders with a GLSL expression (for example `t0.rgb`). |
 | `debug.network_test`, `debug.network_test_start`, `debug.network_test_kill`, `debug.network_test_score`, `debug.network_test_shoot`, `debug.network_test_vehicle`, `debug.network_test_pickup`, `debug.network_test_pickup_weapon`, `debug.test_input` | off | `HALO_NETWORK_TEST`, `HALO_NETWORK_TEST_START`, `HALO_NETWORK_TEST_KILL`, `HALO_NETWORK_TEST_SCORE`, `HALO_NETWORK_TEST_SHOOT`, `HALO_NETWORK_TEST_VEHICLE`, `HALO_NETWORK_TEST_PICKUP`, `HALO_NETWORK_TEST_PICKUP_WEAPON`, `HALO_TEST_INPUT` | Automatic tests of system link (`game/network_test.c`). Refer to `NETCODE.md`. |
 | `debug.scenario`, `debug.scenario_trace` | `""` | `HALO_SCENARIO`, `HALO_SCENARIO_TRACE` | The comparison harness: plays a scenario file with the first player of a network test game, alone, and writes a trace of the player's state. `tools/scenario_harness.py` runs it. Refer to `tools/scenarios/README.md`. |
-| `large.map`, `large.gateway`, `large.spacetimedb`, `large.database`, `large.root`, `large.name`, `large.log_players`, `large.scoreboard` | `""`, `127.0.0.1:7777`, `http://127.0.0.1:3000`, `""`, `""`, `""`, `false`, `false` | `HALO_LARGE_MAP`, `HALO_LARGE_GATEWAY`, `HALO_LARGE_SPACETIMEDB`, `HALO_LARGE_DATABASE`, `HALO_LARGE_ROOT`, `HALO_LARGE_NAME`, `HALO_LARGE_LOG`, `HALO_LARGE_SCOREBOARD` | The large-scale mode. Refer to "Large-scale mode". |
+| `large.map`, `large.gateway`, `large.spacetimedb`, `large.database`, `large.root`, `large.name`, `large.log_players`, `large.scoreboard`, `large.autofire` | `""`, `127.0.0.1:7777`, `http://127.0.0.1:3000`, `""`, `""`, `""`, `false`, `false`, `false` | `HALO_LARGE_MAP`, `HALO_LARGE_GATEWAY`, `HALO_LARGE_SPACETIMEDB`, `HALO_LARGE_DATABASE`, `HALO_LARGE_ROOT`, `HALO_LARGE_NAME`, `HALO_LARGE_LOG`, `HALO_LARGE_SCOREBOARD`, `HALO_LARGE_AUTOFIRE` | The large-scale mode. Refer to "Large-scale mode". |
 | `debug.network_latency`, `debug.network_loss` | `0` | `HALO_NETWORK_LATENCY`, `HALO_NETWORK_LOSS` | The game holds all the data that it receives for this number of milliseconds, and ignores this percentage of the datagrams. Use these settings to test the netcode as on the internet. |
 | `debug.telnet_console`, `debug.telnet_console_port` | `false`, `2323` | `HALO_TELNET_CONSOLE`, `HALO_TELNET_CONSOLE_PORT` | The game listens on 127.0.0.1, on this port, for a script console (connect with telnet). The console has no password, so only this computer can reach it. |
 
@@ -307,6 +307,46 @@ the match end at its score limit with the final scoreboard and the rotation move
 on.
 The library's own tests (`rust/halo-client/tests/boundary.rs` and
 `servers.rs`) need only `HALO_STDB_BIN`.
+
+### Fighting
+
+The weapon and the damage are the server's too, by the weapon's tags: a
+player spawns with the multiplayer pistol (the engine's own starting weapon in
+a game without teams is the plasma pistol, which charges and heats and is for
+a later ticket), and the match module keeps each player's shield, health and
+weapons in the public table `fighter` (the shield is kept as of a tick and
+counted forward by the client and the server, so a recharge writes nothing).
+
+- The game's weapons fire in the engine as they do offline. The engine's own
+  damage to another player's unit is switched off in the mode
+  (`large_mode_damage_deals`); in its place, when the local player's shot
+  hits a remote player's unit, the game reports the hit to the server
+  (`halo_large_report_hit`), once a tick in a batch of at most 64, with the
+  weapon, the part of the body, where the shot hit and where the shooter saw
+  the target. The report goes in the reliable reducer `report_hits` over the
+  direct connection and not in a datagram: a hit lost on the way would be a
+  kill lost, and the connection says who shot.
+- The server judges each report (`halo_sim::combat::resolve`: finite numbers,
+  both players alive and in the match, not oneself, the weapon carried or put
+  down in the last 10 seconds, not older than 3 seconds nor from the future,
+  the impact at the target, no more hits than the weapon fires, the shooter
+  within the weapon's reach, the target near where the shooter saw it). A
+  report that fails is dropped, counted against the shooter (the private table
+  `shooter`) and in `match_tick.rejected_hits`, and logged by `halo-server`
+  (`rejected hits N (+M)`). A hit that passes deals the weapon's damage to the
+  target's shield and health as the engine does; the hit that takes the last
+  health is a death for the rules, with the shooter as the killer, who scores.
+- The game shows the server's shield and health on the local HUD (the shield
+  flash and the recharge are the engine's own, driven by the table), and a
+  remote player the hits killed falls and stays as a body.
+- `large.autofire` (`HALO_LARGE_AUTOFIRE`) aims the local player at the nearest
+  remote player and holds the trigger: the tests and the pictures use it.
+
+`rust/halo-client/tests/combat_headless.rs` runs three real games: the game
+shoots a simulated player until it dies; simulated players shoot the game's
+player (shield down, recharge, death, respawn); a bystander watches one
+simulated player kill another. Run it as `headless` above, with
+`--test combat_headless -- --test-threads=1`.
 
 ### Pick a server from the list
 

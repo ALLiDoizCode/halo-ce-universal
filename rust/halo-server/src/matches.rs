@@ -72,6 +72,7 @@ struct Window {
     gateway: StatsSnapshot,
     metrics: TickMetrics,
     rejected_total: u64,
+    rejected_hits_total: u64,
 }
 
 /// What a match was doing over a window, for the log.
@@ -89,6 +90,9 @@ pub struct Report {
     /// Moves the server rejected in the window, and since the match began.
     pub rejected: u64,
     pub rejected_total: u64,
+    /// Hit reports the server refused in the window, and since the match began.
+    pub rejected_hits: u64,
+    pub rejected_hits_total: u64,
     pub inputs_late: u64,
     pub inputs_unbound: u64,
     pub ticks_missed: u64,
@@ -132,6 +136,7 @@ impl RunningMatch {
             gateway: gateway.stats(),
             metrics: tick_metrics(env, &database_identity),
             rejected_total: 0,
+            rejected_hits_total: 0,
         };
         Ok(RunningMatch {
             database: spec.database.clone(),
@@ -198,13 +203,14 @@ impl RunningMatch {
     }
 
     /// What happened since the last report: tick time from the server's
-    /// metrics, players, bandwidth and rejected moves.
+    /// metrics, players, bandwidth, rejected moves and rejected hit reports.
     pub fn report(&mut self, env: &Env, capacity: u32) -> Report {
         let now = Instant::now();
         let gateway = self.gateway.as_ref().map(|g| g.stats());
         let metrics = tick_metrics(env, &self.database_identity);
         let marker = self.client.marker();
         let rejected_total = marker.as_ref().map_or(0, |m| m.rejected_total);
+        let rejected_hits_total = marker.as_ref().map_or(0, |m| m.rejected_hits_total);
         let seconds = now.duration_since(self.window.at).as_secs_f64().max(1e-3);
         let mut report = Report {
             seconds,
@@ -212,6 +218,8 @@ impl RunningMatch {
             capacity,
             rejected: rejected_total.saturating_sub(self.window.rejected_total),
             rejected_total,
+            rejected_hits: rejected_hits_total.saturating_sub(self.window.rejected_hits_total),
+            rejected_hits_total,
             ..Report::default()
         };
         let delta = metrics.since(&self.window.metrics);
@@ -233,6 +241,7 @@ impl RunningMatch {
             gateway: gateway.unwrap_or_else(|| self.window.gateway.clone()),
             metrics,
             rejected_total,
+            rejected_hits_total,
         };
         report
     }

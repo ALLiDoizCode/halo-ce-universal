@@ -53,7 +53,7 @@ use halo_sim::PlayerInput;
 use module_bindings::*;
 use spacetimedb_sdk::{Compression, DbContext, Table, TableWithPrimaryKey};
 
-pub use module_bindings::{GameStateRow, MatchTick, PlayerRow, RosterRow, Seat, StandingRow};
+pub use module_bindings::{FighterRow, GameStateRow, MatchTick, PlayerRow, RosterRow, Seat, StandingRow};
 
 pub fn now_us() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as i64
@@ -96,7 +96,7 @@ pub struct MatchClient {
 
 impl MatchClient {
     /// Connect with a fresh identity (which owns nothing: the owner-only
-    /// reducers refuse it) and subscribe to `match_tick`, `player`, `seat`, `roster`, `standing` and `game_state`;
+    /// reducers refuse it) and subscribe to `match_tick`, `player`, `seat`, `roster`, `standing`, `fighter` and `game_state`;
     /// returns once the subscription has applied.
     pub fn connect(uri: &str, database: &str) -> MatchClient {
         MatchClient::connect_as(uri, database, None)
@@ -136,6 +136,7 @@ impl MatchClient {
                 "SELECT * FROM seat",
                 "SELECT * FROM roster",
                 "SELECT * FROM standing",
+                "SELECT * FROM fighter",
                 "SELECT * FROM game_state",
             ]);
         conn.run_threaded();
@@ -143,6 +144,17 @@ impl MatchClient {
             .recv_timeout(Duration::from_secs(30))
             .map_err(|_| format!("the subscription to {database} on {uri} did not apply"))?;
         Ok(MatchClient { conn, ticks })
+    }
+
+    /// Every player's health, shields and weapons in the subscriber's copy of
+    /// the table now, by player id.
+    pub fn fighters(&self) -> BTreeMap<u16, FighterRow> {
+        self.conn.db.fighter().iter().map(|f| (f.player, f)).collect()
+    }
+
+    /// What a player carries (tag indices; 65535 for no weapon), for tests.
+    pub fn set_loadout(&self, player: u16, weapon0: u16, weapon1: u16) -> Result<(), String> {
+        call_reducer("set_loadout", |cb| self.conn.reducers.set_loadout_then(player, weapon0, weapon1, cb))
     }
 
     pub fn load_map(&self, data: Vec<u8>) -> Result<(), String> {
@@ -361,6 +373,13 @@ impl PlayerClient {
 
     pub fn leave(&self) -> Result<(), String> {
         call_reducer("leave", |cb| self.conn.reducers.leave_then(cb))
+    }
+
+    /// Report hits as this player, and wait for the module to take the call
+    /// (the next tick judges them: see the module's `report_hits`).
+    pub fn report_hits(&self, hits: &[halo_sim::combat::HitReport]) -> Result<(), String> {
+        let batch = halo_sim::wire::encode_hits(hits);
+        call_reducer("report_hits", |cb| self.conn.reducers.report_hits_then(batch, cb))
     }
 
     /// This player's seat in the subscriber's copy of the table, if there is one.

@@ -11,7 +11,7 @@
 //!    database of its own published from the match module, with a gateway in
 //!    front of it, the server's row in the list rewritten for each match, and
 //!    the last match's database deleted once the players have moved on;
-//! 4. the log: tick time, player count, bandwidth and rejected moves, a line
+//! 4. the log: tick time, player count, bandwidth, rejected moves and rejected hit reports, a line
 //!    every few seconds for each server.
 //!
 //! Run it as a service that is restarted if it exits: it exits (cleanly, after

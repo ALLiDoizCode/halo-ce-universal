@@ -29,10 +29,14 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use halo_match_driver::module_bindings::{
-    join, leave, DbConnection, GameStateRow, GameStateTableAccess, MapInfo, MapInfoTableAccess, PlayerTableAccess,
-    RemoteReducers, RosterRow, RosterTableAccess, Seat, SeatTableAccess, StandingRow, StandingTableAccess,
+    join, leave, report_hits, DbConnection, FighterRow, FighterTableAccess, GameStateRow, GameStateTableAccess,
+    MapInfo, MapInfoTableAccess, PlayerTableAccess, RemoteReducers, RosterRow, RosterTableAccess, Seat,
+    SeatTableAccess, StandingRow, StandingTableAccess,
 };
 use halo_match_driver::PlayerRow;
+use halo_sim::combat::{Fighter, HitReport, Loadout};
+use halo_sim::damage::Vitals;
+use halo_sim::wire::encode_hits;
 use halo_sim::PlayerInput;
 use halo_wire::auth::{self, CHALLENGE_LIFETIME_US, SEED_SIZE};
 use halo_wire::datagram::{
@@ -266,6 +270,9 @@ pub struct Counters {
     pub refused: u32,
     /// Times the gateway fell silent and the player joined again.
     pub rejoins: u32,
+    /// Hits the game reported, and the calls of `report_hits` they went in.
+    pub hits_reported: u64,
+    pub hit_calls: u64,
 }
 
 #[derive(Default)]
@@ -280,6 +287,11 @@ struct Shared {
     roster: BTreeMap<u16, Member>,
     /// How each of them is doing (score, alive, when they spawn), likewise.
     standings: BTreeMap<u16, Standing>,
+    /// Each one's health, shields and weapons, likewise.
+    fighters: BTreeMap<u16, Fighter>,
+    /// Hits the game has reported, not yet sent (the network thread sends them
+    /// over the direct connection, which is reliable).
+    hits: Vec<HitReport>,
     /// The game, likewise, and when its row last came.
     game: Option<GameInfo>,
     game_at: Option<Instant>,
@@ -463,6 +475,36 @@ impl Session {
         shared.standings.get(&shared.player?).copied()
     }
 
+    /// A player's health, shields and weapons, as the match last said (the
+    /// shield's recharge since is [`Fighter::vitals_at`]'s to count).
+    pub fn fighter(&self, player: u16) -> Option<Fighter> {
+        self.inner.shared().fighters.get(&player).copied()
+    }
+
+    /// Report a hit the game's engine saw the local player's weapon make: `weapon` is the weapon's tag
+    /// index, `material` the part of `target` hit (-1 for none), `origin`
+    /// where the shot hit and `target_position` where the engine has the
+    /// target. The report is sent over the direct connection with the others of
+    /// the tick (the server's `report_hits`), and made at the newest server tick
+    /// the client has heard of. Nothing is sent (false) for a session with no
+    /// seat or no word from the gateway yet.
+    pub fn report_hit(
+        &self,
+        target: u16,
+        weapon: u16,
+        material: i16,
+        origin: [f32; 3],
+        target_position: [f32; 3],
+    ) -> bool {
+        let mut shared = self.inner.shared();
+        if shared.player.is_none() || shared.welcome.is_none() {
+            return false;
+        }
+        let host_tick = shared.newest_tick;
+        shared.hits.push(HitReport { target, weapon, material, host_tick, origin, target_position });
+        true
+    }
+
     /// Everyone in the match with how they are doing and who they are, by
     /// player id: what the scoreboard lists, in range or not.
     pub fn scoreboard(&self) -> Vec<(u16, Standing, Member)> {
@@ -577,6 +619,7 @@ fn network_thread(inner: &Inner) {
     let mut last_join = Instant::now() - JOIN_INTERVAL;
     while !inner.stop.load(Relaxed) {
         maintain(inner, &mut last_join);
+        flush_hits(inner);
         match inner.socket.recv(&mut buffer) {
             Ok(length) => handle(inner, &buffer[..length], &mut last_join),
             Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
@@ -586,6 +629,35 @@ fn network_thread(inner: &Inner) {
                 inner.shared().error = Some(format!("UDP: {e}"));
                 std::thread::sleep(POLL);
             }
+        }
+    }
+}
+
+/// The hits the game has reported since the last time, as calls of the match's
+/// `report_hits` over the direct connection (reliable, unlike the UDP the
+/// positions travel by: a hit lost is a kill that does not count), at most
+/// as many to a call as the module takes.
+fn flush_hits(inner: &Inner) {
+    let hits = {
+        let mut shared = inner.shared();
+        if shared.hits.is_empty() {
+            return;
+        }
+        std::mem::take(&mut shared.hits)
+    };
+    let connection = inner.connection.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(connection) = connection.as_ref() else {
+        // (no connection: the hits are too late to be worth keeping)
+        return;
+    };
+    for chunk in hits.chunks(halo_sim::wire::MAX_HITS_PER_CALL) {
+        let sent = connection.reducers.report_hits(encode_hits(chunk)).is_ok();
+        let mut shared = inner.shared();
+        if sent {
+            shared.counters.hits_reported += chunk.len() as u64;
+            shared.counters.hit_calls += 1;
+        } else {
+            shared.error = Some("a hit report could not be sent".into());
         }
     }
 }
@@ -677,6 +749,27 @@ fn handle(inner: &Inner, datagram: &[u8], last_join: &mut Instant) {
     }
 }
 
+/// A player's health, shields and weapons from the match's `fighter` row.
+fn fighter_of(row: &FighterRow) -> Fighter {
+    Fighter {
+        id: row.player,
+        vitals: Vitals {
+            shield: row.shield,
+            body: row.body,
+            shield_stun_ticks: row.shield_stun_ticks,
+            flags: row.flags,
+        },
+        tick: row.tick,
+        loadout: Loadout {
+            weapons: [row.weapon_0, row.weapon_1],
+            dropped: [(row.dropped_0, row.dropped_0_tick), (row.dropped_1, row.dropped_1_tick)],
+        },
+        hurt_tick: row.hurt_tick,
+        hurt_by: row.hurt_by,
+        hurt_count: row.hurt_count,
+    }
+}
+
 /// The direct SpacetimeDB connection: connect, join, subscribe, keep the slow
 /// state current, and connect again (as the same identity) if it drops.
 fn slow_thread(inner: &Arc<Inner>) {
@@ -757,6 +850,7 @@ fn connect(inner: &Arc<Inner>) -> Result<DbConnection, String> {
             // while the connection was down is no longer on it)
             connected.shared().roster.clear();
             connected.shared().standings.clear();
+            connected.shared().fighters.clear();
             *connected.token.lock().unwrap_or_else(|p| p.into_inner()) = Some(token.into());
             *connected.identity.lock().unwrap_or_else(|p| p.into_inner()) = Some(identity.to_hex().to_string());
             if let Err(e) = connected.config.identity.save(token) {
@@ -776,6 +870,7 @@ fn connect(inner: &Arc<Inner>) -> Result<DbConnection, String> {
                     "SELECT * FROM map_info".to_string(),
                     "SELECT * FROM roster".to_string(),
                     "SELECT * FROM standing".to_string(),
+                    "SELECT * FROM fighter".to_string(),
                     "SELECT * FROM game_state".to_string(),
                     format!("SELECT * FROM seat WHERE owner = 0x{}", identity.to_hex()),
                 ]);
@@ -875,6 +970,20 @@ fn connect(inner: &Arc<Inner>) -> Result<DbConnection, String> {
     let gone = inner.clone();
     table.on_delete(move |_, row| {
         gone.shared().standings.remove(&row.player);
+    });
+    // each player's health, shields and weapons: written when they spawn, are
+    // hurt or change what they carry, and not when a shield recharges
+    let fighters = inner.clone();
+    let on_fighter = move |row: &FighterRow| {
+        fighters.shared().fighters.insert(row.player, fighter_of(row));
+    };
+    let table = connection.db.fighter();
+    let on_fighter_insert = on_fighter.clone();
+    table.on_insert(move |_, row| on_fighter_insert(row));
+    table.on_update(move |_, _, row| on_fighter(row));
+    let unfought = inner.clone();
+    table.on_delete(move |_, row| {
+        unfought.shared().fighters.remove(&row.player);
     });
     let game = inner.clone();
     let on_game = move |row: &GameStateRow| {

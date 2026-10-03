@@ -19,9 +19,11 @@
 //! simulation itself. The `.wasm` build exports [`parity_run`] and
 //! [`parity_output`] for a host to call; the test in `tests/` does so.
 
+use halo_sim::combat::{CombatStore, HitEvent, HitReport, MemoryCombat, Trails};
 use halo_sim::fixtures::{flat_floor_map, ramp_map, walled_floor_map, FLOOR_HALF_SIZE, RAMP_START_X, WALL_X};
 use halo_sim::rules::{begin, enter, leave, snapshot_game, Death, GameEvent, GameStore, MemoryGame, Rules, Winner};
 use halo_sim::walk::{walk, Body, Controls};
+use halo_sim::weapon::Hands;
 use halo_sim::{snapshot, step, Event, MemoryStore, Player, PlayerInput, RejectReason, Rng, Store};
 
 pub const PLAYERS: u16 = 24;
@@ -359,6 +361,202 @@ pub fn match_event_counts(output: &[u8]) -> [u32; MATCH_EVENT_KINDS] {
 #[no_mangle]
 pub extern "C" fn parity_match_run(seed_low: u32, seed_high: u32, ticks: u32) -> u32 {
     let bytes = run_match(seed_low as u64 | (seed_high as u64) << 32, ticks).into_boxed_slice();
+    let len = bytes.len() as u32;
+    OUTPUT.store(Box::leak(bytes).as_ptr() as usize, std::sync::atomic::Ordering::SeqCst);
+    len
+}
+
+// ---- fighting
+
+/// Kinds of thing [`run_fight`] counts, in the order of [`fight_counts`]: hits that landed (0), each way a
+/// report was refused (1 to 12, by `halo_sim::combat::Reject::code`), deaths the hits caused (13), shots fired (14).
+pub const FIGHT_KINDS: usize = 15;
+
+fn fighter_bytes(combat: &MemoryCombat, id: u16) -> Vec<u8> {
+    let mut out = Vec::new();
+    if let Some(f) = combat.fighter(id) {
+        out.extend_from_slice(&f.id.to_le_bytes());
+        out.extend_from_slice(&f.vitals.shield.to_le_bytes());
+        out.extend_from_slice(&f.vitals.body.to_le_bytes());
+        out.extend_from_slice(&f.vitals.shield_stun_ticks.to_le_bytes());
+        out.push(f.vitals.flags);
+        out.extend_from_slice(&f.tick.to_le_bytes());
+        for w in f.loadout.weapons {
+            out.extend_from_slice(&w.to_le_bytes());
+        }
+        out.extend_from_slice(&f.hurt_tick.to_le_bytes());
+        out.extend_from_slice(&f.hurt_by.to_le_bytes());
+        out.extend_from_slice(&f.hurt_count.to_le_bytes());
+    }
+    let s = combat.shooter(id);
+    out.extend_from_slice(&s.hit_seconds.to_le_bytes());
+    out.extend_from_slice(&s.hit_seconds_tick.to_le_bytes());
+    out.extend_from_slice(&s.accepted.to_le_bytes());
+    out.extend_from_slice(&s.rejected.to_le_bytes());
+    out.push(s.last_reject);
+    out
+}
+
+/// A crowd that fights: the players fire pistols at the weapon's real rate, with a random damage between two
+/// bounds, and report hits (good ones, and every kind of bad one: a weapon not owned, a target elsewhere,
+/// a report too old or from the future, a hit on oneself or a body, numbers that are not numbers), which
+/// `halo_sim::combat::resolve` judges and deals; the deaths go to the game's rules, which respawn the players
+/// with full health and shields. Returns the final state of the store, the game, every fighter and weapon,
+/// then the hash that chains each tick's events, deaths and states, then the counts ([`FIGHT_KINDS`]).
+pub fn run_fight(seed: u64, ticks: u32) -> Vec<u8> {
+    const PLAYERS: u16 = 30;
+    let starts: Vec<_> = (0..8)
+        .map(|i| halo_sim::fixtures::start_at((i % 4) as f32 * 6.0 - 9.0, (i / 4) as f32 * 6.0 - 3.0, (i % 2) as i16))
+        .collect();
+    let mut map = halo_sim::fixtures::with_starts(flat_floor_map(), &starts);
+    // (a damage to draw from, so that the random source is part of the result)
+    let pistol = {
+        let weapon = map.combat.weapons.iter_mut().find(|w| w.name == halo_sim::combat::STARTING_WEAPON_NAME).unwrap();
+        let damage = weapon.triggers[0].projectile.as_mut().unwrap().impact_damage.as_mut().unwrap();
+        damage.lower = 20.0;
+        damage.upper = 32.0;
+        weapon.clone()
+    };
+    let mut rules = if seed & 1 == 0 { Rules::slayer() } else { Rules::team_slayer() };
+    rules.score_limit = 0;
+    rules.respawn_ticks = 30;
+    rules.wave_ticks = 45;
+    let mut store = MemoryStore::new();
+    let mut game = MemoryGame::new(rules);
+    let mut combat = MemoryCombat::new();
+    let mut trails = Trails::new();
+    let mut rng = Rng::seeded(seed);
+    let mut hands: Vec<Hands> = (0..PLAYERS).map(|_| Hands::new(&pistol)).collect();
+    for id in 0..PLAYERS {
+        enter(&mut game, id, (id % 2) as u8, 0);
+    }
+
+    let mut chain = Fnv(0xCBF2_9CE4_8422_2325);
+    let mut counts = [0u32; FIGHT_KINDS];
+    for tick in 1..=ticks as u64 {
+        let all: Vec<u16> = game.contestants().iter().map(|c| c.id).collect();
+        let alive: Vec<u16> = game.contestants().iter().filter(|c| c.is_alive()).map(|c| c.id).collect();
+        let mut reports: Vec<(u16, HitReport)> = Vec::new();
+        for &id in &alive {
+            // the trigger is held in stretches
+            let held = !(tick / 20 + id as u64).is_multiple_of(3);
+            let shot = hands[id as usize].update(&pistol, held);
+            if !shot.fired {
+                continue;
+            }
+            counts[14] += 1;
+            let target = all[rng.next_u32() as usize % all.len()];
+            let at = store.player(target).map_or([0.0; 3], |p| p.position);
+            let mut report = HitReport {
+                target,
+                weapon: pistol.tag_index,
+                material: (rng.next_u32() % 5) as i16 - 1,
+                host_tick: tick.saturating_sub(rng.next_u32() as u64 % 5) as u32,
+                origin: [at[0], at[1], at[2] + 0.3],
+                target_position: at,
+            };
+            match rng.next_u32() % 40 {
+                0 => report.weapon = 999,
+                1 => report.target_position[1] += 9.0,
+                2 => report.host_tick = tick.saturating_sub(200) as u32,
+                3 => report.host_tick = tick as u32 + 50,
+                4 => report.origin[2] += 40.0,
+                5 => report.target = id,
+                6 => report.origin[0] = f32::NAN,
+                7 => report.target = PLAYERS + 3,
+                8 => report.target_position[0] += 80.0,
+                _ => {}
+            }
+            reports.push((id, report));
+        }
+        // (a player who is dead reports too, and one report comes twice)
+        if let Some(dead) = game.contestants().iter().find(|c| !c.is_alive()) {
+            if let Some((_, r)) = reports.first().copied() {
+                reports.push((dead.id, r));
+            }
+        }
+        if rng.next_u32().is_multiple_of(7) {
+            if let Some(r) = reports.first().copied() {
+                reports.push(r);
+            }
+        }
+
+        let dealt = halo_sim::combat::resolve(&store, &game, &mut combat, &trails, &map, &mut rng, tick, &reports);
+        for event in &dealt.events {
+            match event {
+                HitEvent::Hit { shooter, target, hurt } => {
+                    counts[0] += 1;
+                    chain.bytes(&shooter.to_le_bytes());
+                    chain.bytes(&target.to_le_bytes());
+                    chain.bytes(&hurt.shield_damage.to_le_bytes());
+                    chain.bytes(&hurt.body_damage.to_le_bytes());
+                    chain.bytes(&[hurt.shield_depleted as u8, hurt.killed as u8, hurt.killed_instantly as u8]);
+                }
+                HitEvent::Rejected { shooter, reason } => {
+                    counts[reason.code() as usize] += 1;
+                    chain.bytes(&shooter.to_le_bytes());
+                    chain.bytes(&[reason.code()]);
+                }
+            }
+        }
+        counts[13] += dealt.deaths.len() as u32;
+        for d in &dealt.deaths {
+            chain.bytes(&d.victim.to_le_bytes());
+            chain.bytes(&d.killer.unwrap_or(u16::MAX).to_le_bytes());
+        }
+
+        let inputs: Vec<PlayerInput> = alive
+            .iter()
+            .map(|&id| {
+                let p = store.player(id).unwrap().position;
+                let to = [p[0] + signed(&mut rng) * max_step(), p[1] + signed(&mut rng) * max_step(), p[2]];
+                PlayerInput { player: id, position: to, yaw: signed(&mut rng), pitch: 0.0, flags: 0 }
+            })
+            .collect();
+        let outcome = halo_sim::rules::play(&mut store, &mut game, &map, &mut rng, tick, &dealt.deaths, &inputs);
+        let mut bytes = Vec::new();
+        for event in &outcome.events {
+            match_event_bytes(event, &mut bytes);
+            if let GameEvent::Spawned { player, .. } = event {
+                halo_sim::combat::spawn(&mut combat, &mut trails, &map, *player, tick);
+                hands[*player as usize] = Hands::new(&pistol);
+            }
+        }
+        chain.bytes(&bytes);
+        chain.bytes(&snapshot(&store));
+        chain.bytes(&snapshot_game(&game));
+        let seen: Vec<_> =
+            store.player_ids().into_iter().filter_map(|id| Some((id, store.player(id)?.position))).collect();
+        trails.record(tick, seen);
+        for id in 0..PLAYERS {
+            chain.bytes(&fighter_bytes(&combat, id));
+        }
+    }
+
+    let mut out = snapshot(&store);
+    out.extend_from_slice(&snapshot_game(&game));
+    for id in 0..PLAYERS {
+        out.extend_from_slice(&fighter_bytes(&combat, id));
+        out.extend_from_slice(format!("{:?}", hands[id as usize]).as_bytes());
+    }
+    out.extend_from_slice(&chain.0.to_le_bytes());
+    for c in counts {
+        out.extend_from_slice(&c.to_le_bytes());
+    }
+    out
+}
+
+/// How many of each kind of thing [`run_fight`] had (see [`FIGHT_KINDS`]).
+pub fn fight_counts(output: &[u8]) -> [u32; FIGHT_KINDS] {
+    let tail = &output[output.len() - FIGHT_KINDS * 4..];
+    std::array::from_fn(|i| u32::from_le_bytes(tail[i * 4..i * 4 + 4].try_into().unwrap()))
+}
+
+/// For the WebAssembly host: run [`run_fight`] and return the length of the
+/// result, which [`parity_output`] points to.
+#[no_mangle]
+pub extern "C" fn parity_fight_run(seed_low: u32, seed_high: u32, ticks: u32) -> u32 {
+    let bytes = run_fight(seed_low as u64 | (seed_high as u64) << 32, ticks).into_boxed_slice();
     let len = bytes.len() as u32;
     OUTPUT.store(Box::leak(bytes).as_ptr() as usize, std::sync::atomic::Ordering::SeqCst);
     len
