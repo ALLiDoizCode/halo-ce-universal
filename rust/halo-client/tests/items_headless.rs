@@ -35,6 +35,12 @@ use halo_sim::PlayerInput;
 
 const STATE_ALIVE: u8 = 0;
 const NO_WEAPON: u16 = u16::MAX;
+/// The most objects the game makes for the server's items (`LARGE_ITEM_DRAW_LIMIT` in `large_mode.c`), the
+/// distance within which it makes them (`LARGE_ITEM_SHOW_RANGE`), and the one it keeps one out to
+/// (`LARGE_ITEM_KEEP_RANGE`).
+const DRAW_LIMIT: usize = 64;
+const SHOW_RANGE: f32 = 50.0;
+const KEEP_RANGE: f32 = 60.0;
 
 fn env_path(name: &str) -> Option<PathBuf> {
     std::env::var_os(name).map(PathBuf::from)
@@ -245,6 +251,39 @@ fn items_in_log(text: &str) -> Option<(u32, u32)> {
     Some((on_the_ground, falling))
 }
 
+/// How many objects the game draws for items at `items` with its player at `at`: the nearest 64 of those within
+/// 50 (60 for one it already draws), as the fewest and the most it may be, for the places the game puts its
+/// player and the items it has not caught up with.
+fn drawn_bounds(items: &[[f32; 3]], at: [f32; 3]) -> (usize, usize) {
+    let within = |range: f32| {
+        items
+            .iter()
+            .filter(|p| ((p[0] - at[0]).powi(2) + (p[1] - at[1]).powi(2) + (p[2] - at[2]).powi(2)).sqrt() <= range)
+            .count()
+    };
+    (within(SHOW_RANGE - 2.0).min(DRAW_LIMIT), within(KEEP_RANGE + 2.0).min(DRAW_LIMIT))
+}
+
+/// The positions of the server's items.
+fn item_places(a: &Arena) -> Vec<[f32; 3]> {
+    a.owner.items().values().map(|i| [i.x, i.y, i.z]).collect()
+}
+
+/// How many objects the game's log says it draws for the server's items (`...; 12 drawn (the nearest ...`).
+fn drawn_in_log(text: &str) -> Option<usize> {
+    let line = text.lines().rev().find(|l| l.contains("large mode: items: "))?;
+    line.split("; ").last()?.split(" drawn").next()?.trim().parse().ok()
+}
+
+/// Wait for the game to draw as many items as it should for its player at `at` (as the server has them now).
+fn wait_for_drawn(a: &Arena, log: &Path, at: [f32; 3], what: &str) -> usize {
+    wait_for(what, 40, || {
+        let drawn = drawn_in_log(&read(log))?;
+        let (fewest, most) = drawn_bounds(&item_places(a), at);
+        (drawn >= fewest && drawn <= most).then_some(drawn)
+    })
+}
+
 #[test]
 fn the_game_shows_the_servers_items_takes_one_swaps_for_others_and_sees_weapons_fall() {
     // Blood Gulch's red base: the assault rifle is 0.7 ahead of the game's player (who faces +y), the
@@ -271,13 +310,17 @@ fn the_game_shows_the_servers_items_takes_one_swaps_for_others_and_sees_weapons_
     let began = Instant::now();
     let stamp = |what: &str| println!("[{:6.1} s] {what}", began.elapsed().as_secs_f32());
 
-    // what the game draws is what the server has on the ground: an object for each of its items
-    wait_for("the game to draw the server's items", 30, || {
+    // what the game draws is what the server has on the ground near its player: an object for each of those
+    // (the game's player stands at the red base, and the far placements are not drawn)
+    wait_for("the game to count the server's items", 30, || {
         let (on_the_ground, _) = items_in_log(&read(&log))?;
         (on_the_ground > 0 && on_the_ground as usize == a.owner.items().len()).then_some(())
     });
     let on_the_ground = a.owner.items();
-    stamp(&format!("the game draws all {} of the server's items", on_the_ground.len()));
+    let game_at = [40.4, -77.95, -0.3];
+    let drawn = wait_for_drawn(&a, &log, game_at, "the game to draw the server's items near its player");
+    assert!(drawn > 0 && drawn < on_the_ground.len(), "{drawn} of {} drawn: the far ones are not", on_the_ground.len());
+    stamp(&format!("the game draws {drawn} of the server's {} items", on_the_ground.len()));
     // the placements' weapons are at the placements' places, at rest on the ground
     let rifle_item = on_the_ground.values().find(|i| i.tag == rifle && (i.x - 40.128).abs() < 0.01).expect("the rifle");
     assert!(rifle_item.resting && (rifle_item.z - (-0.2869)).abs() < 0.2, "{rifle_item:?}");
@@ -295,6 +338,7 @@ fn the_game_shows_the_servers_items_takes_one_swaps_for_others_and_sees_weapons_
         let (n, _) = items_in_log(&read(&log))?;
         (n as usize == a.owner.items().len()).then_some(())
     });
+    wait_for_drawn(&a, &log, game_at, "the game to draw what is near its player, without the rifle");
 
     // the simulated player dies: the shotgun and the plasma rifle fall in front of the game
     stamp("the simulated player dies");
@@ -339,6 +383,100 @@ fn the_game_shows_the_servers_items_takes_one_swaps_for_others_and_sees_weapons_
     stamp("done");
     a.finish(game);
     drop(shooter);
+}
+
+#[test]
+fn the_game_draws_the_items_near_its_player_and_those_near_where_it_spawns_after_it_dies() {
+    let Some(a) = arena("items-near", "bloodgulch", &[at(40.4, -78.7, std::f32::consts::FRAC_PI_2)]) else { return };
+    let (game, log) = a.start_game(140, &[]);
+    let me = wait_for("the game's seat", 60, || a.owner.seats().values().map(|s| s.player).next());
+    let alive = |after: u32| {
+        wait_for("the game's player in the world", 60, || {
+            let standing = a.owner.standings().get(&me)?.clone();
+            (standing.state == STATE_ALIVE && standing.spawns > after && a.owner.fighters().contains_key(&me))
+                .then_some(standing)
+        })
+    };
+    let first = alive(0);
+    let total = wait_for("the game to count the server's items", 30, || {
+        let (on_the_ground, _) = items_in_log(&read(&log))?;
+        (on_the_ground > 0 && on_the_ground as usize == a.owner.items().len()).then_some(on_the_ground as usize)
+    });
+    let first_at = [first.x, first.y, first.z];
+    let first_drawn = wait_for_drawn(&a, &log, first_at, "the game to draw the items near where it spawned");
+    println!("spawned at {first_at:?}: {first_drawn} of {total} items drawn");
+    assert!(first_drawn > 0 && first_drawn < total, "the far items are not drawn: {first_drawn} of {total}");
+
+    // it dies and spawns again, wherever the rules put it: the items near that place are drawn
+    a.owner.report_death(me, None).unwrap();
+    wait_for("the server to say the game's player is dead", 20, || {
+        (a.owner.standings().get(&me)?.state != STATE_ALIVE).then_some(())
+    });
+    let second = alive(first.spawns);
+    let second_at = [second.x, second.y, second.z];
+    let second_drawn = wait_for_drawn(&a, &log, second_at, "the game to draw the items near where it spawned again");
+    println!("spawned again at {second_at:?}: {second_drawn} of {} items drawn", a.owner.items().len());
+    a.finish(game);
+}
+
+#[test]
+fn the_game_draws_no_more_than_64_items_however_many_lie_near_it() {
+    // forty simulated players stand within a few steps of the game's player, with two weapons each to put down
+    // when they die: well over 64 weapons lie within range of it
+    const SIMULATED: u8 = 40;
+    let mut places: Vec<PlayerInput> = (0..SIMULATED)
+        .map(|k| at(38.4 + f32::from(k % 8) * 0.5, -81.5 + f32::from(k / 8) * 0.5, 0.0))
+        .collect();
+    places.push(at(40.4, -78.7, std::f32::consts::FRAC_PI_2));
+    let Some(a) = arena("items-pile", "bloodgulch", &places) else { return };
+    let shotgun = a.weapon("shotgun");
+    let plasma_rifle = a.weapon("plasma rifle");
+    let seated: Vec<(PlayerClient, u16)> = (0..SIMULATED).map(|k| a.seat(k + 1)).collect();
+    for (_, id) in &seated {
+        a.owner.set_loadout(*id, shotgun, plasma_rifle).unwrap();
+    }
+    let (game, log) = a.start_game(150, &[]);
+    let me = wait_for("the game's seat", 60, || {
+        a.owner.seats().values().map(|s| s.player).find(|p| !seated.iter().any(|(_, id)| id == p))
+    });
+    wait_for("the game's player in the world", 60, || {
+        (a.owner.standings().get(&me)?.state == STATE_ALIVE && a.owner.fighters().contains_key(&me)).then_some(())
+    });
+    wait_for("the game to count the server's items", 30, || {
+        let (on_the_ground, _) = items_in_log(&read(&log))?;
+        (on_the_ground > 0 && on_the_ground as usize == a.owner.items().len()).then_some(())
+    });
+    let before = a.owner.items().len();
+    for (_, id) in &seated {
+        a.owner.report_death(*id, None).unwrap();
+    }
+    wait_for("the weapons put down", 30, || {
+        // (most of the eighty: some are put down on one another's spots and some are not held at all)
+        (a.owner.items().values().filter(|i| i.placement == u16::MAX).count() >= DRAW_LIMIT + 8).then_some(())
+    });
+    let near = {
+        let standing = a.owner.standings()[&me].clone();
+        let at = [standing.x, standing.y, standing.z];
+        let near = drawn_bounds(&item_places(&a), at);
+        assert_eq!(near, (DRAW_LIMIT, DRAW_LIMIT), "more than {DRAW_LIMIT} items lie near the game's player");
+        at
+    };
+    let drawn = wait_for_drawn(&a, &log, near, "the game to draw the nearest 64");
+    assert_eq!(drawn, DRAW_LIMIT);
+    // ... and never more, though the server holds all of them
+    std::thread::sleep(Duration::from_secs(5));
+    let text = read(&log);
+    let most = text
+        .lines()
+        .filter(|l| l.contains("large mode: items: "))
+        .filter_map(|l| drawn_in_log(l))
+        .max()
+        .unwrap();
+    let (on_the_ground, _) = items_in_log(&text).unwrap();
+    println!("{before} items before, {on_the_ground} on the ground after, the game drew at most {most}");
+    assert!(on_the_ground as usize > DRAW_LIMIT && most <= DRAW_LIMIT, "{on_the_ground} on the ground, {most} drawn");
+    a.finish(game);
+    drop(seated);
 }
 
 #[test]

@@ -1983,12 +1983,23 @@ enum
 	LARGE_AUTOUSE_TICKS = 15,
 	/* ticks between the sweeps of the items the engine made that the server did not */
 	LARGE_SWEEP_TICKS = 10,
+	/* the most objects that show the server's items at once: the engine pays for each one a game tick and a
+	frame (the profile in issue #41), which a pile of 400 weapons made 4 to 60 frames a second of */
+	LARGE_ITEM_DRAW_LIMIT = 64,
 	/* the HUD's kinds of pickup (players.c's _network_pickup_*) */
 	_large_pickup_weapon = 0,
 	_large_pickup_powerup = 4,
 	/* a weapon that is no weapon, as the server says it (halo_large_loadout) */
 	LARGE_NO_WEAPON = 0xFFFF
 };
+
+/* the items the engine shows are the nearest to the local player, within these distances (world units: a
+weapon 50 away is a few pixels wide); an item that is shown stays so out to the larger distance, so that
+one on the edge does not come and go as the player moves */
+#define LARGE_ITEM_SHOW_RANGE 50.0f
+#define LARGE_ITEM_KEEP_RANGE 60.0f
+/* of the items beyond the limit, one that is already shown counts as this share nearer (squared) */
+#define LARGE_ITEM_KEEP_BIAS 0.64f
 
 /* an item of the server's, and the engine's object that shows it */
 struct large_item
@@ -2000,9 +2011,13 @@ struct large_item
 
 static struct
 {
-	/* by the server's id, which they are in the order of */
+	/* the ones the engine shows, by the server's id, which they are in the order of */
 	struct large_item entries[LARGE_MAXIMUM_ITEMS];
 	long count;
+	/* the items the server holds, of which entries are the nearest to anchor */
+	long server_count;
+	real_point3d anchor;
+	boolean anchored;
 	long created;
 	long removed;
 	long create_failures;
@@ -2150,11 +2165,92 @@ static void large_mode_drive_item(
 	SET_FLAG(object->object.flags, _object_at_rest_bit, TRUE);
 }
 
-/* every item of the server's has an object that shows it, where it is; one the server no longer has
-(taken, or gone in its time) has its object deleted. The two lists are in the order of the server's ids. */
+/* what the server says of one item this tick, kept for the choice of the ones to show and for showing them */
+struct large_item_say
+{
+	unsigned long info[6];
+	float out[7];
+	real key;
+	boolean valid;
+	boolean wanted;
+};
+
+static int large_mode_compare_keys(
+	void const *a,
+	void const *b)
+{
+	real x = *(real const *)a;
+	real y = *(real const *)b;
+
+	return x < y ? -1 : x > y ? 1 : 0;
+}
+
+/* which of the server's items the engine shows: those within range of the anchor (the local player), and of
+those the nearest LARGE_ITEM_DRAW_LIMIT (the server owns every item, and takes the nearest the player can
+reach: it is always among them) */
+static void large_mode_choose_items(
+	struct large_item_say *say,
+	unsigned long count)
+{
+	static real keys[LARGE_MAXIMUM_ITEMS];
+	unsigned long i;
+	long j = 0;
+	long candidates = 0;
+
+	for (i = 0; i < count; i++)
+	{
+		real dx, dy, dz, distance, range;
+		boolean known;
+
+		say[i].wanted = FALSE;
+		if (!say[i].valid)
+			continue;
+		while (j < large_item_data.count && large_item_data.entries[j].id < say[i].info[0])
+			j++;
+		known = j < large_item_data.count && large_item_data.entries[j].id == say[i].info[0];
+		dx = say[i].out[0] - large_item_data.anchor.x;
+		dy = say[i].out[1] - large_item_data.anchor.y;
+		dz = say[i].out[2] - large_item_data.anchor.z;
+		distance = dx * dx + dy * dy + dz * dz;
+		range = known ? LARGE_ITEM_KEEP_RANGE : LARGE_ITEM_SHOW_RANGE;
+		if (distance > range * range)
+			continue;
+		say[i].wanted = TRUE;
+		say[i].key = known ? distance * LARGE_ITEM_KEEP_BIAS : distance;
+		keys[candidates++] = say[i].key;
+	}
+	if (candidates > LARGE_ITEM_DRAW_LIMIT)
+	{
+		/* the limit's-th nearest decides; of those as near as it, only as many as there is room for (a heap
+		of weapons put down on one spot is all as near as each other) */
+		real limit;
+		long room;
+
+		qsort(keys, (size_t)candidates, sizeof(real), large_mode_compare_keys);
+		limit = keys[LARGE_ITEM_DRAW_LIMIT - 1];
+		room = LARGE_ITEM_DRAW_LIMIT;
+		for (i = 0; i < count; i++)
+			if (say[i].wanted && say[i].key < limit)
+				room--;
+		for (i = 0; i < count; i++)
+		{
+			if (!say[i].wanted || say[i].key < limit)
+				continue;
+			if (say[i].key == limit && room > 0)
+				room--;
+			else
+				say[i].wanted = FALSE;
+		}
+	}
+}
+
+/* the engine's objects show the nearest of the server's items, each where it is; one the server no longer has
+(taken, or gone in its time), or that is no longer among the nearest, has its object deleted. The two lists
+are in the order of the server's ids. */
 static void large_mode_update_items(void)
 {
 	static struct large_item next[LARGE_MAXIMUM_ITEMS];
+	static struct large_item_say say[LARGE_MAXIMUM_ITEMS];
 	unsigned long tick;
 	unsigned long count = MIN(halo_large_items(&tick), (unsigned long)LARGE_MAXIMUM_ITEMS);
 	unsigned long i = 0;
@@ -2162,34 +2258,37 @@ static void large_mode_update_items(void)
 	long n = 0;
 
 	large_item_data.falling = 0;
+	large_item_data.server_count = (long)count;
+	for (i = 0; i < count; i++)
+		say[i].valid = halo_large_item(i, say[i].info, say[i].out) != 0;
+	large_mode_choose_items(say, count);
+	i = 0;
 	while (i < count || j < large_item_data.count)
 	{
-		unsigned long info[6];
-		float out[7];
-		boolean server = FALSE;
+		struct large_item_say *item = NULL;
 		struct large_item *known = j < large_item_data.count ? &large_item_data.entries[j] : NULL;
 
 		if (i < count)
 		{
-			if (!halo_large_item(i, info, out))
+			if (!say[i].wanted)
 			{
 				i++;
 				continue;
 			}
-			server = TRUE;
+			item = &say[i];
 		}
-		if (known && (!server || known->id < info[0]))
+		if (known && (!item || known->id < item->info[0]))
 		{
 			large_mode_remove_item(known);
 			j++;
 		}
-		else if (server && (!known || info[0] < known->id))
+		else if (item && (!known || item->info[0] < known->id))
 		{
 			struct large_item fresh;
 
-			if (n < LARGE_MAXIMUM_ITEMS && large_mode_create_item(info, out, &fresh))
+			if (n < LARGE_MAXIMUM_ITEMS && large_mode_create_item(item->info, item->out, &fresh))
 			{
-				large_mode_drive_item(&fresh, info, out);
+				large_mode_drive_item(&fresh, item->info, item->out);
 				next[n++] = fresh;
 			}
 			i++;
@@ -2202,10 +2301,10 @@ static void large_mode_update_items(void)
 				struct large_item fresh;
 
 				large_item_data.is_item[DATUM_INDEX_TO_ABSOLUTE_INDEX(known->object_index)] = 0;
-				if (large_mode_create_item(info, out, &fresh))
+				if (large_mode_create_item(item->info, item->out, &fresh))
 					*known = fresh;
 			}
-			large_mode_drive_item(known, info, out);
+			large_mode_drive_item(known, item->info, item->out);
 			next[n++] = *known;
 			i++;
 			j++;
@@ -2450,8 +2549,9 @@ static void large_mode_log_items(void)
 		return;
 	large_item_data.logged_time = game_time_get();
 	platform_log("large mode: items: %ld on the ground, %ld of them falling; made %ld, taken away %ld, engine's "
-		"own swept %ld", large_item_data.count, large_item_data.falling, large_item_data.created,
-		large_item_data.removed, large_item_data.swept);
+		"own swept %ld; %ld drawn (the nearest, of those the server holds)", large_item_data.server_count,
+		large_item_data.falling, large_item_data.created, large_item_data.removed, large_item_data.swept,
+		large_item_data.count);
 }
 
 /* ---------- the server's say of the local player's life, and the scoreboard */
@@ -2771,7 +2871,20 @@ void large_mode_game_tick(
 		large_mode_show_camouflage(unit_index, large.player_id, TRUE);
 	}
 
-	/* the items on the ground, which are the server's */
+	/* the items on the ground, which are the server's: the engine shows those nearest the player (where the
+	player was last, while dead; where the server spawns them, before there is a unit) */
+	if (unit)
+	{
+		large_item_data.anchor = unit->object.position;
+		large_item_data.anchored = TRUE;
+	}
+	else if (have_life && !large_item_data.anchored)
+	{
+		large_item_data.anchor.x = life_position[0];
+		large_item_data.anchor.y = life_position[1];
+		large_item_data.anchor.z = life_position[2];
+		large_item_data.anchored = TRUE;
+	}
 	large_mode_update_items();
 	large_mode_sweep_items();
 	large_mode_log_items();
