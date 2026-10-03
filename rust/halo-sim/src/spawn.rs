@@ -1,6 +1,6 @@
 //! Where a player appears: the engine's choice of a player starting location
 //! (`find_best_starting_location_index` and the rating functions of
-//! `source/game/game_engine.c`), and what a wave does when none is free.
+//! `source/game/game_engine.c`), and what is done when none is free: a spot beside one, and a wave as the fallback.
 //!
 //! # The engine's rule
 //!
@@ -36,7 +36,9 @@
 //! - A location that is a few centimetres inside a wall (a few percent of
 //!   them are, on the maps as they ship) is moved clear of it, and put on the
 //!   ground, when the map is loaded ([`settle`]).
-//! - In a wave (see [`crate::rules`]) a location that is taken is not the end:
+//! - When a player's spawn asks for it (see [`crate::rules`]: a player whose timer has run
+//!   out asks at once, and a wave asks again for those it left waiting) a location that is
+//!   taken is not the end:
 //!   the places around it are tried too, 0.6 and 1.2 world units out, and are
 //!   free if nobody is within a pill's width of them (the engine's room for
 //!   enemies is not asked for), so that a crowd can be put on a map with 16
@@ -200,7 +202,7 @@ pub fn settle(map: &MapData, start: Start) -> Start {
 pub struct Spot {
     pub position: [f32; 3],
     pub yaw: f32,
-    /// A spot beside a location that was taken, found in a wave.
+    /// A spot beside a location that was taken, found when none was free.
     pub beside: bool,
 }
 
@@ -236,7 +238,7 @@ pub fn pick(map: &MapData, teams: bool, team: u8, others: &[Occupant], rng: &mut
                     start.position[1] + direction[1] * radius,
                     start.position[2],
                 ];
-                // (in a wave the engine's room for enemies is not asked for: only that
+                // (beside a start the engine's room for enemies is not asked for: only that
                 // nobody is where a player would stand)
                 let width = 2.0 * map.movement.collision_radius;
                 if others.iter().any(|o| distance(&o.position, &to) < width) {

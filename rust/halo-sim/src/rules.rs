@@ -30,14 +30,16 @@
 //!
 //! # Spawning and waves
 //!
-//! A player who joins, and a dead player whose timer has run out, spawn at
-//! once if a starting location is free by the engine's rules. If none is, they
-//! wait for the next **wave**: a tick that is a multiple of
-//! [`Rules::wave_ticks`] counted from the start of the match. In a wave the
-//! players who are waiting, longest first, are put at a free location or,
-//! when all are taken, beside one (see [`crate::spawn`]). A player the wave
-//! could not place waits for the next. [`Contestant::life`] says when the
-//! wave is, so that the player can be told.
+//! A player who joins, and a dead player whose timer has run out, spawn on
+//! that tick: at a starting location if one is free by the engine's rules,
+//! or else beside one (see [`crate::spawn`]), so that a crowd does not wait.
+//! Only a player who can be put in neither place waits for the next **wave**,
+//! the fallback: a tick that is a multiple of [`Rules::wave_ticks`] counted
+//! from the start of the match. In a wave the players who are waiting,
+//! longest first, are tried again the same way, and a player the wave could
+//! not place waits for the next. [`Contestant::life`] says when the wave is,
+//! so that the player can be told. [`GameEvent::Spawned`]'s `wave` is true
+//! only for a player a wave placed.
 //!
 //! # The end
 //!
@@ -112,8 +114,9 @@ pub enum Life {
     Dead {
         due: u64,
     },
-    /// The timer has run out (or the player has just joined) and no starting
-    /// location was free: the player spawns in the wave at this tick.
+    /// The timer has run out (or the player has just joined) and neither a
+    /// free starting location nor a spot beside one was to be had: the player
+    /// is tried again in the wave at this tick (the fallback; rare).
     Waiting {
         wave: u64,
     },
@@ -381,9 +384,10 @@ pub enum GameEvent {
         player: PlayerId,
         position: [f32; 3],
         yaw: f32,
+        /// Placed by a wave, after waiting for it (not for a spawn on the tick the player was due).
         wave: bool,
     },
-    /// No starting location was free: the player spawns in the wave at this tick.
+    /// No starting location was free and no spot beside one either: the player is tried again in the wave at this tick.
     Waiting {
         player: PlayerId,
         wave_at: u64,
@@ -546,23 +550,23 @@ pub fn spawn_due(
         .filter(|c| c.is_alive())
         .filter_map(|c| store.player(c.id).map(|p| Occupant { position: p.position, team: c.team }))
         .collect();
-    let wave = state.is_wave(tick);
     // a team (or, without teams, everyone) with no spot left for one has none for the next
     let (mut none_free, mut none_beside) = ([false; TEAMS as usize], [false; TEAMS as usize]);
     for mut c in due {
         let key = if teams { (c.team % TEAMS) as usize } else { 0 };
         let mut spot = None;
-        let mut in_wave = false;
-        if matches!(c.life, Life::Dead { .. }) && !none_free[key] {
+        let waited = matches!(c.life, Life::Waiting { .. });
+        if !waited && !none_free[key] {
             spot = spawn::pick(map, teams, c.team, &occupants, rng, false);
             none_free[key] = spot.is_none();
         }
-        // (a player who waits is due on the wave's tick: a wave that was late is still one)
-        if spot.is_none() && (wave || matches!(c.life, Life::Waiting { .. })) && !none_beside[key] {
+        // (a player who is dead is offered a spot beside a start at once, on their own tick, the same one a wave offers;
+        // a player who waits is due on the wave's tick: a wave that was late is still one)
+        if spot.is_none() && !none_beside[key] {
             spot = spawn::pick(map, teams, c.team, &occupants, rng, true);
             none_beside[key] = spot.is_none();
-            in_wave = spot.is_some();
         }
+        let in_wave = spot.is_some() && waited;
         match spot {
             Some(spot) => {
                 store.set_player(Player::new(c.id, spot.position, spot.yaw, 0.0));
