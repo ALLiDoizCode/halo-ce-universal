@@ -1676,6 +1676,7 @@ enum
 long distributed_player_ping(short player_index);
 /* the large-scale mode's adapter (port/linux/game/large_mode.c) */
 boolean large_mode_active(void);
+void platform_log(char const *format, ...);
 boolean large_mode_player_spawn(long player_index, boolean *spawn);
 boolean large_mode_state_message(long player_index, wchar_t *buffer, long count);
 boolean large_mode_bare_remote_unit(long unit_index, long *team, wchar_t *name, long name_size);
@@ -1964,6 +1965,26 @@ static void game_engine_rasterize_large_scoreboard(
 	team_colors[1].blue = 0.6f;
 
 	large_mode_scoreboard_title(title_string, NUMBEROF(title_string));
+	/* (the log has what the scoreboard shows when it changes, for the automated tests: it is
+	made from the server's state, not the engine's players) */
+	{
+		static long logged_count = -1;
+		static wchar_t logged_title[160];
+
+		if (logged_count != count || ustrcmp(logged_title, title_string))
+		{
+			char narrow[160];
+			long character;
+
+			logged_count = count;
+			ustrncpy(logged_title, title_string, NUMBEROF(logged_title));
+			/* (wide characters are 16 bits in this game, not the C library's) */
+			for (character = 0; character < NUMBEROF(narrow) - 1 && title_string[character]; character++)
+				narrow[character] = title_string[character] < 0x7F ? (char)title_string[character] : '?';
+			narrow[character] = 0;
+			platform_log("game engine: the scoreboard lists %ld players: %s", count, narrow);
+		}
+	}
 	color.alpha = alpha;
 	color.red = color.green = color.blue = 0.7f;
 	scoreboard_draw_row(title_string, FALSE, &color, 0, top, left, FALSE);
@@ -2090,6 +2111,10 @@ static void game_engine_rasterize_scoreboard(
 		game_engine_rasterize_large_scoreboard(player_index, alpha);
 		return;
 	}
+	/* (and once the mode's session has stopped, as the game ends to move on to another match or
+	server, there is no server state to list: not the engine's players, which are 127 of the match) */
+	if (large_mode_active())
+		return;
 	if (font_index == NONE)
 		return;
 	offset_rectangle2d(&bounds, -render.camera.viewport_bounds.x0, -render.camera.viewport_bounds.y0);
@@ -2477,6 +2502,16 @@ void game_engine_post_rasterize_post_game(
 
 	if (!game_engine)
 		return;
+
+	/* port: the large-scale mode's report of the end is the scoreboard that stays up (the server's
+	standings, with the winner): this report is made of the engine's players, the nearest 127 of
+	the match, whose scores are not the match's */
+	if (large_mode_active())
+	{
+		if (render.local_player_index != NONE && local_player_get_player_index(render.local_player_index) != NONE)
+			game_engine_post_rasterize_in_game();
+		return;
+	}
 
 	tab_stops[0] = 50;
 	tab_stops[1] = 125;
@@ -5169,6 +5204,9 @@ void game_engine_end_game(
 {
 	if (game_engine_globals.postgame_state==game_engine_mode_active)
 	{
+		/* port: the log says when the engine's game ends (in the large-scale mode, only the
+		server's end of the match should do it: the automated tests look for this line) */
+		platform_log("game engine: the game ends%s", large_mode_active() ? " (large-scale mode)" : "");
 		game_engine_globals.postgame_state = game_engine_mode_postgame_delay;
 		game_engine_globals.postgame_timer = 7.0f;
 		game_engine_play_multiplayer_sound(_multiplayer_sound_game_over);
