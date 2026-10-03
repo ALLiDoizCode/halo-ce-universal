@@ -23,4 +23,4 @@ pub mod transport;
 
 pub use gateway::{Gateway, GatewayConfig};
 pub use stats::{Spread, Stats, StatsSnapshot};
-pub use transport::{Transport, UdpTransport};
+pub use transport::{Outgoing, Transport, UdpTransport};

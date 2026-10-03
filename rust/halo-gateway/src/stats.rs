@@ -48,6 +48,8 @@ pub struct Stats {
 struct Timings {
     /// Microseconds from a tick reaching the gateway to its last datagram being sent.
     send_us: Vec<u32>,
+    /// The same since `take_send_window` was last called.
+    send_window_us: Vec<u32>,
     /// Microseconds from the module stamping a tick to it reaching the gateway.
     arrival_us: Vec<i64>,
 }
@@ -107,6 +109,14 @@ impl Stats {
             t.send_us.remove(0);
         }
         t.send_us.push(micros);
+        t.send_window_us.push(micros);
+    }
+
+    /// The times to send a tick since the last call (or the start), in ms, and forget them: what
+    /// one report window saw, where `snapshot`'s figures run over the whole of the run so far.
+    pub fn take_send_window(&self) -> Spread {
+        let window = std::mem::take(&mut self.timings.lock().unwrap().send_window_us);
+        Spread::of(window.into_iter().map(|v| v as f64 / 1e3).collect())
     }
 
     pub(crate) fn record_arrival(&self, micros: i64) {
@@ -148,5 +158,26 @@ impl Stats {
             send_ms: Spread::of(send),
             arrival_ms: Spread::of(arrival),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_send_window_holds_only_the_ticks_since_it_was_last_taken() {
+        let stats = Stats::new(1);
+        for us in [1_000, 2_000, 9_000] {
+            stats.record_send(us);
+        }
+        let first = stats.take_send_window();
+        assert_eq!((first.p50, first.max), (2.0, 9.0));
+        stats.record_send(4_000);
+        let second = stats.take_send_window();
+        assert_eq!((second.p50, second.max), (4.0, 4.0));
+        assert_eq!(stats.take_send_window(), Spread::default());
+        // the snapshot still runs over everything
+        assert_eq!(stats.snapshot().send_ms.max, 9.0);
     }
 }
