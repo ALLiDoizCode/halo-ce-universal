@@ -113,6 +113,8 @@ the library) the mode is not there: large_mode_active() is FALSE.
 #include "game/game_engine.h"
 #include "game/game_globals.h"
 #include "game/players.h"
+#include "items/equipment_definitions.h"
+#include "items/items.h"
 #include "items/weapons.h"
 #include "items/weapon_definitions.h"
 #include "objects/damage.h"
@@ -184,6 +186,14 @@ unsigned long halo_large_weapon_name(unsigned long tag_index, char *buffer, unsi
 unsigned long halo_large_report_hit(unsigned long target, unsigned long weapon, long material, float ox, float oy,
 	float oz, float tx, float ty, float tz);
 unsigned long halo_large_hits(unsigned long *out);
+unsigned long halo_large_items(unsigned long *tick);
+unsigned long halo_large_item(unsigned long index, unsigned long *info, float *out);
+unsigned long halo_large_item_name(unsigned long tag_index, char *buffer, unsigned long size);
+unsigned long halo_large_use(unsigned long slot);
+unsigned long halo_large_report_ammo(unsigned long loaded0, unsigned long reserve0, unsigned long loaded1,
+	unsigned long reserve1);
+unsigned long halo_large_kit(unsigned long *out);
+unsigned long halo_large_camouflage(unsigned long player);
 
 /* the local player's life, halo_large_life's first number */
 enum
@@ -298,6 +308,17 @@ static struct
 	boolean vitals_short;
 	long reports_logged;
 	boolean autofire;
+
+	/* items and pickups: the action button as it was last tick, large.autouse (the automated tests press
+	it twice a second) and when it last did, the rounds last told to the server and when, and the version
+	of the server's rounds last taken */
+	boolean action_held;
+	boolean autouse;
+	long autouse_time;
+	unsigned long reported_rounds[4];
+	long reported_time;
+	boolean kit_seen;
+	unsigned long kit_version;
 } large;
 
 static void large_mode_read_settings(
@@ -315,6 +336,7 @@ static void large_mode_read_settings(
 		large.log_players = config_boolean("large.log_players") != 0;
 		large.scoreboard_always = config_boolean("large.scoreboard") != 0;
 		large.autofire = config_boolean("large.autofire") != 0;
+		large.autouse = config_boolean("large.autouse") != 0;
 		if (large.root[0])
 		{
 			large.browser_mode = TRUE;
@@ -330,6 +352,7 @@ static void large_mode_read_settings(
 	large.log_players = config_boolean("large.log_players") != 0;
 	large.scoreboard_always = config_boolean("large.scoreboard") != 0;
 	large.autofire = config_boolean("large.autofire") != 0;
+	large.autouse = config_boolean("large.autouse") != 0;
 	if (!large.database[0])
 	{
 		platform_log("large mode: large.database names the match's database and cannot be missing: the game is "
@@ -369,6 +392,8 @@ static void large_mode_log_error(
 }
 
 static void large_mode_forget_remotes(void);
+static void large_mode_forget_items(void);
+static void large_mode_show_camouflage(long unit_index, unsigned long player, boolean local);
 static void large_mode_log_remotes(void);
 static void large_mode_local_after_objects(void);
 static void large_mode_show_vitals(long unit_index, unsigned long player);
@@ -408,6 +433,12 @@ void large_mode_new_game(
 	large.hurts_logged = 0;
 	large.vitals_short = FALSE;
 	large.reports_logged = 0;
+	large.action_held = FALSE;
+	large.autouse_time = 0;
+	large.reported_time = 0;
+	memset(large.reported_rounds, 0, sizeof(large.reported_rounds));
+	large.kit_seen = FALSE;
+	large_mode_forget_items();
 	large_mode_forget_remotes();
 	/* (with a server list the session is the player's join's, which started it) */
 	if (large.browser_mode)
@@ -431,6 +462,7 @@ void large_mode_dispose(
 	large.local_suspended_unit = NONE;
 	large.local_seen_unit = NONE;
 	large.local_moving = FALSE;
+	large_mode_forget_items();
 	large_mode_forget_remotes();
 	platform_log("large mode: stopped");
 }
@@ -894,6 +926,7 @@ static void large_mode_update_remotes_work(
 		{
 			large_mode_drive_remote(&large_remote_data.remotes[id], information);
 			large_mode_show_vitals(large_remote_data.remotes[id].unit_index, (unsigned long)id);
+			large_mode_show_camouflage(large_remote_data.remotes[id].unit_index, (unsigned long)id, FALSE);
 		}
 	}
 }
@@ -1423,6 +1456,478 @@ boolean large_mode_damage_deals(
 	return FALSE;
 }
 
+/* ---------- items and pickups */
+
+/* items.c's: lays an item the server says is at rest on the surface it is on */
+void large_mode_item_rest(long item_index, real_vector3d const *normal, real_point3d const *position);
+/* units.c's (the distributed netcode's): a weapon into a slot of a unit's inventory, and out of it */
+void unit_network_add_weapon(long unit_index, long weapon_index, short slot);
+void unit_network_forget_weapon(long unit_index, short slot);
+/* players.c's: the HUD's message, and the sound, for what a player picked up */
+void network_player_show_pickup(long player_index, short kind, long definition_index, short count);
+
+enum
+{
+	/* the most items the server holds (halo_sim::items::MAX_ITEMS) */
+	LARGE_MAXIMUM_ITEMS = 2048,
+	/* ticks between the rounds the player's weapons have being told to the server, and between the
+	presses of large.autouse */
+	LARGE_AMMO_REPORT_TICKS = 15,
+	LARGE_AUTOUSE_TICKS = 15,
+	/* ticks between the sweeps of the items the engine made that the server did not */
+	LARGE_SWEEP_TICKS = 10,
+	/* the HUD's kinds of pickup (players.c's _network_pickup_*) */
+	_large_pickup_weapon = 0,
+	_large_pickup_powerup = 4,
+	/* a weapon that is no weapon, as the server says it (halo_large_loadout) */
+	LARGE_NO_WEAPON = 0xFFFF
+};
+
+/* an item of the server's, and the engine's object that shows it */
+struct large_item
+{
+	unsigned long id;
+	long object_index;
+	boolean resting;
+};
+
+static struct
+{
+	/* by the server's id, which they are in the order of */
+	struct large_item entries[LARGE_MAXIMUM_ITEMS];
+	long count;
+	long created;
+	long removed;
+	long create_failures;
+	long swept;
+	long falling;
+	long logged_time;
+	long sweep_time;
+	boolean failure_said;
+	/* the engine's objects that are the server's items (by their slot: 1), for the sweep */
+	byte is_item[HALO_PORT_MAXIMUM_OBJECTS_PER_MAP];
+} large_item_data;
+
+/* the engine's tag of the weapon or equipment the server names by its tag index, or NONE */
+static long large_mode_item_definition(
+	unsigned long tag,
+	unsigned long kind)
+{
+	char name[160];
+	char *dot;
+
+	if (!halo_large_item_name(tag, name, sizeof(name)))
+		return NONE;
+	/* (the engine finds a tag by its name without the group's extension) */
+	dot = strrchr(name, '.');
+	if (dot)
+		*dot = 0;
+	return tag_loaded(kind == 1 ? WEAPON_DEFINITION_TAG : EQUIPMENT_DEFINITION_TAG, name);
+}
+
+/* a weapon's rounds, in its first magazine, kept to what the weapon holds */
+static void large_mode_set_rounds(
+	struct weapon_datum *weapon,
+	unsigned long loaded,
+	unsigned long reserve)
+{
+	struct weapon_definition *definition = weapon_definition_get(weapon->definition_index);
+
+	if (definition->weapon.magazines.count > 0)
+	{
+		struct weapon_magazine_definition *magazine = TAG_BLOCK_GET_ELEMENT(&definition->weapon.magazines, 0,
+			struct weapon_magazine_definition);
+
+		weapon->weapon.magazines[0].rounds_loaded = (short)MIN(loaded, (unsigned long)magazine->rounds_loaded_maximum);
+		weapon->weapon.magazines[0].rounds_total = (short)MIN(reserve, (unsigned long)MAX(magazine->rounds_total_maximum,
+			magazine->rounds_total_initial));
+	}
+}
+
+/* the engine's object for an item of the server's: where it is, at rest as far as the engine is
+concerned (its own physics does not move it: the server's fall does) */
+static boolean large_mode_create_item(
+	unsigned long const *info,
+	float const *out,
+	struct large_item *entry)
+{
+	long definition_index = large_mode_item_definition(info[1], info[5]);
+	struct object_placement_data placement;
+	struct object_datum *object;
+	long object_index;
+
+	if (definition_index == NONE)
+	{
+		large_item_data.create_failures++;
+		if (!large_item_data.failure_said)
+		{
+			large_item_data.failure_said = TRUE;
+			platform_log("large mode: the server's item %lu (tag %lu) is not a tag of the game: not drawn", info[0],
+				info[1]);
+		}
+		return FALSE;
+	}
+	object_placement_data_new(&placement, definition_index, NONE);
+	placement.position.x = out[0];
+	placement.position.y = out[1];
+	placement.position.z = out[2];
+	object_index = object_new(&placement);
+	object = (struct object_datum *)object_try_and_get_and_verify_type(object_index, _object_mask_item);
+	if (!object)
+	{
+		large_item_data.create_failures++;
+		return FALSE;
+	}
+	if (info[5] == 1)
+		large_mode_set_rounds((struct weapon_datum *)object, info[3], info[4]);
+	object_set_garbage(object_index, FALSE);
+	entry->id = info[0];
+	entry->object_index = object_index;
+	entry->resting = FALSE;
+	large_item_data.is_item[DATUM_INDEX_TO_ABSOLUTE_INDEX(object_index)] = 1;
+	large_item_data.created++;
+	return TRUE;
+}
+
+static void large_mode_remove_item(
+	struct large_item *entry)
+{
+	large_item_data.is_item[DATUM_INDEX_TO_ABSOLUTE_INDEX(entry->object_index)] = 0;
+	if (object_try_and_get_and_verify_type(entry->object_index, _object_mask_item))
+		object_delete(entry->object_index);
+	large_item_data.removed++;
+}
+
+/* the object goes where the server says the item is: one that falls is put at the place the library worked
+out for this tick (turning as it goes), and one that has come to rest is laid on its surface, once */
+static void large_mode_drive_item(
+	struct large_item *entry,
+	unsigned long const *info,
+	float const *out)
+{
+	struct object_datum *object = (struct object_datum *)object_try_and_get_and_verify_type(entry->object_index,
+		_object_mask_item);
+	real_point3d position;
+	real_vector3d forward, up;
+	boolean resting = info[2] != 0;
+	real turn = (real)(info[0] % 64) * 0.7f;
+
+	if (!object)
+		return;
+	position.x = out[0];
+	position.y = out[1];
+	position.z = out[2];
+	up = *global_up3d;
+	if (!resting)
+	{
+		turn += out[6] * 0.2f;
+		large_item_data.falling++;
+	}
+	else if (entry->resting)
+	{
+		return;
+	}
+	forward.i = (real)cos(turn);
+	forward.j = (real)sin(turn);
+	forward.k = 0.0f;
+	object_set_position(entry->object_index, &position, &forward, &up);
+	if (resting)
+	{
+		real_vector3d normal;
+
+		normal.i = out[3];
+		normal.j = out[4];
+		normal.k = out[5];
+		large_mode_item_rest(entry->object_index, &normal, &position);
+	}
+	entry->resting = resting;
+	SET_FLAG(object->object.flags, _object_at_rest_bit, TRUE);
+}
+
+/* every item of the server's has an object that shows it, where it is; one the server no longer has
+(taken, or gone in its time) has its object deleted. The two lists are in the order of the server's ids. */
+static void large_mode_update_items(void)
+{
+	static struct large_item next[LARGE_MAXIMUM_ITEMS];
+	unsigned long tick;
+	unsigned long count = MIN(halo_large_items(&tick), (unsigned long)LARGE_MAXIMUM_ITEMS);
+	unsigned long i = 0;
+	long j = 0;
+	long n = 0;
+
+	large_item_data.falling = 0;
+	while (i < count || j < large_item_data.count)
+	{
+		unsigned long info[6];
+		float out[7];
+		boolean server = FALSE;
+		struct large_item *known = j < large_item_data.count ? &large_item_data.entries[j] : NULL;
+
+		if (i < count)
+		{
+			if (!halo_large_item(i, info, out))
+			{
+				i++;
+				continue;
+			}
+			server = TRUE;
+		}
+		if (known && (!server || known->id < info[0]))
+		{
+			large_mode_remove_item(known);
+			j++;
+		}
+		else if (server && (!known || info[0] < known->id))
+		{
+			struct large_item fresh;
+
+			if (n < LARGE_MAXIMUM_ITEMS && large_mode_create_item(info, out, &fresh))
+			{
+				large_mode_drive_item(&fresh, info, out);
+				next[n++] = fresh;
+			}
+			i++;
+		}
+		else
+		{
+			/* (an object the engine lost, a game that was reset: made again) */
+			if (!object_try_and_get_and_verify_type(known->object_index, _object_mask_item))
+			{
+				struct large_item fresh;
+
+				large_item_data.is_item[DATUM_INDEX_TO_ABSOLUTE_INDEX(known->object_index)] = 0;
+				if (large_mode_create_item(info, out, &fresh))
+					*known = fresh;
+			}
+			large_mode_drive_item(known, info, out);
+			next[n++] = *known;
+			i++;
+			j++;
+		}
+	}
+	memcpy(large_item_data.entries, next, sizeof(struct large_item) * (size_t)n);
+	large_item_data.count = n;
+}
+
+/* the engine makes items of its own (the weapons a unit that is killed drops): in this mode the server owns
+the items, and a loose one that is not one of the server's is taken away */
+static void large_mode_sweep_items(void)
+{
+	struct object_iterator iterator;
+
+	if (game_time_get() - large_item_data.sweep_time < LARGE_SWEEP_TICKS)
+		return;
+	large_item_data.sweep_time = game_time_get();
+	object_iterator_new(&iterator, _object_mask_weapon | _object_mask_equipment, 0);
+	while (object_iterator_next(&iterator))
+	{
+		struct item_datum *item = (struct item_datum *)object_get(iterator.index);
+		long slot = DATUM_INDEX_TO_ABSOLUTE_INDEX(iterator.index);
+
+		if (item->object.parent_object_index != NONE || !TEST_FLAG(item->object.flags, _object_connected_to_map_bit) ||
+			TEST_FLAG(item->item.flags, _item_attached_to_unit_bit) || slot < 0 ||
+			slot >= HALO_PORT_MAXIMUM_OBJECTS_PER_MAP || large_item_data.is_item[slot] ||
+			(object_get(iterator.index)->object.type == _object_type_weapon && weapon_is_flag(iterator.index)))
+		{
+			continue;
+		}
+		object_delete(iterator.index);
+		large_item_data.swept++;
+	}
+}
+
+/* the first magazine's rounds of the weapon in a slot of the unit, as the engine counts them */
+static boolean large_mode_slot_rounds(
+	struct unit_datum const *unit,
+	short slot,
+	unsigned long *loaded,
+	unsigned long *reserve)
+{
+	struct weapon_datum *weapon;
+
+	*loaded = 0;
+	*reserve = 0;
+	if (unit->unit.weapon_object_indices[slot] == NONE)
+		return FALSE;
+	weapon = (struct weapon_datum *)object_try_and_get_and_verify_type(unit->unit.weapon_object_indices[slot],
+		_object_mask_weapon);
+	if (!weapon)
+		return FALSE;
+	*loaded = (unsigned long)MAX(weapon->weapon.magazines[0].rounds_loaded, 0);
+	*reserve = (unsigned long)MAX(weapon->weapon.magazines[0].rounds_total, 0);
+	return TRUE;
+}
+
+/* the rounds the player's weapons have, told to the server (it keeps them for what a swap puts down and for
+how many an ammunition pickup can give), when they have changed and every so often, or at once */
+static void large_mode_report_ammo(
+	struct unit_datum const *unit,
+	boolean now)
+{
+	unsigned long rounds[4];
+
+	if (!now && game_time_get() - large.reported_time < LARGE_AMMO_REPORT_TICKS)
+		return;
+	large_mode_slot_rounds(unit, 0, &rounds[0], &rounds[1]);
+	large_mode_slot_rounds(unit, 1, &rounds[2], &rounds[3]);
+	if (!now && !memcmp(rounds, large.reported_rounds, sizeof(rounds)))
+		return;
+	large.reported_time = game_time_get();
+	memcpy(large.reported_rounds, rounds, sizeof(rounds));
+	halo_large_report_ammo(rounds[0], rounds[1], rounds[2], rounds[3]);
+}
+
+/* the player's unit carries the weapons the server says the player does, slot for slot: a weapon it took (the
+server decided: it was in reach, and the weapon was a second one, or one to swap for) is made and put in its
+slot, as the weapon of the slot it was in is taken out, put down by the server, whose item it now is */
+static void large_mode_sync_weapons(
+	long unit_index,
+	struct unit_datum *unit)
+{
+	unsigned long weapons[2];
+	unsigned long kit[5];
+	short slot;
+	boolean in_step = TRUE;
+
+	if (!halo_large_loadout(large.player_id, weapons))
+		return;
+	for (slot = 0; slot < 2; slot++)
+	{
+		long have = unit->unit.weapon_object_indices[slot];
+		unsigned long have_tag = LARGE_NO_WEAPON;
+
+		if (have != NONE && object_try_and_get_and_verify_type(have, _object_mask_weapon))
+			have_tag = (unsigned long)DATUM_INDEX_TO_ABSOLUTE_INDEX(weapon_get(have)->definition_index);
+		if (have_tag == weapons[slot])
+			continue;
+		if (have != NONE)
+		{
+			unit_network_forget_weapon(unit_index, slot);
+			if (object_try_and_get_and_verify_type(have, _object_mask_weapon))
+				object_delete(have);
+			if (have_tag != LARGE_NO_WEAPON)
+				platform_log("large mode: the local unit puts down a weapon (slot %d)", (int)slot);
+		}
+		if (weapons[slot] != LARGE_NO_WEAPON)
+		{
+			char name[160];
+			char *dot;
+			long definition_index;
+			struct object_placement_data placement;
+			long weapon_index;
+
+			if (!halo_large_weapon_name(weapons[slot], name, sizeof(name)))
+			{
+				in_step = FALSE;
+				continue;
+			}
+			dot = strrchr(name, '.');
+			if (dot)
+				*dot = 0;
+			definition_index = tag_loaded(WEAPON_DEFINITION_TAG, name);
+			if (definition_index == NONE)
+				continue;
+			object_placement_data_new(&placement, definition_index, unit_index);
+			weapon_index = object_new(&placement);
+			if (weapon_index == NONE)
+				continue;
+			unit_network_add_weapon(unit_index, weapon_index, slot);
+			/* (the one that was taken is the one in hand) */
+			unit->unit.desired_weapon_index = slot;
+			player_control_set_desired_weapon(unit_index, slot);
+			platform_log("large mode: the local unit takes a weapon (slot %d): %s", (int)slot, name);
+			network_player_show_pickup(local_player_get_player_index(0), _large_pickup_weapon, definition_index, 0);
+			/* (and what rounds the server has for it, below) */
+			large.kit_seen = FALSE;
+		}
+	}
+	/* the rounds the server says: when it changed them (a pickup, a spawn), for the weapons it has said are
+	here (the engine counts the rounds it fires itself) */
+	if (in_step && halo_large_kit(kit) && (!large.kit_seen || kit[0] != large.kit_version))
+	{
+		for (slot = 0; slot < 2; slot++)
+		{
+			struct weapon_datum *weapon = unit->unit.weapon_object_indices[slot] == NONE ? NULL :
+				(struct weapon_datum *)object_try_and_get_and_verify_type(unit->unit.weapon_object_indices[slot],
+				_object_mask_weapon);
+
+			if (weapon && (unsigned long)DATUM_INDEX_TO_ABSOLUTE_INDEX(weapon->definition_index) == weapons[slot])
+				large_mode_set_rounds(weapon, kit[1 + 2 * slot], kit[2 + 2 * slot]);
+		}
+		large.kit_seen = TRUE;
+		large.kit_version = kit[0];
+		platform_log("large mode: the server's rounds: %lu+%lu and %lu+%lu", kit[1], kit[2], kit[3], kit[4]);
+	}
+}
+
+/* the action button, as the player's press: the server says what they take (the engine does not pick
+anything up in this mode, but it still says what there is to swap for, on the HUD, from the objects that
+show the server's items). large.autouse presses it twice a second. */
+static void large_mode_use_local(
+	struct unit_datum *unit)
+{
+	boolean held = TEST_FLAG(unit->unit.control_flags, _unit_control_action_bit);
+	boolean press = held && !large.action_held;
+
+	large.action_held = held;
+	if (large.autouse && game_time_get() - large.autouse_time >= LARGE_AUTOUSE_TICKS)
+	{
+		large.autouse_time = game_time_get();
+		press = TRUE;
+	}
+	if (press)
+	{
+		large_mode_report_ammo(unit, TRUE);
+		halo_large_use((unsigned long)(unit->unit.current_weapon_index == NONE ? 0 : unit->unit.current_weapon_index));
+	}
+}
+
+/* camouflage, as the server says (the engine's own fade in and out follows its flag); the local player's
+HUD flashes when it is taken */
+static void large_mode_show_camouflage(
+	long unit_index,
+	unsigned long player,
+	boolean local)
+{
+	struct unit_datum *unit = (struct unit_datum *)object_try_and_get_and_verify_type(unit_index, _object_mask_unit);
+	boolean camouflaged = halo_large_camouflage(player) > 0;
+
+	if (!unit || camouflaged == (TEST_FLAG(unit->unit.flags, _unit_active_camouflaged_bit) != 0))
+		return;
+	SET_FLAG(unit->unit.flags, _unit_active_camouflaged_bit, camouflaged);
+	if (camouflaged)
+		unit->unit.cause_for_camo_regrowth = cause_for_camo_regrowth_default;
+	if (local)
+	{
+		platform_log("large mode: the local player is %s", camouflaged ? "camouflaged" : "not camouflaged any more");
+		if (camouflaged)
+		{
+			long definition_index = tag_loaded(EQUIPMENT_DEFINITION_TAG, "powerups\\active camouflage");
+
+			if (definition_index != NONE)
+				network_player_show_pickup(local_player_get_player_index(0), _large_pickup_powerup, definition_index, 0);
+		}
+	}
+}
+
+/* a game starts or ends: the engine has deleted the objects with the map */
+static void large_mode_forget_items(
+	void)
+{
+	csmemset(&large_item_data, 0, sizeof(large_item_data));
+}
+
+/* once a second: what the engine has of the server's items */
+static void large_mode_log_items(void)
+{
+	if (game_time_get() - large_item_data.logged_time < TICKS_PER_SECOND)
+		return;
+	large_item_data.logged_time = game_time_get();
+	platform_log("large mode: items: %ld on the ground, %ld of them falling; made %ld, taken away %ld, engine's "
+		"own swept %ld", large_item_data.count, large_item_data.falling, large_item_data.created,
+		large_item_data.removed, large_item_data.swept);
+}
+
 /* ---------- the server's say of the local player's life, and the scoreboard */
 
 /* the team the server says the local player is on, which the engine's player
@@ -1719,9 +2224,23 @@ void large_mode_game_tick(
 			}
 		}
 		large_mode_show_vitals(unit_index, large.player_id);
+		/* the weapons the server says (once the first is in hand), the press of the action button and the
+		rounds, and camouflage */
+		if (large.equipped_unit == unit_index)
+		{
+			large_mode_sync_weapons(unit_index, unit);
+			large_mode_use_local(unit);
+			large_mode_report_ammo(unit, FALSE);
+		}
+		large_mode_show_camouflage(unit_index, large.player_id, TRUE);
 		if (large.autofire)
 			large_mode_autofire(unit);
 	}
+
+	/* the items on the ground, which are the server's */
+	large_mode_update_items();
+	large_mode_sweep_items();
+	large_mode_log_items();
 
 	large_mode_update_remotes();
 

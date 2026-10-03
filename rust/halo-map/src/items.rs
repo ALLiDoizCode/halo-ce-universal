@@ -90,7 +90,11 @@ pub struct Items {
 impl Default for Items {
     /// No items at all.
     fn default() -> Items {
-        Items { defs: Vec::new(), placements: Vec::new(), player: Reach { bounding_radius: 0.0, bounding_offset: [0.0; 3] } }
+        Items {
+            defs: Vec::new(),
+            placements: Vec::new(),
+            player: Reach { bounding_radius: 0.0, bounding_offset: [0.0; 3] },
+        }
     }
 }
 

@@ -13,7 +13,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use halo_sim_parity::{event_counts, fight_counts, item_counts, match_event_counts, run, run_fight, run_items, run_match};
+use halo_sim_parity::{
+    event_counts, fight_counts, item_counts, match_event_counts, run, run_fight, run_items, run_match,
+};
 use wasmi::{Engine, Linker, Module, Store};
 
 const TICKS: u32 = 10_000;

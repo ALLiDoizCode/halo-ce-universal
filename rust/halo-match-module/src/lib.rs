@@ -1079,7 +1079,10 @@ fn item_row(item: &Item) -> ItemRow {
 fn kit_of(row: Option<KitRow>, camo: Option<PowerupRow>, player: PlayerId) -> Kit {
     let mut kit = Kit::new(player);
     if let Some(row) = row {
-        kit.ammo = [Ammo { loaded: row.loaded_0, reserve: row.reserve_0 }, Ammo { loaded: row.loaded_1, reserve: row.reserve_1 }];
+        kit.ammo = [
+            Ammo { loaded: row.loaded_0, reserve: row.reserve_0 },
+            Ammo { loaded: row.loaded_1, reserve: row.reserve_1 },
+        ];
         kit.version = row.version;
     }
     kit.camo_until = camo.map_or(0, |p| p.camo_until);
@@ -1804,8 +1807,8 @@ pub fn set_loadout(ctx: &ReducerContext, player: u16, weapon0: u16, weapon1: u16
     Ok(())
 }
 
-/// The caller's player pressed the action button, with the weapon slot (0 or
-/// 1) the player has in hand: the next tick gives the player what they reach
+/// The caller's player pressed the action button, with the weapon slot the
+/// player has in hand (the first or the second): the next tick gives the player what they reach
 /// (a weapon to take as a second, or to swap for the one in hand) if the
 /// rules of `halo_sim::pickups` say so, and nothing otherwise. A reliable call
 /// on the player's own connection, like `report_hits`: a press lost is a
@@ -1835,7 +1838,8 @@ pub fn use_item(ctx: &ReducerContext, slot: u8) -> Result<(), String> {
 pub fn report_ammo(ctx: &ReducerContext, rounds: Vec<u8>) -> Result<(), String> {
     let seat = ctx.db.seat().owner().find(ctx.sender()).ok_or("you have no seat in this match")?;
     let map = current_map(ctx).ok_or("the match has no map yet")?;
-    let [a, b, c, d, e, f, g, h]: [u8; 8] = rounds.try_into().map_err(|r: Vec<u8>| format!("{} bytes of rounds, not 8", r.len()))?;
+    let [a, b, c, d, e, f, g, h]: [u8; 8] =
+        rounds.try_into().map_err(|r: Vec<u8>| format!("{} bytes of rounds, not 8", r.len()))?;
     let ammo = [
         Ammo { loaded: i16::from_le_bytes([a, b]), reserve: i16::from_le_bytes([c, d]) },
         Ammo { loaded: i16::from_le_bytes([e, f]), reserve: i16::from_le_bytes([g, h]) },

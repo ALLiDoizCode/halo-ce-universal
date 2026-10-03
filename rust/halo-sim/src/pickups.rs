@@ -72,9 +72,14 @@ pub struct Request {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pickup {
     /// A weapon, into this slot of the loadout.
-    Weapon { slot: u8 },
+    Weapon {
+        slot: u8,
+    },
     /// The rounds of a weapon of a kind they hold, into this slot's reserve.
-    Ammo { slot: u8, rounds: i16 },
+    Ammo {
+        slot: u8,
+        rounds: i16,
+    },
     Overshield,
     Camouflage,
     Health,
@@ -84,17 +89,36 @@ pub enum Pickup {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ItemEvent {
     /// A placement made an item.
-    Spawned { item: ItemId, tag: u16, position: [f32; 3] },
+    Spawned {
+        item: ItemId,
+        tag: u16,
+        position: [f32; 3],
+    },
     /// An item that was falling came to rest.
-    Rested { item: ItemId },
+    Rested {
+        item: ItemId,
+    },
     /// An item is gone: nobody held it for 30 seconds, the next of its
     /// placement was made, it fell out of the map, or there were too many.
-    Purged { item: ItemId },
-    PickedUp { player: PlayerId, item: ItemId, tag: u16, what: Pickup },
+    Purged {
+        item: ItemId,
+    },
+    PickedUp {
+        player: PlayerId,
+        item: ItemId,
+        tag: u16,
+        what: Pickup,
+    },
     /// A player put a weapon down, as this item.
-    Dropped { player: PlayerId, item: ItemId, tag: u16 },
+    Dropped {
+        player: PlayerId,
+        item: ItemId,
+        tag: u16,
+    },
     /// A player's active camouflage ran out.
-    CamouflageEnded { player: PlayerId },
+    CamouflageEnded {
+        player: PlayerId,
+    },
 }
 
 /// The most rounds a weapon holds in reserve, and in its magazine.
@@ -114,11 +138,7 @@ fn is_alive(game: &impl GameStore, combat: &impl CombatStore, id: PlayerId) -> b
 fn player_center(map: &MapData, player: &Player) -> Vec3 {
     let o = map.items.player.bounding_offset;
     let (s, c) = sin_cos(player.yaw);
-    [
-        player.position[0] + o[0] * c - o[1] * s,
-        player.position[1] + o[0] * s + o[1] * c,
-        player.position[2] + o[2],
-    ]
+    [player.position[0] + o[0] * c - o[1] * s, player.position[1] + o[0] * s + o[1] * c, player.position[2] + o[2]]
 }
 
 /// What a player takes, if anything, and the tick's other details.

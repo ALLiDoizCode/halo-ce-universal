@@ -131,7 +131,16 @@ impl World {
 
     fn kill(&mut self, id: PlayerId) -> Vec<ItemEvent> {
         let mut events = Vec::new();
-        pickups::on_death(&mut self.items, &mut self.combat, &self.store, &self.map, &mut self.rng, self.tick, id, &mut events);
+        pickups::on_death(
+            &mut self.items,
+            &mut self.combat,
+            &self.store,
+            &self.map,
+            &mut self.rng,
+            self.tick,
+            id,
+            &mut events,
+        );
         let mut f = self.fighter(id);
         f.vitals.flags |= DEAD;
         self.combat.set_fighter(f);
@@ -595,7 +604,8 @@ fn the_same_ticks_give_the_same_items() {
             w.add(p, 10.0 + p as f32 * 0.1, 0.0);
         }
         for t in 0..2000u64 {
-            let requests: Vec<Request> = if t % 7 == 0 { (0..6).map(|p| press(p, (t % 2) as u8)).collect() } else { Vec::new() };
+            let requests: Vec<Request> =
+                if t % 7 == 0 { (0..6).map(|p| press(p, (t % 2) as u8)).collect() } else { Vec::new() };
             w.step(&requests);
             if t == 700 {
                 w.kill(2);

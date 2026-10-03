@@ -97,6 +97,7 @@ pub const MAX_ITEMS: usize = 2048;
 
 /// A surface this flat (its normal's z above this) can hold an item
 /// (`item_update`'s 0.7071).
+#[allow(clippy::approx_constant)]
 const REST_NORMAL_Z: f32 = 0.7071;
 /// An item going into a surface slower than this, a tick's worth, stays on it.
 const REST_SPEED: f32 = 0.05;
@@ -158,7 +159,11 @@ impl Item {
         let Some(hit) = map.collision.test_vector(PATH_FLAGS, self.position, velocity, 1.0) else {
             self.position = add(&self.position, &velocity);
             self.velocity = velocity;
-            return if self.position[2] < map.world_bounds[4] - FALL_OUT_DEPTH { Flight::Lost } else { Flight::Falling };
+            return if self.position[2] < map.world_bounds[4] - FALL_OUT_DEPTH {
+                Flight::Lost
+            } else {
+                Flight::Falling
+            };
         };
         let point = along(&self.position, &velocity, hit.t);
         let mut normal = usize::try_from(hit.surface_index)
@@ -380,9 +385,9 @@ pub fn period_ticks(placement: &Placement) -> u64 {
 /// own: the placements do not name those), and of the equipment the powerups
 /// that heal, shield and hide a player.
 pub fn is_spawnable(map: &MapData, tag: u16) -> bool {
-    map.items
-        .def(tag)
-        .is_some_and(|d| d.is_weapon || matches!(d.powerup_type, powerup::OVERSHIELD | powerup::ACTIVE_CAMOUFLAGE | powerup::HEALTH))
+    map.items.def(tag).is_some_and(|d| {
+        d.is_weapon || matches!(d.powerup_type, powerup::OVERSHIELD | powerup::ACTIVE_CAMOUFLAGE | powerup::HEALTH)
+    })
 }
 
 /// The engine's `random_item`: one of a collection by weight (`None` for
@@ -478,7 +483,11 @@ pub fn drop_item(
     // (from the player's middle, unless a wall is between it and the hand)
     let middle = [from[0], from[1], from[2] + 0.5 * map.movement.collision_height_standing];
     let hand = along(&middle, &[cy, sy, 0.0], 0.25);
-    let position = if map.collision.test_vector(TEST_FRONT_FACING | TEST_BACK_FACING, middle, sub(&hand, &middle), 1.0).is_some() {
+    let position = if map
+        .collision
+        .test_vector(TEST_FRONT_FACING | TEST_BACK_FACING, middle, sub(&hand, &middle), 1.0)
+        .is_some()
+    {
         middle
     } else {
         hand
@@ -501,7 +510,7 @@ pub fn drop_item(
 /// `random_vector_in_cone3d(aim, 0, 22.5 degrees)`: a direction within the
 /// cone around `aim`, uniform over its cap.
 fn throw_direction(aim: Vec3, rng: &mut Rng) -> Vec3 {
-    const MAX_ANGLE: f32 = 0.392_699_09;
+    const MAX_ANGLE: f32 = core::f32::consts::FRAC_PI_8;
     let (_, cos_max) = sin_cos(MAX_ANGLE);
     let cos_theta = 1.0 - rng.next_f32() * (1.0 - cos_max);
     let sin_theta = crate::math::sqrt((1.0 - cos_theta * cos_theta).max(0.0));
@@ -512,10 +521,8 @@ fn throw_direction(aim: Vec3, rng: &mut Rng) -> Vec3 {
         across = [1.0, 0.0, 0.0];
     }
     let up = cross(&across, &aim);
-    let mut out = add(
-        &scale(&aim, cos_theta),
-        &add(&scale(&across, sin_theta * cos_phi), &scale(&up, sin_theta * sin_phi)),
-    );
+    let mut out =
+        add(&scale(&aim, cos_theta), &add(&scale(&across, sin_theta * cos_phi), &scale(&up, sin_theta * sin_phi)));
     if normalize(&mut out) == 0.0 {
         out = aim;
     }
@@ -660,7 +667,11 @@ mod tests {
         // one tick: the path ends below the floor
         assert_eq!(item.step(&map), Flight::Falling);
         let into = 0.2 + GRAVITY;
-        assert!((item.velocity[2] - 0.4 * into).abs() < 1e-5, "it goes back up at 0.4 of the speed: {:?}", item.velocity);
+        assert!(
+            (item.velocity[2] - 0.4 * into).abs() < 1e-5,
+            "it goes back up at 0.4 of the speed: {:?}",
+            item.velocity
+        );
         assert!((item.position[2] - PUSH_OFF).abs() < 1e-5, "kept 0.05 off the floor: {:?}", item.position);
     }
 
@@ -697,7 +708,18 @@ mod tests {
         let mut items = MemoryItems::new();
         let mut rng = Rng::seeded(7);
         for _ in 0..200 {
-            let id = drop_item(&mut items, &map, &mut rng, 5, 3, [0.0, 0.0, 0.0], 0.0, 0.0, PISTOL, Ammo { loaded: 1, reserve: 2 });
+            let id = drop_item(
+                &mut items,
+                &map,
+                &mut rng,
+                5,
+                3,
+                [0.0, 0.0, 0.0],
+                0.0,
+                0.0,
+                PISTOL,
+                Ammo { loaded: 1, reserve: 2 },
+            );
             let item = items.item(id).unwrap();
             let speed = magnitude(&item.velocity);
             assert!((0.0266..=0.0401).contains(&speed), "{speed}");

@@ -29,13 +29,15 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use halo_match_driver::module_bindings::{
-    join, leave, report_hits, DbConnection, FighterRow, FighterTableAccess, GameStateRow, GameStateTableAccess,
-    MapInfo, MapInfoTableAccess, PlayerTableAccess, RemoteReducers, RosterRow, RosterTableAccess, Seat,
+    join, leave, report_ammo, report_hits, use_item, DbConnection, FighterRow, FighterTableAccess, GameStateRow,
+    GameStateTableAccess, ItemRow, ItemTableAccess, KitRow, KitTableAccess, MapInfo, MapInfoTableAccess,
+    PlayerTableAccess, PowerupRow, PowerupTableAccess, RemoteReducers, RosterRow, RosterTableAccess, Seat,
     SeatTableAccess, StandingRow, StandingTableAccess,
 };
 use halo_match_driver::PlayerRow;
 use halo_sim::combat::{Fighter, HitReport, Loadout};
 use halo_sim::damage::Vitals;
+use halo_sim::items::{Ammo, Item, Kit};
 use halo_sim::wire::encode_hits;
 use halo_sim::PlayerInput;
 use halo_wire::auth::{self, CHALLENGE_LIFETIME_US, SEED_SIZE};
@@ -292,6 +294,11 @@ struct Shared {
     /// Hits the game has reported, not yet sent (the network thread sends them
     /// over the direct connection, which is reliable).
     hits: Vec<HitReport>,
+    /// The items on the ground as the server last wrote them (a falling one is where its row says it began:
+    /// see `halo_sim::items`), who is camouflaged until which server tick, and this player's own rounds.
+    items: BTreeMap<u32, Item>,
+    powerups: BTreeMap<u16, u64>,
+    kit: Option<Kit>,
     /// The game, likewise, and when its row last came.
     game: Option<GameInfo>,
     game_at: Option<Instant>,
@@ -503,6 +510,54 @@ impl Session {
         let host_tick = shared.newest_tick;
         shared.hits.push(HitReport { target, weapon, material, host_tick, origin, target_position });
         true
+    }
+
+    /// The newest server tick any datagram has carried; 0 before the first.
+    pub fn newest_tick(&self) -> u32 {
+        self.inner.shared().newest_tick
+    }
+
+    /// The items on the ground, as the match's `item` table last said, by id.
+    pub fn items(&self) -> Vec<Item> {
+        self.inner.shared().items.values().copied().collect()
+    }
+
+    /// The server tick a player's camouflage runs out at, or 0 for a player who is not camouflaged.
+    pub fn camouflaged_until(&self, player: u16) -> u64 {
+        self.inner.shared().powerups.get(&player).copied().unwrap_or(0)
+    }
+
+    /// This player's own rounds, as the server tracks them (the rounds in the
+    /// magazine and in reserve of each slot of the loadout; `version` changes when the server changed them).
+    pub fn kit(&self) -> Option<Kit> {
+        self.inner.shared().kit
+    }
+
+    /// The player pressed the action button, with the weapon slot (0 or 1) in hand: the server gives
+    /// them what they reach, if its rules say so. Sent over the direct connection (reliable); false
+    /// without a connection or a seat.
+    pub fn use_item(&self, slot: u8) -> bool {
+        if self.inner.shared().player.is_none() {
+            return false;
+        }
+        let connection = self.inner.connection.lock().unwrap_or_else(|p| p.into_inner());
+        connection.as_ref().is_some_and(|c| c.reducers.use_item(slot).is_ok())
+    }
+
+    /// Say how many rounds the player's weapons have (the game's engine counts them as it fires), loaded
+    /// and in reserve for slot 0 and slot 1: what the server needs for what a swap puts down and for how many
+    /// rounds an ammunition pickup can give.
+    pub fn report_ammo(&self, ammo: [Ammo; 2]) -> bool {
+        if self.inner.shared().player.is_none() {
+            return false;
+        }
+        let mut bytes = Vec::with_capacity(8);
+        for a in ammo {
+            bytes.extend_from_slice(&a.loaded.to_le_bytes());
+            bytes.extend_from_slice(&a.reserve.to_le_bytes());
+        }
+        let connection = self.inner.connection.lock().unwrap_or_else(|p| p.into_inner());
+        connection.as_ref().is_some_and(|c| c.reducers.report_ammo(bytes).is_ok())
     }
 
     /// Everyone in the match with how they are doing and who they are, by
@@ -749,6 +804,23 @@ fn handle(inner: &Inner, datagram: &[u8], last_join: &mut Instant) {
     }
 }
 
+/// An item on the ground from the match's `item` row.
+fn item_of(row: &ItemRow) -> Item {
+    Item {
+        id: row.id,
+        tag: row.tag,
+        position: [row.x, row.y, row.z],
+        velocity: [row.vx, row.vy, row.vz],
+        tick: row.tick,
+        resting: row.resting,
+        placement: row.placement,
+        loaded: row.loaded,
+        reserve: row.reserve,
+        last_owned: row.last_owned,
+        ignore: row.ignore,
+    }
+}
+
 /// A player's health, shields and weapons from the match's `fighter` row.
 fn fighter_of(row: &FighterRow) -> Fighter {
     Fighter {
@@ -851,6 +923,9 @@ fn connect(inner: &Arc<Inner>) -> Result<DbConnection, String> {
             connected.shared().roster.clear();
             connected.shared().standings.clear();
             connected.shared().fighters.clear();
+            connected.shared().items.clear();
+            connected.shared().powerups.clear();
+            connected.shared().kit = None;
             *connected.token.lock().unwrap_or_else(|p| p.into_inner()) = Some(token.into());
             *connected.identity.lock().unwrap_or_else(|p| p.into_inner()) = Some(identity.to_hex().to_string());
             if let Err(e) = connected.config.identity.save(token) {
@@ -872,6 +947,10 @@ fn connect(inner: &Arc<Inner>) -> Result<DbConnection, String> {
                     "SELECT * FROM standing".to_string(),
                     "SELECT * FROM fighter".to_string(),
                     "SELECT * FROM game_state".to_string(),
+                    // what is on the ground (a falling item is one row, from which the fall is worked
+                    // out here: nothing a tick), and who is camouflaged
+                    "SELECT * FROM item".to_string(),
+                    "SELECT * FROM powerup".to_string(),
                     format!("SELECT * FROM seat WHERE owner = 0x{}", identity.to_hex()),
                 ]);
             join(&connected, &connection.reducers);
@@ -911,6 +990,7 @@ fn connect(inner: &Arc<Inner>) -> Result<DbConnection, String> {
                 shared.challenge = None;
                 shared.slow.local = None;
                 shared.units.clear();
+                shared.kit = None;
             }
             changed
         };
@@ -919,7 +999,11 @@ fn connect(inner: &Arc<Inner>) -> Result<DbConnection, String> {
             let id = seat.player;
             ctx.subscription_builder()
                 .on_error(move |_, e| own.shared().error = Some(format!("the subscription to the player: {e}")))
-                .subscribe([format!("SELECT * FROM player WHERE id = {id}")]);
+                .subscribe([
+                    format!("SELECT * FROM player WHERE id = {id}"),
+                    // (the rounds are this player's own: the others' are not sent)
+                    format!("SELECT * FROM kit WHERE player = {id}"),
+                ]);
         }
     };
     let table = connection.db.seat();
@@ -937,6 +1021,7 @@ fn connect(inner: &Arc<Inner>) -> Result<DbConnection, String> {
             shared.challenge = None;
             shared.slow.local = None;
             shared.units.clear();
+            shared.kit = None;
         }
     });
 
@@ -985,6 +1070,51 @@ fn connect(inner: &Arc<Inner>) -> Result<DbConnection, String> {
     table.on_delete(move |_, row| {
         unfought.shared().fighters.remove(&row.player);
     });
+    // the items on the ground, who is camouflaged, and this player's own rounds: slow state, written
+    // when something appears, comes to rest, is taken or changes hands (not when an item falls)
+    let items = inner.clone();
+    let on_item = move |row: &ItemRow| {
+        items.shared().items.insert(row.id, item_of(row));
+    };
+    let table = connection.db.item();
+    let on_item_insert = on_item.clone();
+    table.on_insert(move |_, row| on_item_insert(row));
+    table.on_update(move |_, _, row| on_item(row));
+    let taken = inner.clone();
+    table.on_delete(move |_, row| {
+        taken.shared().items.remove(&row.id);
+    });
+    let powerups = inner.clone();
+    let on_powerup = move |row: &PowerupRow| {
+        powerups.shared().powerups.insert(row.player, row.camo_until);
+    };
+    let table = connection.db.powerup();
+    let on_powerup_insert = on_powerup.clone();
+    table.on_insert(move |_, row| on_powerup_insert(row));
+    table.on_update(move |_, _, row| on_powerup(row));
+    let ended = inner.clone();
+    table.on_delete(move |_, row| {
+        ended.shared().powerups.remove(&row.player);
+    });
+    let kits = inner.clone();
+    let on_kit = move |row: &KitRow| {
+        let mut shared = kits.shared();
+        if shared.player == Some(row.player) {
+            shared.kit = Some(Kit {
+                player: row.player,
+                ammo: [
+                    Ammo { loaded: row.loaded_0, reserve: row.reserve_0 },
+                    Ammo { loaded: row.loaded_1, reserve: row.reserve_1 },
+                ],
+                camo_until: 0,
+                version: row.version,
+            });
+        }
+    };
+    let table = connection.db.kit();
+    let on_kit_insert = on_kit.clone();
+    table.on_insert(move |_, row| on_kit_insert(row));
+    table.on_update(move |_, _, row| on_kit(row));
     let game = inner.clone();
     let on_game = move |row: &GameStateRow| {
         let mut shared = game.shared();

@@ -161,7 +161,12 @@ fn on_every_map_a_dropped_weapon_falls_and_rests_on_the_ground_under_where_it_wa
             let (item, flight) = item.advanced_to(&map, 600);
             assert_eq!(flight, items::Flight::Rested, "{name}: at {:?}", start.position);
             assert!(item.resting);
-            assert!((item.position[2] - ground.z).abs() < 0.2, "{name}: rests at {:?}, ground at {}", item.position, ground.z);
+            assert!(
+                (item.position[2] - ground.z).abs() < 0.2,
+                "{name}: rests at {:?}, ground at {}",
+                item.position,
+                ground.z
+            );
             checked += 1;
         }
         assert!(checked > 0, "{name}");
