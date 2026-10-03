@@ -26,7 +26,9 @@
 #                   simulated players stay seated after the end (they must outlast the scoreboard)
 #   SHOTS [0.5]     shots a second per player with a target in range; RANGE [25];
 #                   GUEST: set to 1 for the crowd to walk to the game (player id PLAYERS) and spare it;
-#                   HUNT [150]: how far (world units) a player with no target looks for an enemy to walk to
+#                   HUNT [400]: how far (world units) a player with no target looks for an enemy to walk to;
+#                   NAV_CELL [0.5]: width (world units) of the squares of the grid of walkable ground the
+#                   hunters are steered over, round walls and cliffs (0: no grid, straight at the enemy)
 #   BUDGET [90000]  bytes a second per player; LOSS [0] chance a datagram of a
 #                   simulated player is lost, each way
 #   GAME [0]        1: also start the real game once the simulated players are in
@@ -58,7 +60,8 @@ HOLD=${HOLD:-$END_SECS}
 WINDOW=${WINDOW:-30}
 SHOTS=${SHOTS:-0.5}
 RANGE=${RANGE:-25}
-HUNT=${HUNT:-150}
+HUNT=${HUNT:-400}
+NAV_CELL=${NAV_CELL:-0.5}
 BUDGET=${BUDGET:-90000}
 LOSS=${LOSS:-0}
 GAME=${GAME:-0}
@@ -149,7 +152,7 @@ sleep 3
 
 # the load first, so that it is waiting when the match is listed
 taskset -c "$CPUS_LOAD" "$bin/halo-slayer-load" --spacetimedb http://127.0.0.1:3000 --maps "$HALO_MAP_DIR" \
-  --players "$PLAYERS" --shots "$SHOTS" --range "$RANGE" --hunt "$HUNT" ${GUEST:+--guest "$PLAYERS"} --budget "$BUDGET" --loss "$LOSS" --hold "$HOLD" --window "$WINDOW" \
+  --players "$PLAYERS" --shots "$SHOTS" --range "$RANGE" --hunt "$HUNT" --nav-cell "$NAV_CELL" ${GUEST:+--guest "$PLAYERS"} --budget "$BUDGET" --loss "$LOSS" --hold "$HOLD" --window "$WINDOW" \
   --owner-token-file "$OUT/owner.token" --out "$OUT" > "$OUT/load.stdout" 2> "$OUT/load.log" &
 load=$!
 date +%s.%N > "$OUT/server.start"
