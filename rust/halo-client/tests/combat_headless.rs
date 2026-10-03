@@ -378,6 +378,22 @@ fn the_game_shoots_a_player_dead_with_the_plasma_pistol_tapped_and_charged() {
 }
 
 #[test]
+fn the_game_shoots_a_player_dead_with_a_rocket_whose_blast_is_one_explosion() {
+    // (the rocket launcher's trigger is latched: the autofire lets go of it every other tick)
+    the_game_kills_with(
+        "combat-rocket",
+        "weapons\\rocket launcher\\rocket launcher.weap",
+        "the rocket launcher",
+        &[("HALO_LARGE_AUTOFIRE_CYCLE", "1")],
+    );
+}
+
+#[test]
+fn the_game_shoots_a_player_dead_with_needles_that_stick_and_explode() {
+    the_game_kills_with("combat-needler", "weapons\\needler\\needler.weap", "the needler", &[]);
+}
+
+#[test]
 fn a_player_hit_by_reports_loses_shield_and_health_in_the_hud_recharges_dies_and_respawns() {
     // the game's player faces the simulated shooter, four units away
     let Some(a) = arena("combat-victim", &[at(80.0, -166.2, 0.0), at(84.0, -166.2, std::f32::consts::PI)]) else {

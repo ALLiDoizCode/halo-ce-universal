@@ -340,7 +340,8 @@ FIRING_SCENARIOS = sorted(path.stem for path in harness.SCENARIOS.glob("*.scn")
 
 def test_there_are_scenarios_of_firing_for_the_weapons_rate_damage_and_shield():
     assert {"pistol_kill", "pistol_magazine", "pistol_shield", "rifle_burst", "sniper_kill", "shotgun_blast",
-            "shotgun_reload", "plasma_rifle_heat", "plasma_pistol_taps", "plasma_pistol_charge"} <= set(FIRING_SCENARIOS)
+            "shotgun_reload", "plasma_rifle_heat", "plasma_pistol_taps", "plasma_pistol_charge",
+            "rocket_blast", "needler_burst"} <= set(FIRING_SCENARIOS)
 
 
 @needs_engine

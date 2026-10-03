@@ -1,0 +1,32 @@
+# The rocket launcher, at a target eight units away that stands still: the first
+# rocket is aimed at the ground short of it and the blast reaches it from a
+# little way off, with the damage the distance leaves; the second is aimed at
+# the target itself. A rocket flies for ticks (0.4 units each), and what it deals
+# is an explosion's: within its radius, at a scale that falls to nothing at the
+# cutoff. Two rockets are in the launcher, and it reloads when they are gone (the
+# third is fired when it has).
+scenario rocket_blast
+map bloodgulch
+start flat_field 77.9 -166.2 0.32 0.0
+target 85.9 -166.2 0.32 3.14159265
+weapon weapons/rocket launcher/rocket launcher
+ticks 460
+input 0 100 pitch=-0.115
+input 100 420 pitch=-0.075
+input 60 63 fire=1
+input 160 163 fire=1
+input 330 333 fire=1
+
+tolerance position 0
+tolerance velocity 0
+tolerance facing 0
+tolerance state 0
+tolerance rounds 0
+tolerance heat 0
+tolerance shield 0
+tolerance body 0
+tolerance stun 0
+tolerance life 0
+tolerance hit 0
+tolerance shots 0
+tolerance age 0

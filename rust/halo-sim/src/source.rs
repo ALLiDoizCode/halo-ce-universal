@@ -335,6 +335,26 @@ mod tests {
     }
 
     #[test]
+    fn a_needlers_needle_stuck_to_a_player_and_the_blast_of_many_are_damages_of_their_own() {
+        use crate::fixtures::{needler, NEEDLER_ATTACHED_DAMAGE, NEEDLER_BLAST, NEEDLER_IMPACT_DAMAGE, NEEDLER_SHOCK};
+        let weapon = needler();
+        let attached = find(&weapon, NEEDLER_ATTACHED_DAMAGE).unwrap();
+        assert_eq!((attached.kind, attached.is_area()), (Kind::Attached, false));
+        let blast = find(&weapon, NEEDLER_BLAST).unwrap();
+        assert_eq!((blast.kind, blast.is_area()), (Kind::SuperDetonation, true));
+        assert_eq!(find(&weapon, NEEDLER_SHOCK).map(|s| s.kind), Some(Kind::SuperDetonation));
+        assert_eq!(find(&weapon, NEEDLER_IMPACT_DAMAGE).map(|s| s.kind), Some(Kind::Impact));
+        // each needle is a hit at the weapon's fastest (10 a second), and a blast of them is one a shot too
+        assert_eq!(hit_rate(&attached), 10.0);
+        assert_eq!(hit_rate(&blast), 10.0);
+        // the blast's damage is all there is within half a unit, and none beyond a unit
+        assert_eq!(splash_scale(blast.damage, 0.4), 1.0);
+        assert_eq!(splash_scale(blast.damage, 1.0), 0.0);
+        // a needle is in the air for as long as 20 units at 0.13 a tick takes
+        assert!(reach(&attached).unwrap().flight_ticks >= 300);
+    }
+
+    #[test]
     fn a_melee_blow_is_as_frequent_as_the_swing_and_a_pellet_as_the_shotgun_fires() {
         let mut weapon = pistol();
         weapon.melee_frames = 40;

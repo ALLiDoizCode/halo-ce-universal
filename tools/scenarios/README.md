@@ -168,7 +168,11 @@ input 60 100 fire=1                  # the trigger is held
   overheating and the age of the battery), `plasma_pistol_taps` (a bolt fired
   when the button is let go, and overheating) and `plasma_pistol_charge` (a
   charge held and let go: the overcharged bolt, heat that stays while a charge
-  is held, a weapon that cannot be charged while it is overheated).
+  is held, a weapon that cannot be charged while it is overheated),
+  `rocket_blast` (a rocket that flies for ticks and explodes: its damage falls
+  with the distance of the target from the blast, and the launcher reloads) and
+  `needler_burst` (a rate of fire that comes up, needles that stick to the target
+  and explode after their time, and seven stuck together exploding as one).
 
 The part of the body a bullet hits in the engine depends on the frame's
 timing and the machine's load, and the damage it rolls is the engine's random
