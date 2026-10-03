@@ -144,8 +144,9 @@ void scenario_harness_damage_update(long object_index);
 void scenario_harness_damage(long object_index, short material_index, struct damage_data const *damage,
 	real total_damage);
 /* port/linux/game/large_mode.c's: whether this machine deals the damage (the large-scale mode's
-server does, and is told of the hits the local player's weapon makes) */
-boolean large_mode_damage_deals(struct damage_data const *damage, long object_index, short material_index);
+server does, and is told of the hits the local player's weapon makes; a hit it does not deal is given the
+material the damage would have made, which the projectile's impact effect reads) */
+boolean large_mode_damage_deals(struct damage_data *damage, long object_index, short material_index);
 /* network_game_globals.c's */
 boolean network_game_distributed_client(void);
 /* port/linux/game/network_damage.c's */

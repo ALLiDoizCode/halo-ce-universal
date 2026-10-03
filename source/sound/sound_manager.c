@@ -2337,6 +2337,9 @@ void sound_stop_all(
 	return;
 }
 
+/* port: large_effects.c's */
+void large_effects_sound_requested(long definition_index, long source_identifier);
+
 long sound_new_impulse(
 	long definition_index,
 	struct sound_source *source,
@@ -2351,6 +2354,9 @@ long sound_new_impulse(
 	long sound_index = NONE;
 	struct sound_definition *definition = sound_definition_get(definition_index);
 	real scale = source->scale;
+
+	/* port: the large-scale mode's tests see what is asked to play (port/linux/game/large_effects.c) */
+	large_effects_sound_requested(definition_index, source_identifier);
 
 	match_assert(
 		"c:\\halo\\SOURCE\\sound\\sound_manager.c",

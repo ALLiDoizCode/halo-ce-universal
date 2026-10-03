@@ -14,7 +14,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use halo_sim::walk::{walk, Body, Controls};
-use halo_sim::MapData;
+use halo_sim::weapon::Hands;
+use halo_sim::{MapData, FLAG_CROUCHED, FLAG_RELOADING};
 
 type Loaded = Arc<OnceLock<Result<MapData, String>>>;
 
@@ -37,6 +38,21 @@ pub struct Moved {
     pub stepped: bool,
 }
 
+/// What the weapon in the local player's hands did in one tick of [`Local::fire`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Armed {
+    pub rounds_loaded: i16,
+    pub rounds_total: i16,
+    pub heat: f32,
+    pub overheated: bool,
+    /// The weapon is reloading.
+    pub reloading: bool,
+    /// The trigger fired this tick.
+    pub fired: bool,
+    /// A reload began this tick (an empty magazine's, or one the player asked for).
+    pub reload_began: bool,
+}
+
 /// How many ticks the player's movement may run ahead of the clock: a frame's
 /// jitter.
 const AHEAD: u64 = 2;
@@ -51,6 +67,12 @@ pub struct Local {
     /// the movement is paced by them.
     clock: Option<Instant>,
     taken: u64,
+    /// The weapon in hand (its tag index in the map) and what it holds: the model of
+    /// its ammunition, heat and reload that the HUD shows ([`Local::fire`]).
+    hands: Option<(u16, Hands)>,
+    /// How many shots the weapon has fired, which the others are told (the counter of
+    /// [`halo_sim::FLAG_SHOTS_MASK`]); kept across lives so that it only ever counts up.
+    shots: u8,
 }
 
 impl Local {
@@ -66,14 +88,14 @@ impl Local {
         if let Err(e) = spawned {
             let _ = map.set(Err(format!("a thread to read the map: {e}")));
         }
-        Local { map, body: None, clock: None, taken: 0 }
+        Local { map, body: None, clock: None, taken: 0, hands: None, shots: 0 }
     }
 
     /// A player on a map that is already in hand (for tests).
     pub fn with_map(map: MapData) -> Local {
         let loaded: Loaded = Arc::new(OnceLock::new());
         let _ = loaded.set(Ok(map));
-        Local { map: loaded, body: None, clock: None, taken: 0 }
+        Local { map: loaded, body: None, clock: None, taken: 0, hands: None, shots: 0 }
     }
 
     /// Why the map could not be read, if it could not.
@@ -95,6 +117,57 @@ impl Local {
     /// where the engine has the unit until the map is in.
     pub fn place(&mut self, position: [f32; 3]) {
         self.body = Some(Body::at(position));
+        // (a player placed is a player spawned: the weapon is a fresh one)
+        self.hands = None;
+    }
+
+    /// One tick of the weapon in hand (`weapon`, its tag index in the map): whether the trigger is
+    /// held and whether the player asked for a reload. The weapon's ammunition, heat and reload are
+    /// [`halo_sim::weapon::Hands`], so that what the HUD shows is the model's, the same one the
+    /// comparison harness holds to the engine's; each shot it fires counts on the counter the
+    /// others see ([`Local::flags`]). `None` while the map is not in or has no such weapon.
+    ///
+    /// `engine` is the rounds the engine's weapon holds, `(loaded, in reserve)`: a weapon the model
+    /// has not held yet starts with them (a weapon picked up has the rounds it was left with, not a
+    /// full magazine), and with `adopt` the model takes them again (the server has given the player
+    /// rounds, or a different weapon's).
+    pub fn fire(&mut self, weapon: u16, trigger: bool, reload: bool, engine: (i16, i16), adopt: bool) -> Option<Armed> {
+        let map = self.map.get()?.as_ref().ok()?;
+        let tag = map.combat.weapon(weapon)?;
+        let fresh = self.hands.as_ref().map(|(w, _)| *w) != Some(weapon);
+        if fresh {
+            self.hands = Some((weapon, Hands::new(tag)));
+        }
+        let (_, hands) = self.hands.as_mut()?;
+        if fresh || adopt {
+            hands.rounds_loaded = engine.0;
+            hands.rounds_total = engine.1;
+        }
+        // (the engine looks at the reload control before the trigger)
+        let asked = reload && hands.request_reload(tag);
+        let shot = hands.update(tag, trigger);
+        if shot.fired {
+            self.shots = (self.shots + 1) & 7;
+        }
+        Some(Armed {
+            rounds_loaded: hands.rounds_loaded,
+            rounds_total: hands.rounds_total,
+            heat: hands.heat,
+            overheated: hands.overheated,
+            reloading: hands.reloading(),
+            fired: shot.fired,
+            reload_began: asked || shot.reloading,
+        })
+    }
+
+    /// The flags the player reports with their position: the crouch, how many shots the weapon has
+    /// fired and whether it is reloading (what the others show of them, `halo_sim::CLIENT_FLAGS`).
+    pub fn flags(&self, crouched: bool) -> u8 {
+        let reloading = self.hands.as_ref().is_some_and(|(_, h)| h.reloading());
+        halo_sim::with_shot_counter(
+            if crouched { FLAG_CROUCHED } else { 0 } | if reloading { FLAG_RELOADING } else { 0 },
+            self.shots,
+        )
     }
 
     /// One tick of the player's controls. `None` while the map is not in or
@@ -277,6 +350,106 @@ mod tests {
             taken += local.step_at(forward(0.0), clock.now()).unwrap().stepped as u32;
         }
         assert!(taken <= 20, "{taken} ticks owed for a pause");
+    }
+
+    /// The pistol's rounds as a new one has them.
+    const FULL: (i16, i16) = (12, 48);
+
+    fn armed_local() -> Local {
+        let mut local = Local::with_map(flat_floor_map());
+        local.place([0.0, 0.0, 0.0]);
+        local
+    }
+
+    #[test]
+    fn a_held_trigger_fires_the_pistol_at_its_rate_and_each_shot_counts_for_the_others() {
+        use halo_sim::fixtures::PISTOL;
+        let mut local = armed_local();
+        let mut shots = 0u32;
+        let mut last = None;
+        for _ in 0..60 {
+            let armed = local.fire(PISTOL, true, false, FULL, false).unwrap();
+            shots += armed.fired as u32;
+            last = Some(armed);
+            assert_eq!(halo_sim::shot_counter(local.flags(false)) as u32, shots % 8);
+        }
+        // (3.5 a second: a shot on the first tick and then every 9)
+        assert_eq!(shots, 7);
+        let armed = last.unwrap();
+        assert_eq!((armed.rounds_loaded, armed.rounds_total), (12 - 7, 48));
+        assert!(!armed.reloading && !armed.overheated);
+    }
+
+    #[test]
+    fn an_empty_magazine_reloads_and_the_flags_say_so_until_it_is_done() {
+        use halo_sim::fixtures::PISTOL;
+        let mut local = armed_local();
+        let mut began = 0;
+        let mut flagged = false;
+        let mut reloading_ticks = 0;
+        for _ in 0..400 {
+            let armed = local.fire(PISTOL, true, false, FULL, false).unwrap();
+            began += armed.reload_began as u32;
+            if armed.reloading {
+                reloading_ticks += 1;
+                flagged |= local.flags(false) & FLAG_RELOADING != 0;
+            } else {
+                assert_eq!(local.flags(false) & FLAG_RELOADING, 0);
+            }
+        }
+        assert!(began >= 1 && flagged && reloading_ticks > 30, "{began} {flagged} {reloading_ticks}");
+    }
+
+    #[test]
+    fn a_reload_the_player_asks_for_begins_and_is_told() {
+        use halo_sim::fixtures::PISTOL;
+        let mut local = armed_local();
+        local.fire(PISTOL, true, false, FULL, false).unwrap();
+        for _ in 0..30 {
+            local.fire(PISTOL, false, false, FULL, false).unwrap();
+        }
+        let armed = local.fire(PISTOL, false, true, FULL, false).unwrap();
+        assert!(armed.reload_began && armed.reloading);
+        assert_ne!(local.flags(true) & FLAG_RELOADING, 0);
+        assert_ne!(local.flags(true) & FLAG_CROUCHED, 0);
+    }
+
+    #[test]
+    fn a_new_life_has_a_full_weapon_but_the_shot_counter_goes_on_counting() {
+        use halo_sim::fixtures::PISTOL;
+        let mut local = armed_local();
+        for _ in 0..20 {
+            local.fire(PISTOL, true, false, FULL, false).unwrap();
+        }
+        let counted = halo_sim::shot_counter(local.flags(false));
+        assert!(counted > 0);
+        local.place([5.0, 5.0, 0.0]);
+        let armed = local.fire(PISTOL, false, false, FULL, false).unwrap();
+        assert_eq!((armed.rounds_loaded, armed.rounds_total), (12, 48));
+        assert_eq!(halo_sim::shot_counter(local.flags(false)), counted);
+    }
+
+    #[test]
+    fn a_weapon_starts_with_the_rounds_the_engine_has_and_takes_new_ones_when_told_to() {
+        use halo_sim::fixtures::PISTOL;
+        let mut local = armed_local();
+        // a pistol picked up with 5 loaded and 7 in reserve
+        let armed = local.fire(PISTOL, false, false, (5, 7), false).unwrap();
+        assert_eq!((armed.rounds_loaded, armed.rounds_total), (5, 7));
+        // (the engine's numbers are not looked at again while the model has the weapon)
+        let armed = local.fire(PISTOL, false, false, (12, 48), false).unwrap();
+        assert_eq!((armed.rounds_loaded, armed.rounds_total), (5, 7));
+        // ... until the server gives the player rounds
+        let armed = local.fire(PISTOL, false, false, (12, 40), true).unwrap();
+        assert_eq!((armed.rounds_loaded, armed.rounds_total), (12, 40));
+    }
+
+    #[test]
+    fn there_is_no_weapon_before_the_map_is_in_and_none_the_map_does_not_have() {
+        let mut local = Local::load("/nonexistent/maps/nothing.map".into());
+        assert_eq!(local.fire(1, true, false, FULL, false), None);
+        let mut local = armed_local();
+        assert_eq!(local.fire(60000, true, false, FULL, false), None);
     }
 
     #[test]

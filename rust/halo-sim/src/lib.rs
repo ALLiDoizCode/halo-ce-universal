@@ -71,5 +71,8 @@ pub mod wire;
 pub use map::MapData;
 pub use movement::{GROUND_TOLERANCE, MAX_CATCH_UP_TICKS, PENETRATION_TOLERANCE, TICKS_PER_SECOND};
 pub use rng::Rng;
-pub use state::{snapshot, MemoryStore, Player, PlayerId, Store, FLAG_AIRBORNE, FLAG_CROUCHED};
+pub use state::{
+    shot_counter, shots_between, snapshot, with_shot_counter, MemoryStore, Player, PlayerId, Store, CLIENT_FLAGS,
+    FLAG_AIRBORNE, FLAG_CROUCHED, FLAG_RELOADING, FLAG_SHOTS_MASK, FLAG_SHOTS_SHIFT,
+};
 pub use step::{step, Event, PlayerInput, RejectReason};

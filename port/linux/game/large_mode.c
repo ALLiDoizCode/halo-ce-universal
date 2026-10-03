@@ -187,6 +187,17 @@ unsigned long halo_large_weapon_name(unsigned long tag_index, char *buffer, unsi
 unsigned long halo_large_report_hit(unsigned long target, unsigned long damage, long material, float scale, float ox,
 	float oy, float oz, float tx, float ty, float tz);
 unsigned long halo_large_hits(unsigned long *out);
+unsigned long halo_large_fire(unsigned long weapon, unsigned long trigger, unsigned long reload, unsigned long loaded,
+	unsigned long reserve, unsigned long adopt, float *out);
+
+/* large_effects.c's (what the mode shows and plays of a fight: the engine's side of it) */
+long large_effects_give_weapon(long unit_index, long definition_index);
+void large_effects_refill_weapon(long weapon_index);
+void large_effects_hurt(long unit_index, long local_player_index, long shooter_index, long weapon_definition_index,
+	real shield_lost, real body_lost, boolean shield_down);
+void large_effects_kill(long unit_index, long shooter_index, long weapon_definition_index);
+void large_effects_hit_material(struct damage_data *damage, long object_index, short material_index);
+boolean large_effects_recoil(struct damage_data *damage, long unit_index);
 unsigned long halo_large_items(unsigned long *tick);
 unsigned long halo_large_item(unsigned long index, unsigned long *info, float *out);
 unsigned long halo_large_item_name(unsigned long tag_index, char *buffer, unsigned long size);
@@ -310,6 +321,27 @@ static struct
 	long reports_logged;
 	boolean autofire;
 
+	/* the local weapon (large_mode_fire_local): the library's numbers for this tick, whether it
+	fired, and how many shots each has counted (the engine's weapon says when it fired), and on
+	how many ticks the engine's own rounds and heat were not the library's before they were put in */
+	boolean armed;
+	boolean armed_fired;
+	boolean adopt_rounds;
+	float armed_state[5];
+	unsigned long weapon_shots_rust;
+	unsigned long weapon_shots_engine;
+	unsigned long weapon_mismatches;
+	long weapon_fired_time;
+
+	/* being hurt (large_mode_show_vitals): the unit whose hits have been shown, and how many were */
+	long hurt_unit;
+	long hurt_seen;
+	unsigned long hurts_shown;
+
+	/* frames (large_mode_update): the seconds, frames and slowest frame since the last log */
+	real frame_seconds;
+	long frames;
+	real worst_frame;
 	/* items and pickups: the action button as it was last tick, large.autouse (the automated tests press
 	it twice a second) and when it last did, the rounds last told to the server and when, and the version
 	of the server's rounds last taken */
@@ -399,7 +431,10 @@ static void large_mode_forget_items(void);
 static void large_mode_show_camouflage(long unit_index, unsigned long player, boolean local);
 static void large_mode_log_remotes(void);
 static void large_mode_local_after_objects(void);
-static void large_mode_show_vitals(long unit_index, unsigned long player);
+static void large_mode_weapon_after_objects(void);
+static struct weapon_datum *large_mode_hand_weapon(struct unit_datum *unit);
+static void large_mode_kill_unit(long unit_index, unsigned long player);
+static void large_mode_show_vitals(long unit_index, unsigned long player, long *hurt_seen);
 
 /* the player's own copy of the match's map, for the local player's movement
 (the library reads it on a thread of its own; call after a session has started,
@@ -436,6 +471,15 @@ void large_mode_new_game(
 	large.hurts_logged = 0;
 	large.vitals_short = FALSE;
 	large.reports_logged = 0;
+	large.armed = FALSE;
+	large.adopt_rounds = FALSE;
+	large.weapon_shots_rust = 0;
+	large.weapon_shots_engine = 0;
+	large.weapon_mismatches = 0;
+	large.weapon_fired_time = NONE;
+	large.hurt_unit = NONE;
+	large.hurt_seen = NONE;
+	large.hurts_shown = 0;
 	large.action_held = FALSE;
 	large.autouse_time = 0;
 	large.reported_time = 0;
@@ -499,6 +543,15 @@ enum
 	LARGE_REBALANCE_TICKS = 30,
 	LARGE_REBALANCE_SWAPS = 4,
 	LARGE_NAME_LENGTH = 11,
+	/* a unit's flags as the gateway sends them (halo_wire's unit.rs, halo_sim's state.rs): the shots
+	the weapon has fired are bits 2 to 4 (a count modulo 8), and bit 5 says it is reloading */
+	LARGE_FLAG_SHOTS_SHIFT = 2,
+	LARGE_FLAG_RELOADING = 32,
+	/* ticks the trigger of a remote player's weapon is held for each shot they are said to have fired
+	(the weapon fires when it can, at the rate its tags have) */
+	LARGE_SHOT_HOLD_TICKS = 2,
+	/* the weapons of the map that have been looked up (a match has few kinds) */
+	LARGE_WEAPON_CACHE = 16,
 };
 
 /* the system's (milliseconds: the adapter's cost is told in cycles, which this clock gives a rate) */
@@ -530,6 +583,16 @@ struct large_remote
 	/* since it was last logged: whether the engine's unit had a landing (soft or hard) to
 	recover from, which is short and so seen between the log's seconds */
 	boolean saw_landing;
+	/* its weapon (large_mode_remote_weapon): the tag the server says it carries, in the map's
+	numbering (0xFFFF for none, 0xFFFFFFFF not asked yet), the weapon in its hand and when that was
+	last asked; and what its shots, reload and hits were when last seen (large_mode_remote_fire) */
+	unsigned long weapon_tag;
+	long weapon_object;
+	long weapon_checked_time;
+	long shots_seen;
+	long trigger_ticks;
+	boolean reload_seen;
+	long hurt_seen;
 };
 
 static struct
@@ -556,6 +619,13 @@ static struct
 	unsigned long long window_start_cycles;
 	unsigned long window_start_ms;
 	boolean ignored_ids_said;
+	/* the weapons of the map that have been looked up, by the map's number for them */
+	unsigned long weapon_cache_tag[LARGE_WEAPON_CACHE];
+	long weapon_cache_definition[LARGE_WEAPON_CACHE];
+	long weapon_cache_count;
+	/* shots the gateway's states have told of, and shots the remote players' weapons fired in the engine */
+	unsigned long shots_told;
+	unsigned long shots_fired;
 	/* the remote unit of each engine object, for large_mode_biped_state (the
 	remote's slot, one more than it: 0 is none) */
 	short remote_of_object[HALO_PORT_MAXIMUM_OBJECTS_PER_MAP];
@@ -666,7 +736,7 @@ static void large_mode_kill_remote(
 	if (object_try_and_get_and_verify_type(remote->unit_index, _object_mask_unit))
 	{
 		unit_scripting_suspended(remote->unit_index, FALSE);
-		unit_kill(remote->unit_index);
+		large_mode_kill_unit(remote->unit_index, id);
 	}
 	remote->present = FALSE;
 	large_remote_data.count--;
@@ -738,6 +808,13 @@ static boolean large_mode_create_remote(
 	remote->airborne = FALSE;
 	remote->landing_velocity = 0.0f;
 	remote->last_fall_speed = 0.0f;
+	remote->weapon_tag = 0xFFFFFFFFUL;
+	remote->weapon_object = NONE;
+	remote->weapon_checked_time = NONE;
+	remote->shots_seen = NONE;
+	remote->trigger_ticks = 0;
+	remote->reload_seen = FALSE;
+	remote->hurt_seen = NONE;
 	large_remote_data.remote_of_object[DATUM_INDEX_TO_ABSOLUTE_INDEX(unit_index)] = (short)(id + 1);
 	remote->player_index = NONE;
 	remote->team = (long)team;
@@ -811,6 +888,110 @@ static void large_mode_share_players(
 	}
 }
 
+/* the engine's tag of a weapon by the map's numbering of it (what the server and the library say), or NONE;
+the last few are kept, since a match has few kinds */
+static long large_mode_weapon_definition(
+	unsigned long tag_index)
+{
+	char name[160];
+	char *dot;
+	long definition_index;
+	long slot;
+
+	for (slot = 0; slot < large_remote_data.weapon_cache_count; slot++)
+	{
+		if (large_remote_data.weapon_cache_tag[slot] == tag_index)
+			return large_remote_data.weapon_cache_definition[slot];
+	}
+	if (!halo_large_weapon_name(tag_index, name, sizeof(name)))
+		return NONE;
+	/* (the engine finds a tag by its name without the group's extension) */
+	dot = strrchr(name, '.');
+	if (dot)
+		*dot = 0;
+	definition_index = tag_loaded(WEAPON_DEFINITION_TAG, name);
+	/* (only a tag that was found is kept: one that was not may be asked for again) */
+	if (definition_index != NONE && large_remote_data.weapon_cache_count < LARGE_WEAPON_CACHE)
+	{
+		slot = large_remote_data.weapon_cache_count++;
+		large_remote_data.weapon_cache_tag[slot] = tag_index;
+		large_remote_data.weapon_cache_definition[slot] = definition_index;
+	}
+	return definition_index;
+}
+
+/* the weapon the server says a remote player carries is in the unit's hand (asked when the player
+appears, and now and then after: a weapon changes hands rarely). It is drawn, held and animated as the
+weapon's tags have it, and fires when the player is said to. */
+static void large_mode_remote_weapon(
+	struct large_remote *remote,
+	unsigned long id)
+{
+	unsigned long weapons[2];
+	long definition_index;
+
+	if (!halo_large_loadout(id, weapons) || weapons[0] == remote->weapon_tag)
+		return;
+	/* (a weapon the library cannot name yet, the map not being in, is asked again at the next look) */
+	definition_index = weapons[0] == 0xFFFFUL ? NONE : large_mode_weapon_definition(weapons[0]);
+	if (weapons[0] != 0xFFFFUL && definition_index == NONE)
+		return;
+	if (remote->weapon_object != NONE)
+	{
+		unit_delete_all_weapons(remote->unit_index);
+		remote->weapon_object = NONE;
+	}
+	remote->weapon_tag = weapons[0];
+	if (definition_index == NONE)
+		return;
+	remote->weapon_object = large_effects_give_weapon(remote->unit_index, definition_index);
+	if (large.log_players)
+	{
+		platform_log("large mode: player %lu holds %s%s", id, tag_get_name(definition_index),
+			remote->weapon_object == NONE ? " (the engine would not give it)" : "");
+	}
+}
+
+/* what a remote player's shots and reload come to for the engine's unit: the state says how many shots the
+weapon has fired (modulo 8, see halo_wire's unit.rs), so a state that is seen after a few says how many were
+missed, and each is fired by the engine's own weapon (a tick's hold of the trigger fires it when it is ready:
+the weapon's tags set the rate), with all that the tags give it; and the reload is asked of the weapon once,
+as the player begins it */
+static void large_mode_remote_fire(
+	struct large_remote *remote,
+	struct unit_control_data *control)
+{
+	long flags = (long)(remote->state[8] + 0.5f);
+	long counter = (flags >> LARGE_FLAG_SHOTS_SHIFT) & 7;
+	boolean reloading = (flags & LARGE_FLAG_RELOADING) != 0;
+
+	if (remote->shots_seen == NONE)
+	{
+		/* (a player in range for the first time: the count they have is where it starts) */
+		remote->shots_seen = counter;
+		remote->reload_seen = reloading;
+	}
+	else if (counter != remote->shots_seen)
+	{
+		long shots = (counter - remote->shots_seen) & 7;
+
+		remote->shots_seen = counter;
+		large_remote_data.shots_told += shots;
+		remote->trigger_ticks = MIN(remote->trigger_ticks + shots * LARGE_SHOT_HOLD_TICKS, 3 * LARGE_SHOT_HOLD_TICKS);
+	}
+	if (remote->weapon_object == NONE)
+		remote->trigger_ticks = 0;
+	if (remote->trigger_ticks > 0)
+	{
+		remote->trigger_ticks--;
+		SET_FLAG(control->control_flags, _unit_control_weapon_primary_trigger_bit, TRUE);
+		control->primary_trigger = 1.0f;
+	}
+	if (reloading && !remote->reload_seen && remote->weapon_object != NONE)
+		SET_FLAG(control->control_flags, _unit_control_weapon_reload_bit, TRUE);
+	remote->reload_seen = reloading;
+}
+
 /* what an engine unit is given of the library's state of a player: the controls
 of a player running at that velocity, facing as the player does; then it is
 put where the player is */
@@ -861,6 +1042,7 @@ static void large_mode_drive_remote(
 	control.aiming_vector.j = sin_yaw * cos_pitch;
 	control.aiming_vector.k = (real)sin(state[7]);
 	control.looking_vector = control.aiming_vector;
+	large_mode_remote_fire(remote, &control);
 	unit_control(remote->unit_index, &control);
 
 	position.x = state[0];
@@ -926,11 +1108,20 @@ static void large_mode_update_remotes_work(
 		struct game_globals_player_information);
 	for (id = 0; id < LARGE_MAXIMUM_REMOTES; id++)
 	{
-		if (large_remote_data.remotes[id].present)
+		struct large_remote *remote = &large_remote_data.remotes[id];
+
+		if (remote->present)
 		{
-			large_mode_drive_remote(&large_remote_data.remotes[id], information);
-			large_mode_show_vitals(large_remote_data.remotes[id].unit_index, (unsigned long)id);
-			large_mode_show_camouflage(large_remote_data.remotes[id].unit_index, (unsigned long)id, FALSE);
+			if (remote->weapon_checked_time == NONE ||
+				game_time_get() - remote->weapon_checked_time >= LARGE_REBALANCE_TICKS)
+			{
+				/* (staggered, so that they are not all asked on one tick) */
+				remote->weapon_checked_time = game_time_get() - (id % LARGE_REBALANCE_TICKS);
+				large_mode_remote_weapon(remote, (unsigned long)id);
+			}
+			large_mode_drive_remote(remote, information);
+			large_mode_show_vitals(remote->unit_index, (unsigned long)id, &remote->hurt_seen);
+			large_mode_show_camouflage(remote->unit_index, (unsigned long)id, FALSE);
 		}
 	}
 }
@@ -956,6 +1147,7 @@ void large_mode_game_tick_after_objects(
 	if (!large.started)
 		return;
 	large_mode_local_after_objects();
+	large_mode_weapon_after_objects();
 	if (large_remote_data.count <= 0)
 		return;
 	for (id = 0; id < LARGE_MAXIMUM_REMOTES; id++)
@@ -974,6 +1166,15 @@ void large_mode_game_tick_after_objects(
 		object->object.translational_velocity.k = remote->state[5] / TICKS_PER_SECOND;
 		if (((struct biped_datum *)object)->biped.landing != NONE)
 			remote->saw_landing = TRUE;
+		/* its weapon: a shot the engine fired this tick counts, and then it has a round again */
+		if (remote->weapon_object != NONE)
+		{
+			struct weapon_datum *weapon = weapon_try_and_get(remote->weapon_object);
+
+			if (weapon && weapon->weapon.game_time_last_fired == game_time_get())
+				large_remote_data.shots_fired++;
+			large_effects_refill_weapon(remote->weapon_object);
+		}
 	}
 
 	large_remote_data.tick_cycles += __builtin_ia32_rdtsc() - start;
@@ -1001,6 +1202,11 @@ static void large_mode_log_remotes(
 	platform_log("large mode: %ld remote units, %ld with players | created %ld removed %ld failures %ld landings %ld",
 		large_remote_data.count, large_remote_data.players, large_remote_data.created, large_remote_data.removed,
 		large_remote_data.create_failures, large_remote_data.landings);
+	if (large_remote_data.shots_told || large_remote_data.shots_fired)
+	{
+		platform_log("large mode: remote shots: %lu told by the states, %lu fired by the engine's weapons",
+			large_remote_data.shots_told, large_remote_data.shots_fired);
+	}
 	/* what the adapter cost a tick over the last second: the window's cycles at
 	the rate the window's own length gives them */
 	if (large_remote_data.window_start_ms && now_ms > large_remote_data.window_start_ms && large_remote_data.window_ticks)
@@ -1086,6 +1292,25 @@ static void large_mode_log(
 					tag_get_name(weapon->definition_index), slot, slot == unit->unit.current_weapon_index ? ", in hand" : "",
 					magazine->rounds_loaded, magazine->rounds_total, weapon->weapon.heat, weapon->weapon.state);
 			}
+		}
+	}
+	{
+		/* the weapon in the local player's hand: what the HUD reads of its rounds and heat, and what the
+		library says (they are the same: the library's are put in each tick), and how many shots each has
+		counted (the engine's weapon and the library's model agree on when it fires) */
+		long unit_index;
+		struct unit_datum *unit = large_mode_local_unit(&unit_index);
+		struct weapon_datum *weapon = unit ? large_mode_hand_weapon(unit) : NULL;
+
+		if (weapon && weapon_definition_get(weapon->definition_index)->weapon.magazines.count > 0)
+		{
+			struct weapon_magazine const *magazine = &weapon->weapon.magazines[0];
+
+			platform_log("large mode: the local weapon %s: the HUD has %d of %d rounds, heat %.3f, state %d, magazine %d "
+				"| the library %.0f of %.0f, heat %.3f | shots: library %lu, engine %lu, rounds differed on %lu ticks",
+				tag_get_name(weapon->definition_index), magazine->rounds_loaded, magazine->rounds_total,
+				weapon->weapon.heat, weapon->weapon.state, magazine->state, large.armed_state[0], large.armed_state[1],
+				large.armed_state[2], large.weapon_shots_rust, large.weapon_shots_engine, large.weapon_mismatches);
 		}
 	}
 	{
@@ -1179,6 +1404,92 @@ static void large_mode_move_local(
 	large.local_moving = TRUE;
 }
 
+/* the weapon in a unit's hand, or NULL while it has none (or is changing it) */
+static struct weapon_datum *large_mode_hand_weapon(
+	struct unit_datum *unit)
+{
+	long weapon_index;
+
+	if (unit->unit.current_weapon_index == NONE ||
+		unit->unit.current_weapon_index != unit->unit.desired_weapon_index)
+	{
+		return NULL;
+	}
+	weapon_index = unit->unit.weapon_object_indices[unit->unit.current_weapon_index];
+	return weapon_index == NONE ? NULL : weapon_try_and_get(weapon_index);
+}
+
+/* the local player's weapon for this tick, before the objects are updated: the library holds the weapon's
+rounds, heat and reload (halo_sim's model of them, which the comparison harness holds to the engine's own), is
+told whether the trigger is held and the reload asked for, as the engine will find them in a moment, and
+counts each shot for the other players (the shots of the flags of the next input, which large_mode_move_local
+sends). The engine fires the weapon, with its effects, its sounds and its first-person animation; what the
+HUD shows of its ammunition is the library's (large_mode_weapon_after_objects) */
+static void large_mode_fire_local(
+	long unit_index,
+	struct unit_datum *unit)
+{
+	struct weapon_datum *weapon = large.equipped_unit == unit_index ? large_mode_hand_weapon(unit) : NULL;
+	boolean trigger;
+	boolean reload;
+	unsigned long result;
+
+	large.armed = FALSE;
+	if (!weapon)
+		return;
+	/* (the engine's own conditions for the trigger: the weapon is ready, and not busy) */
+	trigger = TEST_FLAG(unit->unit.control_flags, _unit_control_weapon_primary_trigger_bit) &&
+		weapon->weapon.state_timer <= 1 && !TEST_FLAG(weapon->weapon.control_flags, _weapon_control_user_busy_bit);
+	reload = TEST_FLAG(unit->unit.control_flags, _unit_control_weapon_reload_bit);
+	result = halo_large_fire((unsigned long)DATUM_INDEX_TO_ABSOLUTE_INDEX(weapon->definition_index), trigger ? 1 : 0,
+		reload ? 1 : 0, (unsigned long)MAX(weapon->weapon.magazines[0].rounds_loaded, 0),
+		(unsigned long)MAX(weapon->weapon.magazines[0].rounds_total, 0), large.adopt_rounds ? 1 : 0, large.armed_state);
+	large.adopt_rounds = FALSE;
+	large.armed = result != 0;
+	large.armed_fired = (result & 2) != 0;
+}
+
+/* ... and after the objects are updated, the library's rounds and heat are the weapon's: what the engine's
+weapon says of them (it has fired and reloaded by its own count, which agrees with the library's but for the
+ticks that the two are a tick apart) is put right before the HUD reads it */
+static void large_mode_weapon_after_objects(void)
+{
+	long unit_index;
+	struct unit_datum *unit;
+	struct weapon_datum *weapon;
+	struct weapon_magazine *magazine;
+
+	if (!large.armed)
+		return;
+	large.armed = FALSE;
+	/* (the server gave the player rounds this tick: they are the engine's, and the library takes them next tick) */
+	if (large.adopt_rounds)
+		return;
+	unit = large_mode_local_unit(&unit_index);
+	weapon = unit ? large_mode_hand_weapon(unit) : NULL;
+	if (!weapon)
+		return;
+	if (weapon->weapon.game_time_last_fired == game_time_get() && large.weapon_fired_time != game_time_get())
+	{
+		large.weapon_fired_time = game_time_get();
+		large.weapon_shots_engine++;
+	}
+	if (large.armed_fired)
+		large.weapon_shots_rust++;
+	if (weapon_definition_get(weapon->definition_index)->weapon.magazines.count > 0)
+	{
+		magazine = &weapon->weapon.magazines[0];
+		if (magazine->rounds_loaded != (short)(large.armed_state[0] + 0.5f) ||
+			magazine->rounds_total != (short)(large.armed_state[1] + 0.5f))
+		{
+			large.weapon_mismatches++;
+		}
+		magazine->rounds_loaded = (short)(large.armed_state[0] + 0.5f);
+		magazine->rounds_total = (short)(large.armed_state[1] + 0.5f);
+	}
+	weapon->weapon.heat = large.armed_state[2];
+}
+
 /* whether the engine's physics, suspended for a unit, is to take the unit for one the library
 moves, and what the library says of it: in the air (the jump and fall animations) and how fast it
 landed this tick (the landing's). Called by the engine's biped update, for each unit suspended. The
@@ -1248,13 +1559,84 @@ static void large_mode_local_after_objects(void)
 
 /* ---------- fighting */
 
+/* the unit a player is in the engine (NONE if they are not in range) and the engine's tag of the weapon the
+server says they carry, for the shot that hurt or killed another: hurt_by is the player, -1 for none */
+static void large_mode_shooter(
+	long hurt_by,
+	long *shooter_unit,
+	long *weapon_definition)
+{
+	unsigned long loadout[2];
+
+	*shooter_unit = NONE;
+	*weapon_definition = NONE;
+	if (hurt_by < 0)
+		return;
+	if ((unsigned long)hurt_by == large.player_id)
+		large_mode_local_unit(shooter_unit);
+	else if (hurt_by < LARGE_MAXIMUM_REMOTES && large_remote_data.remotes[hurt_by].present)
+		*shooter_unit = large_remote_data.remotes[hurt_by].unit_index;
+	if (halo_large_loadout((unsigned long)hurt_by, loadout) && loadout[0] != 0xFFFFUL)
+		*weapon_definition = large_mode_weapon_definition(loadout[0]);
+}
+
+/* the server says a unit was hurt (a new hit in its table): the engine's side of what a hit does, with the
+shooter's weapon and the unit the shooter is in the engine (none if they are not in range), which
+large_effects.c does from the weapon's tags: the unit's pain sound and flinch, and for the local player the
+screen's flash and shake, and the direction the hit came from */
+static void large_mode_hurt_feedback(
+	long unit_index,
+	unsigned long victim,
+	long hurt_by,
+	real shield_lost,
+	real body_lost,
+	boolean shield_down)
+{
+	long shooter_unit;
+	long weapon_definition;
+	boolean local = victim == large.player_id;
+
+	large_mode_shooter(hurt_by, &shooter_unit, &weapon_definition);
+	large_effects_hurt(unit_index, local ? local_player_get_player_index(0) : NONE, shooter_unit, weapon_definition,
+		shield_lost, body_lost, shield_down);
+	large.hurts_shown++;
+	if (large.hurts_shown <= 30)
+	{
+		platform_log("large mode: %s player %lu is hurt by player %ld (%s): shield lost %.3f, health lost %.3f%s",
+			local ? "the local" : "remote", victim, hurt_by,
+			weapon_definition == NONE ? "no weapon known" : tag_get_name(weapon_definition), shield_lost, body_lost,
+			shield_down ? ", the shield is down" : "");
+	}
+}
+
+/* a unit the server says a hit has killed dies as a shot unit does, by the shooter's weapon's damage (the
+sound of the death and the way the body falls are the damage effect's); one it says died of anything else
+(or whose killer it does not say) just dies */
+static void large_mode_kill_unit(
+	long unit_index,
+	unsigned long player)
+{
+	float vitals[6];
+	long shooter_unit = NONE;
+	long weapon_definition = NONE;
+
+	if (halo_large_vitals(player, vitals) && ((long)(vitals[3] + 0.5f) & 2) != 0 && vitals[5] >= 0.0f)
+		large_mode_shooter((long)vitals[5], &shooter_unit, &weapon_definition);
+	large_effects_kill(unit_index, shooter_unit, weapon_definition);
+	platform_log("large mode: player %lu is killed by %s", player,
+		weapon_definition == NONE ? "nothing known" : tag_get_name(weapon_definition));
+}
+
 /* the server's say of a player's health and shields, put into the engine's unit of the player: the engine's
 HUD (the local player's) and the effects of the shields (everyone's) read the unit's vitality. A shield or
 health that has gone down since the last tick flashes the shield's bubble as a hit does (the engine's
-own decay then takes it away again) */
+own decay then takes it away again). A hit the server's table has gained since the last look
+(hurt_seen, which starts at what it is the first time) is shown as the engine shows one: the sound and
+the flinch of the unit hurt, and the local player's screen */
 static void large_mode_show_vitals(
 	long unit_index,
-	unsigned long player)
+	unsigned long player,
+	long *hurt_seen)
 {
 	float vitals[6];
 	struct damage_network_state state;
@@ -1263,6 +1645,7 @@ static void large_mode_show_vitals(
 	real shield_before;
 	real body_before;
 	long flags;
+	long hurts;
 
 	if (!object || !halo_large_vitals(player, vitals))
 		return;
@@ -1289,6 +1672,25 @@ static void large_mode_show_vitals(
 		object->object.body_damage_decay_timer = 0;
 	}
 	damage_set_network_state(unit_index, &state);
+
+	hurts = (long)(vitals[4] + 0.5f);
+	if (*hurt_seen == NONE || hurts < *hurt_seen)
+	{
+		/* (first seen, or a new life: where the count starts) */
+		*hurt_seen = hurts;
+	}
+	else if (hurts > *hurt_seen)
+	{
+		real shield_lost = MAX(shield_before - state.shield_vitality, 0.0f);
+		real body_lost = MAX(body_before - state.body_vitality, 0.0f);
+
+		*hurt_seen = hurts;
+		/* (a hit that took nothing the unit had shows, a little, all the same) */
+		if (shield_lost <= 0.0f && body_lost <= 0.0f)
+			shield_lost = 0.01f;
+		large_mode_hurt_feedback(unit_index, player, (long)(vitals[5] < 0.0f ? -1.0f : vitals[5]), shield_lost,
+			body_lost, shield_before > 0.0f && state.shield_vitality <= 0.0f);
+	}
 }
 
 /* the local player's unit holds the weapon the server says the player carries, in place of what the
@@ -1407,13 +1809,14 @@ static void large_mode_autofire(
 }
 
 /* whether the engine deals this damage (object_cause_damage asks): not to a player's unit in this mode,
-whose health and shields are the server's. A hit of the local player's weapon on another player is
+whose health and shields are the server's (the damage is given the material it would have made, which the
+impact of a projectile shows). A hit of the local player's weapon on another player is
 reported to the server, which checks it and deals the damage; everything else that would hurt a player
 is nothing here (the server decides falls and deaths). The server's own kills of the local player (the
 unit_kill of large_mode_game_tick) and everything that is no player's unit (scenery, items) go on as the
 engine has them. */
 boolean large_mode_damage_deals(
-	struct damage_data const *damage,
+	struct damage_data *damage,
 	long object_index,
 	short material_index)
 {
@@ -1429,11 +1832,16 @@ boolean large_mode_damage_deals(
 	if (damage->owner_player_index == NONE || damage->owner_player_index != local_player_get_player_index(0) ||
 		slot < 0 || slot >= HALO_PORT_MAXIMUM_OBJECTS_PER_MAP || large_remote_data.remote_of_object[slot] <= 0)
 	{
+		/* (a weapon's own shake of the screen of the player firing it is the engine's, shown as it shows it;
+		any other hit shows what it hit, as the damage would have, in the impact of a projectile) */
+		if (!large_effects_recoil(damage, object_index))
+			large_effects_hit_material(damage, object_index, material_index);
 		return FALSE;
 	}
 	/* a hit of the local player's weapon at another player: the damage's tag says what hurt the player (a bullet,
 	an explosion, a blow) and so which weapon it was of, and the scale is the one the engine dealt it at (how far
 	a bullet had flown, how far the player was from the blast, how fast the blow was struck) */
+	large_effects_hit_material(damage, object_index, material_index);
 	if (damage->definition_index == NONE)
 		return FALSE;
 	object_get_origin(object_index, &position);
@@ -1866,6 +2274,7 @@ static void large_mode_sync_weapons(
 				large_mode_set_rounds(weapon, kit[1 + 2 * slot], kit[2 + 2 * slot]);
 		}
 		large.kit_seen = TRUE;
+		large.adopt_rounds = TRUE;
 		large.kit_version = kit[0];
 		platform_log("large mode: the server's rounds: %lu+%lu and %lu+%lu", kit[1], kit[2], kit[3], kit[4]);
 	}
@@ -2185,7 +2594,7 @@ void large_mode_game_tick(
 		if (unit && large.killed_unit != unit_index)
 		{
 			large.killed_unit = unit_index;
-			unit_kill(unit_index);
+			large_mode_kill_unit(unit_index, large.player_id);
 			platform_log("large mode: the server says the local player is %s: the unit is killed",
 				life[0] == _large_life_waiting ? "waiting for a wave" : "dead");
 		}
@@ -2225,6 +2634,10 @@ void large_mode_game_tick(
 		}
 		else
 		{
+			/* (the test's trigger is held before the library is told of it, as a player's is) */
+			if (large.autofire)
+				large_mode_autofire(unit);
+			large_mode_fire_local(unit_index, unit);
 			large_mode_move_local(unit_index, unit);
 		}
 		/* the weapon the server says the player carries, and their health and shields */
@@ -2237,8 +2650,13 @@ void large_mode_game_tick(
 				platform_log("large mode: the local unit holds the server's weapon");
 			}
 		}
-		large_mode_show_vitals(unit_index, large.player_id);
-		/* the weapons the server says (once the first is in hand), the press of the action button and the
+		if (large.hurt_unit != unit_index)
+		{
+			large.hurt_unit = unit_index;
+			large.hurt_seen = NONE;
+		}
+		large_mode_show_vitals(unit_index, large.player_id, &large.hurt_seen);
+				/* the weapons the server says (once the first is in hand), the press of the action button and the
 		rounds, and camouflage */
 		if (large.equipped_unit == unit_index)
 		{
@@ -2247,8 +2665,6 @@ void large_mode_game_tick(
 			large_mode_report_ammo(unit, FALSE);
 		}
 		large_mode_show_camouflage(unit_index, large.player_id, TRUE);
-		if (large.autofire)
-			large_mode_autofire(unit);
 	}
 
 	/* the items on the ground, which are the server's */
@@ -2547,6 +2963,22 @@ void large_mode_update(
 
 	if (!large.checked)
 		large_mode_read_settings();
+	/* (the frames of a game on a server: how fast they came, once a second) */
+	if (large.started && !main_menu_loaded)
+	{
+		large.frame_seconds += seconds;
+		large.frames++;
+		large.worst_frame = MAX(large.worst_frame, seconds);
+		if (large.frame_seconds >= 1.0f)
+		{
+			platform_log("large mode: %ld frames in %.3f s: %.1f a second, the slowest %.1f ms, %ld remote units",
+				large.frames, large.frame_seconds, (double)large.frames / large.frame_seconds,
+				(double)large.worst_frame * 1000.0, large_remote_data.count);
+			large.frame_seconds = 0.0f;
+			large.frames = 0;
+			large.worst_frame = 0.0f;
+		}
+	}
 	if (!large.browser_mode)
 		return;
 	large_mode_browse_start();
@@ -2699,7 +3131,7 @@ void large_mode_game_tick_after_objects(
 }
 
 boolean large_mode_damage_deals(
-	struct damage_data const *damage,
+	struct damage_data *damage,
 	long object_index,
 	short material_index)
 {
