@@ -610,8 +610,9 @@ pub struct BandStats {
     /// pair's previous one, with the pair in this band throughout.
     pub stalls_over_100ms: u64,
     pub stall_fraction: f64,
-    /// The most ticks between a pair's last update in another band and its
-    /// first in this one (both players in the world throughout). Reported
+    /// The most ticks between a pair's last update before it changed band
+    /// (it may have left this band and come back) and its first update in
+    /// this one, both players in the world throughout. Reported
     /// apart from the gaps above: a far player updated every 15 ticks that
     /// jumps close waits that long for its first near update, which says
     /// nothing about how near players are served.
@@ -996,7 +997,7 @@ mod tests {
             _ => Some((NEAR, true)),
         });
         assert_eq!(t.longest[NEAR], 1);
-        assert_eq!(t.longest_entry[NEAR], 41 - 1);
+        assert_eq!(t.longest_entry[NEAR], 40, "from the update at tick 1 to the next one at 41");
     }
 
     #[test]
