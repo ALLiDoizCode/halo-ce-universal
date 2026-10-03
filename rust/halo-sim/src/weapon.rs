@@ -126,6 +126,21 @@ impl Hands {
         usize::try_from(trigger.magazine_index).ok().and_then(|i| weapon.magazines.get(i))
     }
 
+    /// The weapon is reloading: what the others are shown of a player's weapon
+    /// ([`crate::FLAG_RELOADING`]).
+    pub fn reloading(&self) -> bool {
+        matches!(self.magazine, MagazineState::Reloading(_))
+    }
+
+    /// The player asked for a reload (the engine's reload control, `weapon_update`'s
+    /// `_weapon_needs_to_reload_bit`): it begins if the weapon can, as an empty
+    /// magazine's does. Returns whether it began.
+    pub fn request_reload(&mut self, weapon: &Weapon) -> bool {
+        let Some(trigger) = weapon.triggers.first() else { return false };
+        let Some(m) = Self::magazine_of(weapon, trigger) else { return false };
+        self.start_reload(weapon, m)
+    }
+
     /// One tick (`weapon_update`): whether the trigger is held, and what the
     /// weapon did.
     pub fn update(&mut self, weapon: &Weapon, trigger_held: bool) -> Shot {
@@ -410,6 +425,27 @@ mod tests {
         }
         assert!(overheated, "{hands:?}");
         assert!(shots > 3 && shots < 90 / 9 + 3, "{shots}");
+    }
+
+    #[test]
+    fn a_reload_asked_for_with_rounds_to_spare_runs_the_animations_frames_and_shows_as_reloading() {
+        let weapon = pistol();
+        let mut hands = Hands::new(&weapon);
+        hands.update(&weapon, true);
+        for _ in 0..30 {
+            hands.update(&weapon, false);
+        }
+        assert!(!hands.reloading());
+        assert!(hands.request_reload(&weapon), "a magazine that is not full reloads when asked");
+        assert!(hands.reloading());
+        let mut ticks = 0;
+        while hands.reloading() {
+            hands.update(&weapon, false);
+            ticks += 1;
+            assert!(ticks < 300);
+        }
+        assert_eq!((hands.rounds_loaded, hands.rounds_total), (12, 47), "{hands:?}");
+        assert!(!hands.request_reload(&weapon), "a full magazine does not");
     }
 
     #[test]
