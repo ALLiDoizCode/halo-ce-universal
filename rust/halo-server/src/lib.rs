@@ -44,6 +44,7 @@ pub mod fixtures;
 pub mod loadgen;
 pub mod maps;
 pub mod matches;
+pub mod nav;
 pub mod root;
 pub mod servers;
 pub mod standalone;

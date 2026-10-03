@@ -10,9 +10,12 @@
 //! each other and not on one team shoot at each other until one falls.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use halo_sim::Rng;
 use halo_sim::TICKS_PER_SECOND;
+
+use crate::nav::{Nav, Scratch};
 
 /// A player as the gunners see them.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -40,6 +43,13 @@ pub struct Gunner {
     /// A player everyone else walks to and nobody shoots (the real game, in the load's
     /// measurements of it: the crowd is around it, and in its view).
     guest: Option<u16>,
+    /// The map's walkable ground, to steer hunters over ([`Gunner::with_nav`]).
+    nav: Option<Arc<Nav>>,
+    scratch: Scratch,
+    /// How many courses were set along a path, and how many straight at the target, as a grid
+    /// was asked (see [`Gunner::course_counts`]).
+    along_path: u64,
+    straight: u64,
 }
 
 /// How often a hunter is looked at to see whether they are getting anywhere.
@@ -64,7 +74,35 @@ impl Gunner {
             anchors: vec![None; players],
             detour_until: vec![0; players],
             guest: None,
+            nav: None,
+            scratch: Scratch::default(),
+            along_path: 0,
+            straight: 0,
         }
+    }
+
+    /// Steer hunters along paths over the map's walkable ground, round walls and cliffs, and
+    /// no longer straight at their target. Where there is no path (or a hunter or their target is
+    /// off the grid) they walk straight at it, as they do without a grid.
+    pub fn with_nav(mut self, nav: Arc<Nav>) -> Gunner {
+        self.nav = Some(nav);
+        self
+    }
+
+    /// The direction a hunter at `from` walks in to get to `to`: along the grid's path if
+    /// there is one, else straight (radians in the map's plane, from the x axis towards y).
+    fn course(&mut self, from: [f32; 3], to: [f32; 3]) -> f32 {
+        let along = self.nav.as_ref().and_then(|nav| nav.heading(&mut self.scratch, from, to));
+        if self.nav.is_some() {
+            *if along.is_some() { &mut self.along_path } else { &mut self.straight } += 1;
+        }
+        along.unwrap_or_else(|| (to[1] - from[1]).atan2(to[0] - from[0]))
+    }
+
+    /// How many courses were set so far along a path of the grid, and how many straight at the
+    /// target because the grid had no path (both 0 without a grid).
+    pub fn course_counts(&self) -> (u64, u64) {
+        (self.along_path, self.straight)
     }
 
     /// How many players have someone to shoot at, as of the last tick.
@@ -98,7 +136,8 @@ impl Gunner {
     }
 
     /// The directions to walk in, for the players who have nobody to shoot at: towards
-    /// the nearest enemy within the hunt range, decided once a second for each player
+    /// the nearest enemy within the hunt range (along a path, with a grid: see
+    /// [`Gunner::with_nav`]), decided once a second for each player
     /// (on the tick of their id). The angle is of the direction in the map's plane, from the
     /// x axis towards the y axis, which is how the walkers' headings are measured.
     pub fn hunt(&mut self, tick: u64, contacts: &[Option<Contact>]) -> Vec<(u16, f32)> {
@@ -112,6 +151,13 @@ impl Gunner {
                 continue;
             };
             if self.targets[id].is_some() {
+                self.anchors[id] = None;
+                continue;
+            }
+            // (one who is walking the way they were turned is not looked at: they are looked
+            // at again from where they are when the detour is over. Looked at during it, a hunter
+            // who cannot move is found stuck every two seconds, and never gets a course again)
+            if tick < self.detour_until[id] {
                 self.anchors[id] = None;
                 continue;
             }
@@ -142,7 +188,7 @@ impl Gunner {
                     .map(|enemy| contacts[enemy as usize].expect("the grid holds players that are there").position),
             };
             if let Some(to) = toward {
-                headings.push((id as u16, (to[1] - me.position[1]).atan2(to[0] - me.position[0])));
+                headings.push((id as u16, self.course(me.position, to)));
             }
         }
         headings
@@ -353,6 +399,28 @@ mod tests {
     }
 
     #[test]
+    fn a_hunter_who_stays_stuck_is_still_pointed_at_their_target_between_detours() {
+        // 0 never gets anywhere (a wall it stands against): every few seconds it must be pointed
+        // at the enemy again, not found stuck again before that can happen
+        let contacts = [at(0.0, 0), at(100.0, 1)];
+        let mut gunner = Gunner::new(2, 30.0, 2.0, true, 16).with_hunt_range(150.0);
+        let mut pointed = Vec::new();
+        let mut turned = 0;
+        for tick in 0..30 * 60 {
+            for (player, heading) in gunner.hunt(tick, &contacts) {
+                match (player, heading.abs() < 1e-6) {
+                    (0, true) => pointed.push(tick),
+                    (0, false) => turned += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(turned >= 5, "it keeps being turned a new way: {turned}");
+        let late = pointed.iter().filter(|t| **t > 30 * 30).count();
+        assert!(late >= 10, "and is pointed at the enemy again and again, to the end: {late}");
+    }
+
+    #[test]
     fn a_hunter_who_is_getting_there_is_not_turned_away() {
         let mut gunner = Gunner::new(2, 30.0, 2.0, true, 9).with_hunt_range(500.0);
         for tick in 0..600 {
@@ -381,6 +449,87 @@ mod tests {
         let near = [at(0.0, 0), Some(Contact { position: [3.0, 0.0, 0.0], ..at(0.0, 1).unwrap() }), None, None];
         let mut gunner = Gunner::new(4, 30.0, 2.0, true, 11).with_guest(0);
         assert!(fire(&mut gunner, &near, 300).is_empty());
+    }
+
+    /// A map drawn in characters (see `nav::picture`) and the grid of it.
+    fn drawn(rows: &[&str]) -> (crate::nav::picture::Picture, Arc<Nav>) {
+        let picture = crate::nav::picture::Picture::of(rows);
+        let nav = Arc::new(Nav::build(&picture, 1.0, &[picture.find('A'), picture.find('B')]));
+        (picture, nav)
+    }
+
+    fn contact(position: [f32; 3], team: u8) -> Option<Contact> {
+        Some(Contact { position, team, alive: true })
+    }
+
+    #[test]
+    fn a_hunter_with_a_wall_in_the_way_is_steered_round_it_and_arrives() {
+        let (picture, nav) =
+            drawn(&["..........", "....#.....", "....#.....", "A...#....B", "....#.....", "....#....."]);
+        let (start, enemy) = (picture.find('A'), picture.find('B'));
+        let mut gunner = Gunner::new(2, 5.0, 2.0, true, 12).with_hunt_range(50.0).with_nav(nav);
+        // 0 walks the way it is told at 1.5 units a second (and stays where it is if that is
+        // into a wall); 1 stands where it is
+        let (mut at, mut heading) = (start, 0.0f32);
+        let mut blocked = 0;
+        let mut arrived = None;
+        for tick in 0..30 * 60 {
+            let contacts = [contact(at, 0), contact(enemy, 1)];
+            for (player, new) in gunner.hunt(tick, &contacts) {
+                if player == 0 {
+                    heading = new;
+                }
+            }
+            let next = [at[0] + heading.cos() * 0.05, at[1] + heading.sin() * 0.05, 0.0];
+            if picture.at(next[0].floor() as i32, next[1].floor() as i32) == '#' {
+                blocked += 1;
+            } else {
+                at = next;
+            }
+            if (at[0] - enemy[0]).hypot(at[1] - enemy[1]) < 1.5 {
+                arrived = Some(tick);
+                break;
+            }
+        }
+        assert_eq!(blocked, 0, "never walked into the wall");
+        let tick = arrived.expect("the hunter reaches their target");
+        assert!(tick < 30 * 20, "and in a reasonable time: {} s", tick / 30);
+    }
+
+    #[test]
+    fn a_hunter_with_no_path_to_their_target_gets_the_straight_heading() {
+        // the wall runs the whole way across: the two are on different stretches of ground
+        let (picture, nav) = drawn(&["A..#..B", "...#...", "...#..."]);
+        let contacts = [contact(picture.find('A'), 0), contact(picture.find('B'), 1)];
+        let mut gunner = Gunner::new(2, 5.0, 2.0, true, 13).with_hunt_range(50.0).with_nav(nav);
+        let headings: Vec<(u16, f32)> = (0..30).flat_map(|tick| gunner.hunt(tick, &contacts)).collect();
+        let zero: Vec<f32> = headings.iter().filter(|(p, _)| *p == 0).map(|(_, h)| *h).collect();
+        assert_eq!(zero, vec![0.0], "as before: straight at the enemy, east");
+    }
+
+    #[test]
+    fn a_hunter_off_the_grid_gets_the_straight_heading() {
+        let (picture, nav) = drawn(&["A.....B"]);
+        // 0 stands somewhere the map has no ground, to the north-east of 1 (at the far end)
+        let off = [3.5, 40.0, 0.0];
+        let contacts = [contact(off, 0), contact(picture.find('B'), 1)];
+        let mut gunner = Gunner::new(2, 5.0, 2.0, true, 14).with_hunt_range(100.0).with_nav(nav);
+        let headings: Vec<(u16, f32)> = (0..30).flat_map(|tick| gunner.hunt(tick, &contacts)).collect();
+        let (to, from) = (picture.find('B'), off);
+        let straight = (to[1] - from[1]).atan2(to[0] - from[0]);
+        assert!(headings.iter().any(|(p, h)| *p == 0 && (*h - straight).abs() < 1e-6), "{headings:?}");
+    }
+
+    #[test]
+    fn the_same_seed_gives_the_same_headings_with_a_grid() {
+        let rows = ["A.......", ".####...", "...#.##.", ".#...#B."];
+        let run = || {
+            let (picture, nav) = drawn(&rows);
+            let contacts = [contact(picture.find('A'), 0), contact(picture.find('B'), 1)];
+            let mut gunner = Gunner::new(2, 3.0, 2.0, true, 15).with_hunt_range(50.0).with_nav(nav);
+            (0..300).flat_map(|tick| gunner.hunt(tick, &contacts)).collect::<Vec<_>>()
+        };
+        assert_eq!(run(), run());
     }
 
     #[test]

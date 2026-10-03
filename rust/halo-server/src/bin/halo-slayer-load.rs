@@ -20,8 +20,13 @@
 //!   a real client that joins afterwards is player `players`).
 //! - `--shots 0.5`: shots a second each player with a target in range fires, `--range 25`
 //!   world units; `--shots 0` for a match nobody fights.
-//! - `--hunt 150`: a player with nobody in range walks towards the nearest enemy within this
-//!   many world units (0: they wander), so that a crowd keeps meeting.
+//! - `--hunt 400`: a player with nobody in range walks towards the nearest enemy within this
+//!   many world units (0: they wander), so that a crowd keeps meeting. The default is wider than a
+//!   map (with 150, two crowds that ended up farther apart than that stood still for good).
+//! - `--nav-cell 0.5`: hunters are steered over a grid of the map's walkable ground, built once
+//!   from its collision data with squares this many world units wide, along a path round walls and
+//!   cliffs to the enemy (or the guest), and no longer straight at it; where there is no path, or
+//!   a hunter stands off the grid, they walk straight. 0: no grid, straight at the target.
 //! - `--guest 500`: the id of a player (the real game, which joins after the simulated
 //!   players and is player `--players`) whom everyone else walks to and nobody shoots, so
 //!   that the crowd is around the game and in its view.
@@ -52,6 +57,7 @@ use halo_match_driver::walkers::Walkers;
 use halo_match_driver::{FighterRow, MatchClient, PlayerClient, SeenTick, StandingRow};
 use halo_server::admin::Admin;
 use halo_server::loadgen::{Contact, Gunner};
+use halo_server::nav::{Nav, DEFAULT_CELL};
 use halo_server::root::Root;
 use halo_sim::combat::HitReport;
 use halo_sim::wire::encode_hits;
@@ -74,7 +80,9 @@ fn main() {
     let shots: f32 = get("shots", "0.5").parse().unwrap_or_else(|_| fail("--shots is a number"));
     let range: f32 = get("range", "25").parse().unwrap_or_else(|_| fail("--range is a number"));
     let guest: Option<u16> = args.get("guest").map(|g| g.parse().unwrap_or_else(|_| fail("--guest is a player id")));
-    let hunt: f32 = get("hunt", "150").parse().unwrap_or_else(|_| fail("--hunt is a number"));
+    let nav_cell: f32 =
+        get("nav-cell", &DEFAULT_CELL.to_string()).parse().unwrap_or_else(|_| fail("--nav-cell is a number"));
+    let hunt: f32 = get("hunt", "400").parse().unwrap_or_else(|_| fail("--hunt is a number"));
     let loss: f32 = get("loss", "0").parse().unwrap_or_else(|_| fail("--loss is a number"));
     let delay_ms: u64 = get("delay-ms", "0").parse().unwrap_or_else(|_| fail("--delay-ms is a number"));
     let window_secs: u32 = get("window", "30").parse().unwrap_or_else(|_| fail("--window is a number"));
@@ -110,6 +118,17 @@ fn main() {
         halo_map::HaloMap::from_path(maps.join(format!("{}.map", row.map))).unwrap_or_else(|e| fail(&e.to_string()));
     let anchors: Vec<[f32; 3]> = halo_map.player_starts.iter().map(|s| s.position).collect();
     let map = MapData::from(halo_map);
+    let nav = (hunt > 0.0 && nav_cell > 0.0).then(|| {
+        let built = Instant::now();
+        let nav = Nav::from_map(&map, nav_cell);
+        say(&format!(
+            "walkable grid of {}: {} squares of {nav_cell} wu in {:.1} s",
+            row.map,
+            nav.len(),
+            built.elapsed().as_secs_f64()
+        ));
+        std::sync::Arc::new(nav)
+    });
     let (mut walkers, _spawn) = Walkers::new(map, &anchors, players, 7);
 
     let watcher = MatchClient::try_connect_as(&url, &row.database, None).unwrap_or_else(|e| fail(&e));
@@ -147,6 +166,9 @@ fn main() {
     if let Some(guest) = guest {
         gunner = gunner.with_guest(guest);
     }
+    if let Some(nav) = nav {
+        gunner = gunner.with_nav(nav);
+    }
     let mut seen_ticks: Vec<(u64, i64)> = Vec::new();
     // refused moves, by how long after the player spawned they were refused (ticks): 0-3, 4-30, later
     let mut refused_after_spawn = [0u64; 3];
@@ -159,6 +181,8 @@ fn main() {
     let mut ended_at: Option<Instant> = None;
     let started = Instant::now();
     let mut last_progress = Instant::now();
+    // where each player was at the last progress line, for how many have moved since
+    let mut moved_from: HashMap<u16, [f32; 2]> = HashMap::new();
     watcher.discard_ticks();
     loop {
         let Some(mut seen) = watcher.next_tick(Duration::from_secs(10)) else {
@@ -234,7 +258,11 @@ fn main() {
         }
         if last_progress.elapsed() >= Duration::from_secs(10) {
             last_progress = Instant::now();
-            progress(&watcher, started.elapsed(), fired, gunner.engaged());
+            progress(&watcher, started.elapsed(), fired, gunner.engaged(), &mut moved_from);
+            let (along, straight) = gunner.course_counts();
+            say(&format!(
+                "      courses along the grid's paths {along}, straight at the target for want of a path {straight}"
+            ));
         }
     }
     let finished = Instant::now();
@@ -383,7 +411,13 @@ fn impact_damage(map: &MapData, weapon: u16) -> Option<u16> {
     map.combat.weapon(weapon)?.triggers.iter().find_map(|t| t.projectile.as_ref()?.impact_damage.map(|d| d.tag_index))
 }
 
-fn progress(watcher: &MatchClient, elapsed: Duration, fired: u64, engaged: usize) {
+fn progress(
+    watcher: &MatchClient,
+    elapsed: Duration,
+    fired: u64,
+    engaged: usize,
+    moved_from: &mut HashMap<u16, [f32; 2]>,
+) {
     let (Some(marker), Some(game)) = (watcher.marker(), watcher.game()) else { return };
     let alive = watcher.standings().values().filter(|s| s.state == 0).count();
     let armed = watcher.fighters().values().filter(|f| f.weapon_0 != u16::MAX).count();
@@ -401,6 +435,14 @@ fn progress(watcher: &MatchClient, elapsed: Duration, fired: u64, engaged: usize
     let mut busiest: Vec<_> = squares.into_iter().collect();
     busiest.sort_by_key(|(_, (r, b))| std::cmp::Reverse(r + b));
     say(&format!("      busiest squares {:?}", &busiest[..busiest.len().min(5)]));
+    // (how many of the living have moved at least a world unit since the last line)
+    let moving = watcher
+        .players()
+        .values()
+        .filter(|p| moved_from.get(&p.id).is_some_and(|f| (p.x - f[0]).hypot(p.y - f[1]) >= 1.0))
+        .count();
+    *moved_from = watcher.players().values().map(|p| (p.id, [p.x, p.y])).collect();
+    say(&format!("      moved at least a unit in the last 10 s: {moving}"));
     say(&format!(
         "{:>4.0} s  tick {}  players {}  alive {alive}  armed {armed}  shooting at someone {engaged}  red {} blue {}  hits sent {fired}  refused {}  moves refused {}",
         elapsed.as_secs_f64(),
