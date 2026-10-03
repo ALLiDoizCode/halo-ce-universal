@@ -73,24 +73,45 @@ fn assert_matches_mirror(walkers: &Walkers, seen: &SeenTick, rejects: &BTreeMap<
 
 /// Run `ticks` ticks the way the gateway will: when a tick is complete,
 /// submit the next one's inputs as one batch, and compare the tables with the
-/// local copy every time. Returns the markers seen.
-fn drive(client: &MatchClient, walkers: &mut Walkers, ticks: usize) -> Vec<SeenTick> {
+/// local copy every time. Returns the markers seen. With `slow`, some batches
+/// are held back until the tick they were meant for has run.
+///
+/// A batch is not always in the tick after the one it was sent on: when it
+/// lands after that tick has run (a busy machine), the module judges it at the
+/// tick after, and two batches that wait for the same tick are collapsed to
+/// each player's newest input (`collapse_batches`). The local copy applies
+/// each batch at the tick the module took it, which the rows say: a tick that
+/// took inputs stamped the players' `updated_tick` with its number.
+fn drive(client: &MatchClient, walkers: &mut Walkers, ticks: usize, slow: bool) -> Vec<SeenTick> {
     let mut rejects: BTreeMap<u16, u64> = BTreeMap::new();
     let mut accepted: Vec<u16> = Vec::new();
     let mut all = Vec::new();
+    // batches sent and not yet taken, each with the last tick the subscriber had seen when it was sent
+    // (a batch sent after tick T was seen cannot be in tick T or before)
+    let mut waiting: Vec<(u64, Vec<PlayerInput>)> = Vec::new();
     for _ in 0..ticks {
         let seen = client.next_tick(WAIT).expect("a tick");
-        assert_matches_mirror(walkers, &seen, &rejects, &accepted);
-        let inputs = walkers.next_inputs();
-        let events = walkers.apply(&inputs, seen.marker.tick + 1);
+        let tick = seen.marker.tick;
         accepted.clear();
-        for event in events {
-            match event {
-                Event::MoveAccepted { player } => accepted.push(player),
-                Event::MoveRejected { player, .. } => *rejects.entry(player).or_default() += 1,
+        let could_be_in = waiting.iter().take_while(|(after, _)| *after < tick).count();
+        if could_be_in > 0 && seen.players.values().any(|p| p.updated_tick == tick) {
+            let taken: Vec<Vec<PlayerInput>> = waiting.drain(..could_be_in).map(|(_, batch)| batch).collect();
+            for event in walkers.apply(&halo_sim::wire::collapse_batches(taken), tick) {
+                match event {
+                    Event::MoveAccepted { player } => accepted.push(player),
+                    Event::MoveRejected { player, .. } => *rejects.entry(player).or_default() += 1,
+                }
             }
         }
+        assert_matches_mirror(walkers, &seen, &rejects, &accepted);
+        let inputs = walkers.next_inputs();
+        if slow && tick % 7 == 3 {
+            // (longer than a tick: the batch misses the tick it was for)
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        let sent_after = client.marker().map_or(tick, |m| m.tick.max(tick));
         client.submit(&inputs);
+        waiting.push((sent_after, inputs));
         all.push(seen);
     }
     all
@@ -107,7 +128,7 @@ fn ticks_hold_30_hz_with_one_batch_per_tick_and_the_tables_match_a_local_copy() 
     let before = server.tick_metrics();
     client.start();
 
-    let seen = drive(&client, &mut walkers, 90);
+    let seen = drive(&client, &mut walkers, 90, false);
 
     // the tick numbers are consecutive and the server's own clock says 30 Hz
     for pair in seen.windows(2) {
@@ -130,6 +151,20 @@ fn ticks_hold_30_hz_with_one_batch_per_tick_and_the_tables_match_a_local_copy() 
 }
 
 #[test]
+fn batches_that_miss_their_tick_are_judged_at_the_next_and_the_tables_still_match_a_local_copy() {
+    let Some(server) = start_server("late") else { return };
+    let client = server.connect("late");
+    let map = flat_floor_map();
+    client.load_map(map.to_bytes()).unwrap();
+    let (mut walkers, spawn) = Walkers::new(map, &[[0.0, 0.0, 0.0]], 5, 1);
+    client.add_players(&spawn).unwrap();
+    client.start();
+
+    let seen = drive(&client, &mut walkers, 60, true);
+    assert_eq!(seen.last().unwrap().marker.rejected_total, 0, "a late move is not a fast one");
+}
+
+#[test]
 fn rejected_moves_are_counted_and_visible_per_player() {
     let Some(server) = start_server("rejects") else { return };
     let client = server.connect("rejects");
@@ -142,10 +177,10 @@ fn rejected_moves_are_counted_and_visible_per_player() {
     client.start();
 
     const ROUNDS: u64 = 4;
-    let mut last_submitted_at = 0;
-    for _ in 0..ROUNDS {
-        let seen = client.next_tick(WAIT).unwrap();
-        last_submitted_at = seen.marker.tick;
+    // (each round's batch is waited for before the next is sent: two batches that wait for the same
+    // tick are collapsed to each player's newest input, so a busy machine would count fewer rounds)
+    let mut seen = client.next_tick(WAIT).unwrap();
+    for round in 0..ROUNDS {
         let p = |id: u16| seen.players[&id].clone();
         let inputs = [
             // 0 stays put, which is valid
@@ -158,9 +193,14 @@ fn rejected_moves_are_counted_and_visible_per_player() {
             PlayerInput { player: 7, position: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, flags: 0 },
         ];
         client.submit(&inputs);
+        // the batch is taken by some tick: the one that counts its three rejections
+        seen = loop {
+            let next = client.next_tick(WAIT).unwrap();
+            if next.marker.rejected_total >= 3 * (round + 1) {
+                break next;
+            }
+        };
     }
-    // the last batch is applied by the next tick
-    let seen = client.wait_for_tick(last_submitted_at + 1, WAIT);
     let rows = &seen.players;
 
     assert_eq!(rows[&0].rejected_moves, 0);
@@ -256,7 +296,7 @@ fn five_hundred_players_on_blood_gulch_stay_in_step_with_a_local_copy() {
     let before = server.tick_metrics();
     client.start();
 
-    let seen = drive(&client, &mut walkers, 60);
+    let seen = drive(&client, &mut walkers, 60, false);
     assert_eq!(seen.last().unwrap().marker.players, 500);
     let used = server.tick_metrics().since(&before);
     println!(
@@ -282,7 +322,7 @@ fn five_hundred_acrobats_on_blood_gulch_jump_fall_and_crouch_without_one_move_re
     client.add_players(&spawn).unwrap();
     client.start();
 
-    let seen = drive(&client, &mut walkers, 900);
+    let seen = drive(&client, &mut walkers, 900, false);
     let last = seen.last().unwrap();
     let airborne = last.players.values().filter(|p| p.flags & halo_sim::FLAG_AIRBORNE != 0).count();
     let crouched = last.players.values().filter(|p| p.flags & halo_sim::FLAG_CROUCHED != 0).count();
