@@ -245,6 +245,9 @@ impl Planner {
         self.credit = (self.credit + self.per_tick).min(self.per_tick * 2.0);
         let cfg = self.config;
         let near2 = cfg.near_radius * cfg.near_radius;
+        // from this squared distance on, the weight is the floor: (near_radius / distance)^1.5 <= far_floor
+        // (about 58 wu); half of a crowd is out there, and need not pay for a square root
+        let floor2 = if cfg.far_floor > 0.0 { near2 * cfg.far_floor.powf(-4.0 / 3.0) } else { f32::INFINITY };
         let cone = (cfg.facing_degrees.to_radians()).cos();
         let cone2 = cone * cone;
         let (sy, cy) = me.yaw.sin_cos();
@@ -272,6 +275,8 @@ impl Planner {
             let d2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
             let mut weight = if d2 <= near2 {
                 1.0
+            } else if d2 >= floor2 {
+                cfg.far_floor
             } else {
                 // (near_radius / distance)^1.5
                 let q = cfg.near_radius / d2.sqrt();
@@ -324,8 +329,10 @@ impl Planner {
                 self.scratch[*i].overdue = false;
             }
         }
+        let mut near_wanting = 0;
         for r in &mut self.scratch {
             r.urgent |= r.overdue;
+            near_wanting += (r.near && !r.urgent) as usize;
         }
 
         let take = affordable(self.credit, self.scratch.len());
@@ -333,7 +340,7 @@ impl Planner {
         // the highest accumulated priority first. Those beyond it compete with everyone else.
         let share = (cfg.near_share.clamp(0.0, 1.0) * take as f32).round() as usize;
         let wants = |r: &Ranked| r.near && !r.urgent;
-        if self.scratch.iter().filter(|r| wants(r)).count() <= share {
+        if near_wanting <= share {
             // (the usual case: all of them fit)
             for r in &mut self.scratch {
                 r.in_share = wants(r);
