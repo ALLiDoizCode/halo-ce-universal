@@ -257,8 +257,8 @@ them, and tells the gateway where they are.
 The server owns them: the game's player is only where the server has put them.
 The match module (`rust/halo-sim`'s `rules`) spawns a player who joins at a
 starting location of the map by the engine's rules, or, when none is free,
-tells the player which respawn wave they are waiting for and spawns them in
-it. The match's public tables `standing` (each player's score, deaths, whether
+beside one, at once; only a player who can be put in neither place is told which
+respawn wave they are waiting for and spawned in it. The match's public tables `standing` (each player's score, deaths, whether
 they are in the world and when they will be) and `game_state` (the game, its
 limits, the team scores and how it ended) come over the direct connection, as
 the roster does.
@@ -301,9 +301,8 @@ leaves the match and joins it again, to see the unit go and come back. With
 `HALO_SCREENSHOT_DIR` and `HALO_SCREENSHOT_EVERY` the game saves frames, and
 `HALO_HEADLESS_LOG` keeps its log. Without the data, it skips.
 A second test (`--test rules_headless`) runs a Slayer match of `halo-server` on
-the real Blood Gulch with 40 simulated players beside the game: the game is told
-to wait for a wave, spawned in it, killed and respawned by the server, and sees
-the match end at its score limit with the final scoreboard and the rotation move
+the real Blood Gulch with 40 simulated players beside the game: the game is
+spawned at once, killed and respawned by the server, and sees the match end at its score limit with the final scoreboard and the rotation move
 on.
 The library's own tests (`rust/halo-client/tests/boundary.rs` and
 `servers.rs`) need only `HALO_STDB_BIN`.

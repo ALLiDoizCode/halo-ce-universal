@@ -82,7 +82,8 @@ seconds = 600                    # the time limit: the match ends after this lon
                                  # (without it, the original's: 15 for slayer, 50 for team_slayer)
 # respawn_seconds = 5            # seconds a dead player waits (never under 3)
 # suicide_penalty_seconds = 10   # seconds more after a suicide or a death nobody caused
-# wave_seconds = 5               # when no starting location is free, players spawn in waves this far apart
+# wave_seconds = 5               # a player who can be put neither at a free starting location nor beside one
+                                 # waits for a wave, this far apart (the fallback: most respawns are at once)
 
 [[server.rotation]]
 map = "sidewinder"
