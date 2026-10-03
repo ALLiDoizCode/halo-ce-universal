@@ -53,7 +53,9 @@ use halo_sim::PlayerInput;
 use module_bindings::*;
 use spacetimedb_sdk::{Compression, DbContext, Table, TableWithPrimaryKey};
 
-pub use module_bindings::{FighterRow, GameStateRow, MatchTick, PlayerRow, RosterRow, Seat, StandingRow};
+pub use module_bindings::{
+    FighterRow, GameStateRow, ItemRow, KitRow, MatchTick, PlayerRow, PowerupRow, RosterRow, Seat, StandingRow,
+};
 
 pub fn now_us() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as i64
@@ -138,6 +140,9 @@ impl MatchClient {
                 "SELECT * FROM standing",
                 "SELECT * FROM fighter",
                 "SELECT * FROM game_state",
+                "SELECT * FROM item",
+                "SELECT * FROM powerup",
+                "SELECT * FROM kit",
             ]);
         conn.run_threaded();
         applied
@@ -150,6 +155,21 @@ impl MatchClient {
     /// the table now, by player id.
     pub fn fighters(&self) -> BTreeMap<u16, FighterRow> {
         self.conn.db.fighter().iter().map(|f| (f.player, f)).collect()
+    }
+
+    /// The items on the ground in the subscriber's copy of the table now, by id.
+    pub fn items(&self) -> BTreeMap<u32, ItemRow> {
+        self.conn.db.item().iter().map(|i| (i.id, i)).collect()
+    }
+
+    /// The camouflaged players and until which match tick, likewise.
+    pub fn powerups(&self) -> BTreeMap<u16, PowerupRow> {
+        self.conn.db.powerup().iter().map(|p| (p.player, p)).collect()
+    }
+
+    /// The rounds the server holds for each player, likewise.
+    pub fn kits(&self) -> BTreeMap<u16, KitRow> {
+        self.conn.db.kit().iter().map(|k| (k.player, k)).collect()
     }
 
     /// What a player carries (tag indices; 65535 for no weapon), for tests.
@@ -380,6 +400,19 @@ impl PlayerClient {
     pub fn report_hits(&self, hits: &[halo_sim::combat::HitReport]) -> Result<(), String> {
         let batch = halo_sim::wire::encode_hits(hits);
         call_reducer("report_hits", |cb| self.conn.reducers.report_hits_then(batch, cb))
+    }
+
+    /// Press the action button as this player, with the weapon slot in hand,
+    /// and wait for the module to take the call (the next tick gives the player what
+    /// they reach: see the module's `use_item`).
+    pub fn use_item(&self, slot: u8) -> Result<(), String> {
+        call_reducer("use_item", |cb| self.conn.reducers.use_item_then(slot, cb))
+    }
+
+    /// Say which rounds this player's weapons have (loaded and in reserve, slot 0 then slot 1).
+    pub fn report_ammo(&self, rounds: [i16; 4]) -> Result<(), String> {
+        let bytes: Vec<u8> = rounds.iter().flat_map(|r| r.to_le_bytes()).collect();
+        call_reducer("report_ammo", |cb| self.conn.reducers.report_ammo_then(bytes, cb))
     }
 
     /// This player's seat in the subscriber's copy of the table, if there is one.

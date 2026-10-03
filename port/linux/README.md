@@ -194,7 +194,7 @@ the setting for one start of the game. It has priority over the file.
 | `debug.gpu_skip_vertex_shaders`, `debug.gpu_debug_expression`, `debug.gpu_debug_flat`, `debug.gpu_debug_texture0` | off | `HALO_GPU_SKIP_VS`, `HALO_GPU_DEBUG_EXPR`, `HALO_GPU_DEBUG_FLAT`, `HALO_GPU_DEBUG_T0` | Tools to find problems in the graphics: skip the draws of a vertex shader, or replace the output of all pixel shaders with a GLSL expression (for example `t0.rgb`). |
 | `debug.network_test`, `debug.network_test_start`, `debug.network_test_kill`, `debug.network_test_score`, `debug.network_test_shoot`, `debug.network_test_vehicle`, `debug.network_test_pickup`, `debug.network_test_pickup_weapon`, `debug.test_input` | off | `HALO_NETWORK_TEST`, `HALO_NETWORK_TEST_START`, `HALO_NETWORK_TEST_KILL`, `HALO_NETWORK_TEST_SCORE`, `HALO_NETWORK_TEST_SHOOT`, `HALO_NETWORK_TEST_VEHICLE`, `HALO_NETWORK_TEST_PICKUP`, `HALO_NETWORK_TEST_PICKUP_WEAPON`, `HALO_TEST_INPUT` | Automatic tests of system link (`game/network_test.c`). Refer to `NETCODE.md`. |
 | `debug.scenario`, `debug.scenario_trace` | `""` | `HALO_SCENARIO`, `HALO_SCENARIO_TRACE` | The comparison harness: plays a scenario file with the first player of a network test game, alone, and writes a trace of the player's state. `tools/scenario_harness.py` runs it. Refer to `tools/scenarios/README.md`. |
-| `large.map`, `large.gateway`, `large.spacetimedb`, `large.database`, `large.root`, `large.name`, `large.log_players`, `large.scoreboard`, `large.autofire` | `""`, `127.0.0.1:7777`, `http://127.0.0.1:3000`, `""`, `""`, `""`, `false`, `false`, `false` | `HALO_LARGE_MAP`, `HALO_LARGE_GATEWAY`, `HALO_LARGE_SPACETIMEDB`, `HALO_LARGE_DATABASE`, `HALO_LARGE_ROOT`, `HALO_LARGE_NAME`, `HALO_LARGE_LOG`, `HALO_LARGE_SCOREBOARD`, `HALO_LARGE_AUTOFIRE` | The large-scale mode. Refer to "Large-scale mode". |
+| `large.map`, `large.gateway`, `large.spacetimedb`, `large.database`, `large.root`, `large.name`, `large.log_players`, `large.scoreboard`, `large.autofire`, `large.autouse` | `""`, `127.0.0.1:7777`, `http://127.0.0.1:3000`, `""`, `""`, `""`, `false`, `false`, `false`, `0` | `HALO_LARGE_MAP`, `HALO_LARGE_GATEWAY`, `HALO_LARGE_SPACETIMEDB`, `HALO_LARGE_DATABASE`, `HALO_LARGE_ROOT`, `HALO_LARGE_NAME`, `HALO_LARGE_LOG`, `HALO_LARGE_SCOREBOARD`, `HALO_LARGE_AUTOFIRE`, `HALO_LARGE_AUTOUSE` | The large-scale mode. Refer to "Large-scale mode". |
 | `debug.network_latency`, `debug.network_loss` | `0` | `HALO_NETWORK_LATENCY`, `HALO_NETWORK_LOSS` | The game holds all the data that it receives for this number of milliseconds, and ignores this percentage of the datagrams. Use these settings to test the netcode as on the internet. |
 | `debug.telnet_console`, `debug.telnet_console_port` | `false`, `2323` | `HALO_TELNET_CONSOLE`, `HALO_TELNET_CONSOLE_PORT` | The game listens on 127.0.0.1, on this port, for a script console (connect with telnet). The console has no password, so only this computer can reach it. |
 
@@ -347,6 +347,49 @@ shoots a simulated player until it dies; simulated players shoot the game's
 player (shield down, recharge, death, respawn); a bystander watches one
 simulated player kill another. Run it as `headless` above, with
 `--test combat_headless -- --test-threads=1`.
+
+### Items and pickups
+
+The server owns the items on the ground (`halo_sim::items`, `halo_sim::pickups`),
+and the game only shows them. The map's netgame equipment places them: each
+placement that lists the game makes one of its item collection's items (by
+weight) when the match's time is a multiple of its period (its own spawn time,
+else its collection's, else 30 seconds; the first tick of a match is time 0), and
+takes the one nobody took away as it does. Overshield, active camouflage, health
+packs and the weapons are made; the grenades are the grenades' ticket's.
+
+- The public table `item` has a row for each item: where it is and how it moves
+  (world units a tick) as of a tick, whether it is at rest, which placement made
+  it, a weapon's rounds. A row is written when an item appears, when it comes to
+  rest, when it loses rounds and when it goes: not while it falls. Where a
+  falling item is in between is a function of its row, which the server's tick
+  and every client work out with the same code (`Item::advanced_to`, the
+  engine's `item_update` against the map's collision data), so the weapon a
+  player sees fall is the server's, to the bit; the library's `halo_large_items`
+  does it once a frame. The public tables `powerup` (who is camouflaged, and
+  until which tick) and `kit` (the rounds a player's weapons have: a client
+  subscribes to its own row) are small.
+- The game makes an engine object for each item (`large_mode_update_items`),
+  at rest as far as the engine is concerned, and puts it where the library says;
+  the engine's own item spawning, purging and pickups are off in the mode
+  (`game_engine_update_item_spawn`, `game_engine_update_purge`,
+  `players_decide_pickups`), and an item the engine made that the server did not
+  (the weapons of a unit that was killed) is swept away.
+- The player's action button is a press the game tells the server
+  (`halo_large_use`, the reliable reducer `use_item`, with the weapon slot in
+  hand); the server decides what the player takes: nearest first, and one gets
+  an item, whoever reaches for it on the same tick (the nearer, then the lower
+  id). Powerups, ammunition of a weapon held and a weapon with nothing in hand
+  need no press. The weapons the player carries are the server's
+  (`large_mode_sync_weapons`); the rounds the engine counts as it fires are told
+  to the server every so often (`halo_large_report_ammo`).
+- A dead player puts down every weapon and loses their camouflage; a weapon
+  swapped for another is put down too. Dropped weapons last 30 seconds.
+- `large.autouse` (`HALO_LARGE_AUTOUSE`) presses the action button twice a
+  second from that many seconds after the weapon is in hand: the tests use it.
+
+`rust/halo-client/tests/items_headless.rs` runs two real games (`headless`
+above, with `--test items_headless -- --test-threads=1`).
 
 ### Pick a server from the list
 

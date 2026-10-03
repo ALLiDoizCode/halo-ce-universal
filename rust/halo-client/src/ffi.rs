@@ -17,12 +17,16 @@
 //! crosses into C: a call that would panic returns 0 and records the reason
 //! for [`halo_large_error`].
 
+use std::collections::BTreeMap;
 use std::ffi::{c_char, CStr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use halo_map::collision::TEST_FRONT_FACING;
+use halo_sim::items::{Ammo, Flight, Item};
 use halo_sim::walk::Controls;
+use halo_sim::MapData;
 
 use crate::browser::{Browser, ServerEntry};
 use crate::identity::IdentityFile;
@@ -107,6 +111,7 @@ pub unsafe extern "C" fn halo_large_start(
             return 0;
         };
         // (the old session's drop joins its threads: not under the lock)
+        forget_items();
         let old = {
             let mut g = global();
             g.frame.clear();
@@ -133,6 +138,7 @@ pub unsafe extern "C" fn halo_large_start(
 #[no_mangle]
 pub extern "C" fn halo_large_stop() {
     guard((), || {
+        forget_items();
         let old = {
             let mut g = global();
             g.frame.clear();
@@ -693,6 +699,268 @@ pub unsafe extern "C" fn halo_large_hits(out: *mut u32) -> u32 {
         unsafe { std::slice::from_raw_parts_mut(out, 2) }
             .copy_from_slice(&[counters.hits_reported as u32, counters.hit_calls as u32]);
         1
+    })
+}
+
+// ---------- items and pickups
+//
+// An item is a row the server wrote when it appeared, and again when it came to rest; where it is
+// between (and so a weapon that falls) is worked out here from the row, with the same code the
+// server's tick runs (`halo_sim::items::Item::advanced_to`), so the fall that is drawn is the
+// server's, to the bit, and no row is sent a tick for it.
+
+/// An item as the game is to draw it this tick.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FrozenItem {
+    id: u32,
+    tag: u16,
+    resting: bool,
+    position: [f32; 3],
+    /// The way the surface it lies on faces (up for one in the air).
+    normal: [f32; 3],
+    /// Ticks since the row was written, for a falling item's spin.
+    age: u32,
+    loaded: i16,
+    reserve: i16,
+}
+
+#[derive(Default)]
+struct ItemsView {
+    frozen: Vec<FrozenItem>,
+    /// Each item's row and where it was last worked out to be, so that a falling item is stepped from
+    /// where it was a frame ago and not from where it was dropped: while the row is the same.
+    flights: BTreeMap<u32, (Item, Item)>,
+    normals: BTreeMap<u32, [f32; 3]>,
+}
+
+static ITEMS: Mutex<ItemsView> =
+    Mutex::new(ItemsView { frozen: Vec::new(), flights: BTreeMap::new(), normals: BTreeMap::new() });
+
+fn items_view() -> std::sync::MutexGuard<'static, ItemsView> {
+    ITEMS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Forget what was frozen of the last session's items (a new session).
+fn forget_items() {
+    let mut v = items_view();
+    v.frozen.clear();
+    v.flights.clear();
+    v.normals.clear();
+}
+
+/// What a surface looks like under a resting item: its normal, by a short ray down.
+fn normal_under(map: &MapData, at: [f32; 3]) -> [f32; 3] {
+    map.collision
+        .test_vector(TEST_FRONT_FACING, [at[0], at[1], at[2] + 0.2], [0.0, 0.0, -0.5], 1.0)
+        .and_then(|hit| usize::try_from(hit.surface_index).ok())
+        .and_then(|s| map.collision.surface_plane(s))
+        .map_or([0.0, 0.0, 1.0], |plane| plane.n)
+}
+
+/// Freeze the items on the ground as they are at the server's tick now (for
+/// [`halo_large_item`] to read): each item's row, with a falling one stepped
+/// from where it was dropped to now. Returns how many there are (0 before the
+/// match has said, or the map is in), and the tick they are at in `tick`.
+///
+/// # Safety
+/// `tick` points to a writable `unsigned long`.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_items(tick: *mut u32) -> u32 {
+    guard(0, || {
+        let g = global();
+        let (Some(session), Some(map)) = (&g.session, g.local.as_ref().and_then(|l| l.map())) else { return 0 };
+        let now = match session.newest_tick() {
+            0 => session.server_tick(),
+            newest => newest,
+        };
+        let mut v = items_view();
+        v.frozen.clear();
+        let items = session.items();
+        v.flights.retain(|id, _| items.iter().any(|i| i.id == *id));
+        v.normals.retain(|id, _| items.iter().any(|i| i.id == *id));
+        for row in items {
+            let (current, flight) = if row.resting {
+                (row, Flight::Rested)
+            } else {
+                // from where it was a frame ago, if the row has not changed
+                let start = match v.flights.get(&row.id) {
+                    Some((known, at)) if *known == row && at.tick <= u64::from(now) => *at,
+                    _ => row,
+                };
+                let worked_out = start.advanced_to(map, u64::from(now));
+                v.flights.insert(row.id, (row, worked_out.0));
+                worked_out
+            };
+            if flight == Flight::Lost {
+                continue;
+            }
+            let normal = if current.resting {
+                *v.normals.entry(row.id).or_insert_with(|| normal_under(map, current.position))
+            } else {
+                [0.0, 0.0, 1.0]
+            };
+            v.frozen.push(FrozenItem {
+                id: row.id,
+                tag: row.tag,
+                resting: current.resting,
+                position: current.position,
+                normal,
+                age: u64::from(now).saturating_sub(row.tick) as u32,
+                loaded: row.loaded,
+                reserve: row.reserve,
+            });
+        }
+        if !tick.is_null() {
+            unsafe { *tick = now };
+        }
+        v.frozen.len() as u32
+    })
+}
+
+/// One of the items [`halo_large_items`] froze: `info` has six
+/// `unsigned long`s,
+///
+/// | index | |
+/// |---|---|
+/// | 0 | the item's id (the server's: it is the item for as long as it lasts) |
+/// | 1 | the tag index of its weapon or equipment: see [`halo_large_item_name`] |
+/// | 2 | 1 when it is at rest, 0 while it falls |
+/// | 3 | a weapon's rounds in the magazine |
+/// | 4 | a weapon's rounds in reserve |
+/// | 5 | 1 for a weapon, 2 for an equipment |
+///
+/// and `out` has seven `float`s: its position (world units), the normal of the
+/// surface it lies on, and for one that falls, how many ticks since it began
+/// (to turn it by). Returns 1, or 0 for an index past the last.
+///
+/// # Safety
+/// `info` points to six writable `unsigned long`s and `out` to seven `float`s.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_item(index: u32, info: *mut u32, out: *mut f32) -> u32 {
+    guard(0, || {
+        if info.is_null() || out.is_null() {
+            return 0;
+        }
+        let g = global();
+        let v = items_view();
+        let Some(item) = v.frozen.get(index as usize) else { return 0 };
+        let kind = match g.local.as_ref().and_then(|l| l.map()).and_then(|m| m.items.def(item.tag)) {
+            Some(d) if d.is_weapon => 1,
+            Some(_) => 2,
+            None => 0,
+        };
+        unsafe {
+            std::slice::from_raw_parts_mut(info, 6).copy_from_slice(&[
+                item.id,
+                u32::from(item.tag),
+                item.resting as u32,
+                item.loaded.max(0) as u32,
+                item.reserve.max(0) as u32,
+                kind,
+            ]);
+            std::slice::from_raw_parts_mut(out, 7).copy_from_slice(&[
+                item.position[0],
+                item.position[1],
+                item.position[2],
+                item.normal[0],
+                item.normal[1],
+                item.normal[2],
+                item.age as f32,
+            ]);
+        }
+        1
+    })
+}
+
+/// The name of a weapon or equipment of the map by its tag index, as the tags
+/// have it (`powerups\over shield.eqip`), NUL-terminated and cut to `size`:
+/// what the engine finds the tag by, with the extension taken off. Returns its
+/// length, or 0 when the map is not in yet or has no such item.
+///
+/// # Safety
+/// `buffer` points to `size` writable `char`s.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_item_name(tag_index: u32, buffer: *mut c_char, size: u32) -> u32 {
+    guard(0, || {
+        let g = global();
+        let Some(map) = g.local.as_ref().and_then(|l| l.map()) else { return 0 };
+        let Some(def) = u16::try_from(tag_index).ok().and_then(|t| map.items.def(t)) else { return 0 };
+        unsafe { copy_text(&def.name, buffer, size) }
+    })
+}
+
+/// The player pressed the action button, with the weapon slot (0 or 1) they
+/// have in hand: the server gives them the weapon they reach, as a second or in
+/// swap for the one in hand, if its rules say so. Returns 1 when the call is on
+/// its way, 0 without a session or a seat.
+#[no_mangle]
+pub extern "C" fn halo_large_use(slot: u32) -> u32 {
+    guard(0, || match &global().session {
+        Some(session) => session.use_item((slot & 1) as u8) as u32,
+        None => 0,
+    })
+}
+
+/// Say how many rounds the player's weapons have: the rounds in the magazine
+/// and in reserve of the weapon in slot 0, then of the one in slot 1 (the
+/// engine counts them as the player fires). Returns 1 when the report is on its
+/// way, 0 without a session or a seat.
+#[no_mangle]
+pub extern "C" fn halo_large_report_ammo(loaded0: u32, reserve0: u32, loaded1: u32, reserve1: u32) -> u32 {
+    guard(0, || {
+        let clamp = |v: u32| v.min(i16::MAX as u32) as i16;
+        let ammo = [
+            Ammo { loaded: clamp(loaded0), reserve: clamp(reserve0) },
+            Ammo { loaded: clamp(loaded1), reserve: clamp(reserve1) },
+        ];
+        match &global().session {
+            Some(session) => session.report_ammo(ammo) as u32,
+            None => 0,
+        }
+    })
+}
+
+/// The rounds the server holds for the player's weapons: `out` has five
+/// `unsigned long`s, a version that changes when the server changed them (a
+/// pickup, a spawn: the game takes them then, and counts them itself otherwise),
+/// then the rounds in the magazine and in reserve of slot 0 and of slot 1.
+/// Returns 1, or 0 before the server has said.
+///
+/// # Safety
+/// `out` points to five writable `unsigned long`s.
+#[no_mangle]
+pub unsafe extern "C" fn halo_large_kit(out: *mut u32) -> u32 {
+    guard(0, || {
+        if out.is_null() {
+            return 0;
+        }
+        let Some(kit) = global().session.as_ref().and_then(|s| s.kit()) else { return 0 };
+        let rounds = |v: i16| v.max(0) as u32;
+        unsafe {
+            std::slice::from_raw_parts_mut(out, 5).copy_from_slice(&[
+                kit.version,
+                rounds(kit.ammo[0].loaded),
+                rounds(kit.ammo[0].reserve),
+                rounds(kit.ammo[1].loaded),
+                rounds(kit.ammo[1].reserve),
+            ]);
+        }
+        1
+    })
+}
+
+/// How many ticks of camouflage a player has left, as the server says (0 for a
+/// player who is not camouflaged).
+#[no_mangle]
+pub extern "C" fn halo_large_camouflage(player: u32) -> u32 {
+    guard(0, || {
+        let g = global();
+        let (Some(session), Ok(player)) = (&g.session, u16::try_from(player)) else { return 0 };
+        let now = match session.newest_tick() {
+            0 => session.server_tick(),
+            newest => newest,
+        };
+        session.camouflaged_until(player).saturating_sub(u64::from(now)).min(u64::from(u32::MAX)) as u32
     })
 }
 

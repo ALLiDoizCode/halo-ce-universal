@@ -531,6 +531,22 @@ static void item_align_to_normal_and_point(
 	return;
 }
 
+/* port: the large-scale mode (port/linux/game/large_mode.c) lays an item the
+server says has come to rest on the surface it is on, as item_update does when
+an item comes to rest: its ground point on `position`, standing on a surface
+that faces along `normal` */
+void large_mode_item_rest(
+	long item_index,
+	real_vector3d const *normal,
+	real_point3d const *position)
+{
+	real_point3d new_position;
+
+	item_align_to_normal_and_point(item_index, normal, position, &new_position);
+
+	return;
+}
+
 boolean item_update(
 	long item_index)
 {
