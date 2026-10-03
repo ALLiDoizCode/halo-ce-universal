@@ -71,31 +71,82 @@ fn assert_matches_mirror(walkers: &Walkers, seen: &SeenTick, rejects: &BTreeMap<
     }
 }
 
+/// How many of the waiting batches the tick took: the module takes the batches that have reached it
+/// when the tick runs, oldest first, and a batch sent after the subscriber saw tick T can reach it
+/// before tick T+1 or after, which nothing the subscriber sees says (the subscriber is a tick behind
+/// the server, more on a busy machine, and a burst of batches can be split by a tick). What it sees is
+/// the result, and no two of the possible prefixes of the waiting batches give the same one (each
+/// batch holds a position of its own), so it is the prefix whose result the tables show: the first
+/// that the local copy, trying the inputs on, equals the rows for.
+fn batches_taken(
+    walkers: &mut Walkers,
+    could_be_in: &[(u64, Vec<PlayerInput>)],
+    seen: &SeenTick,
+    rejects: &BTreeMap<u16, u64>,
+) -> usize {
+    use halo_sim::Store;
+    let saved = walkers.save();
+    let mut found = could_be_in.len();
+    for took in 1..=could_be_in.len() {
+        let batches = could_be_in[..took].iter().map(|(_, batch)| batch.clone()).collect();
+        let mut rejected = rejects.clone();
+        for event in walkers.apply(&halo_sim::wire::collapse_batches(batches), seen.marker.tick) {
+            if let Event::MoveRejected { player, .. } = event {
+                *rejected.entry(player).or_default() += 1;
+            }
+        }
+        let same = walkers.mirror.player_ids().into_iter().all(|id| {
+            let want = walkers.mirror.player(id).unwrap();
+            seen.players.get(&id).is_some_and(|row| {
+                [row.x, row.y, row.z, row.yaw, row.pitch]
+                    == [want.position[0], want.position[1], want.position[2], want.yaw, want.pitch]
+                    && row.rejected_moves == rejected.get(&id).copied().unwrap_or(0)
+            })
+        });
+        walkers.restore(saved.clone());
+        if same {
+            found = took;
+            break;
+        }
+    }
+    found
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Hiccup {
+    None,
+    Late,
+    Split,
+}
+
 /// Run `ticks` ticks the way the gateway will: when a tick is complete,
 /// submit the next one's inputs as one batch, and compare the tables with the
-/// local copy every time. Returns the markers seen. With `slow`, some batches
-/// are held back until the tick they were meant for has run.
+/// local copy every time. Returns the markers seen. With `Hiccup::Late`, some
+/// batches are held back until the tick they were meant for has run; with
+/// `Hiccup::Split`, some bursts of two batches are split by a tick.
 ///
 /// A batch is not always in the tick after the one it was sent on: when it
 /// lands after that tick has run (a busy machine), the module judges it at the
 /// tick after, and two batches that wait for the same tick are collapsed to
 /// each player's newest input (`collapse_batches`). The local copy applies
-/// each batch at the tick the module took it, which the rows say: a tick that
-/// took inputs stamped the players' `updated_tick` with its number.
-fn drive(client: &MatchClient, walkers: &mut Walkers, ticks: usize, slow: bool) -> Vec<SeenTick> {
+/// each batch at the tick the module took it: the marker says whether a tick
+/// took inputs, and `batches_taken` which of the waiting batches.
+fn drive(client: &MatchClient, walkers: &mut Walkers, ticks: usize, hiccup: Hiccup) -> Driven {
     let mut rejects: BTreeMap<u16, u64> = BTreeMap::new();
     let mut accepted: Vec<u16> = Vec::new();
     let mut all = Vec::new();
     // batches sent and not yet taken, each with the last tick the subscriber had seen when it was sent
     // (a batch sent after tick T was seen cannot be in tick T or before)
     let mut waiting: Vec<(u64, Vec<PlayerInput>)> = Vec::new();
+    let (mut batches, mut skip_next, mut ahead) = (0, false, None);
     for _ in 0..ticks {
-        let seen = client.next_tick(WAIT).expect("a tick");
+        let seen = ahead.take().or_else(|| client.next_tick(WAIT)).expect("a tick");
         let tick = seen.marker.tick;
         accepted.clear();
         let could_be_in = waiting.iter().take_while(|(after, _)| *after < tick).count();
-        if could_be_in > 0 && seen.players.values().any(|p| p.updated_tick == tick) {
-            let taken: Vec<Vec<PlayerInput>> = waiting.drain(..could_be_in).map(|(_, batch)| batch).collect();
+        if could_be_in > 0 && seen.marker.inputs > 0 {
+            let took = batches_taken(walkers, &waiting[..could_be_in], &seen, &rejects);
+            let taken: Vec<Vec<PlayerInput>> = waiting.drain(..took).map(|(_, batch)| batch).collect();
             for event in walkers.apply(&halo_sim::wire::collapse_batches(taken), tick) {
                 match event {
                     Event::MoveAccepted { player } => accepted.push(player),
@@ -104,17 +155,43 @@ fn drive(client: &MatchClient, walkers: &mut Walkers, ticks: usize, slow: bool) 
             }
         }
         assert_matches_mirror(walkers, &seen, &rejects, &accepted);
+        // a client that is behind (a busy machine) has the ticks since waiting: it sees each, and plans
+        // its next move from the newest, as a client does, not one for each (which would be a walker
+        // that covers a tick's distance in no time at all)
+        ahead = client.next_tick(Duration::ZERO);
+        if ahead.is_some() || std::mem::take(&mut skip_next) {
+            all.push(seen);
+            continue;
+        }
         let inputs = walkers.next_inputs();
-        if slow && tick % 7 == 3 {
+        if hiccup == Hiccup::Late && tick % 7 == 3 {
             // (longer than a tick: the batch misses the tick it was for)
             std::thread::sleep(Duration::from_millis(40));
         }
         let sent_after = client.marker().map_or(tick, |m| m.tick.max(tick));
         client.submit(&inputs);
+        batches += 1;
         waiting.push((sent_after, inputs));
+        if hiccup == Hiccup::Split && tick % 7 == 3 {
+            // the next move too, from the same view of the match, with a tick run in between: the
+            // client was descheduled between two sends, and so makes up the tick it did not send in
+            std::thread::sleep(Duration::from_millis(40));
+            let more = walkers.next_inputs();
+            client.submit(&more);
+            batches += 1;
+            waiting.push((sent_after, more));
+            skip_next = true;
+        }
         all.push(seen);
     }
-    all
+    Driven { seen: all, batches }
+}
+
+/// What [`drive`] saw and did.
+struct Driven {
+    seen: Vec<SeenTick>,
+    /// The batches submitted.
+    batches: usize,
 }
 
 #[test]
@@ -128,7 +205,7 @@ fn ticks_hold_30_hz_with_one_batch_per_tick_and_the_tables_match_a_local_copy() 
     let before = server.tick_metrics();
     client.start();
 
-    let seen = drive(&client, &mut walkers, 90, false);
+    let Driven { seen, batches } = drive(&client, &mut walkers, 90, Hiccup::None);
 
     // the tick numbers are consecutive and the server's own clock says 30 Hz
     for pair in seen.windows(2) {
@@ -140,11 +217,13 @@ fn ticks_hold_30_hz_with_one_batch_per_tick_and_the_tables_match_a_local_copy() 
     assert_eq!(seen.last().unwrap().marker.players, 50);
     assert_eq!(seen.last().unwrap().marker.rejected_total, 0, "walkers on the ground are never rejected");
 
-    // 50 players, and the module was called about once a tick, not 50 times
+    // 50 players, and the module was called once for each batch the driver sent (the one sent last
+    // may still be on its way), not once for each player, and not more often than it ticked. (How many
+    // batches that is depends on the machine: a driver that is behind sends one for the ticks it catches up on.)
     let used = server.tick_metrics().since(&before);
     assert!(
-        used.submits >= 88.0 && used.submits <= used.ticks + 3.0,
-        "{} submits in {} ticks",
+        used.submits >= batches as f64 - 1.0 && used.submits <= batches as f64 && used.submits <= used.ticks,
+        "{} submits for {batches} batches in {} ticks",
         used.submits,
         used.ticks
     );
@@ -160,8 +239,22 @@ fn batches_that_miss_their_tick_are_judged_at_the_next_and_the_tables_still_matc
     client.add_players(&spawn).unwrap();
     client.start();
 
-    let seen = drive(&client, &mut walkers, 60, true);
+    let Driven { seen, .. } = drive(&client, &mut walkers, 60, Hiccup::Late);
     assert_eq!(seen.last().unwrap().marker.rejected_total, 0, "a late move is not a fast one");
+}
+
+#[test]
+fn a_burst_of_batches_split_by_a_tick_is_taken_by_two_ticks_and_the_tables_still_match_a_local_copy() {
+    let Some(server) = start_server("split") else { return };
+    let client = server.connect("split");
+    let map = flat_floor_map();
+    client.load_map(map.to_bytes()).unwrap();
+    let (mut walkers, spawn) = Walkers::new(map, &[[0.0, 0.0, 0.0]], 5, 1);
+    client.add_players(&spawn).unwrap();
+    client.start();
+
+    let Driven { seen, .. } = drive(&client, &mut walkers, 60, Hiccup::Split);
+    assert_eq!(seen.last().unwrap().marker.rejected_total, 0, "a split burst is not a fast move");
 }
 
 #[test]
@@ -296,7 +389,7 @@ fn five_hundred_players_on_blood_gulch_stay_in_step_with_a_local_copy() {
     let before = server.tick_metrics();
     client.start();
 
-    let seen = drive(&client, &mut walkers, 60, false);
+    let Driven { seen, .. } = drive(&client, &mut walkers, 60, Hiccup::None);
     assert_eq!(seen.last().unwrap().marker.players, 500);
     let used = server.tick_metrics().since(&before);
     println!(
@@ -322,7 +415,7 @@ fn five_hundred_acrobats_on_blood_gulch_jump_fall_and_crouch_without_one_move_re
     client.add_players(&spawn).unwrap();
     client.start();
 
-    let seen = drive(&client, &mut walkers, 900, false);
+    let Driven { seen, .. } = drive(&client, &mut walkers, 900, Hiccup::None);
     let last = seen.last().unwrap();
     let airborne = last.players.values().filter(|p| p.flags & halo_sim::FLAG_AIRBORNE != 0).count();
     let crouched = last.players.values().filter(|p| p.flags & halo_sim::FLAG_CROUCHED != 0).count();
