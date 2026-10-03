@@ -168,18 +168,22 @@ pub fn flat_floor_map() -> MapData {
         flags: halo_map::collision::SURFACE_CLIMBABLE,
         corners: alloc::vec![[-h, -h, 0.0], [h, -h, 0.0], [h, h, 0.0], [-h, h, 0.0]],
     }]);
-    map_of(CollisionBsp {
-        // z = 0: solid behind (below) it, leaf 0 in front (above) it
-        bsp3d_nodes: Vec::from([Bsp3dNode { plane: 0, children: [SOLID, LEAF_0] }]),
-        planes: Vec::from([Plane3d { n: [0.0, 0.0, 1.0], d: 0.0 }]),
-        // the leaf's one reference is the floor surface
-        leaves: Vec::from([Leaf { flags: 0, bsp2d_reference_count: 1, first_bsp2d_reference: 0 }]),
-        bsp2d_references: Vec::from([Bsp2dReference { plane: 0, root: LEAF_0 }]),
-        bsp2d_nodes: Vec::new(),
-        surfaces,
-        edges,
-        vertices,
-    })
+    map_of(
+        CollisionBsp {
+            // z = 0: solid behind (below) it, leaf 0 in front (above) it
+            bsp3d_nodes: Vec::from([Bsp3dNode { plane: 0, children: [SOLID, LEAF_0] }]),
+            planes: Vec::from([Plane3d { n: [0.0, 0.0, 1.0], d: 0.0 }]),
+            // the leaf's one reference is the floor surface
+            leaves: Vec::from([Leaf { flags: 0, bsp2d_reference_count: 1, first_bsp2d_reference: 0 }]),
+            bsp2d_references: Vec::from([Bsp2dReference { plane: 0, root: LEAF_0 }]),
+            bsp2d_nodes: Vec::new(),
+            surfaces,
+            edges,
+            vertices,
+            bounds: Default::default(),
+        }
+        .with_bounds(),
+    )
 }
 
 /// The same floor with a wall across it: solid from [`WALL_X`] on, a vertical
@@ -198,24 +202,28 @@ pub fn walled_floor_map() -> MapData {
             corners: alloc::vec![[w, -h, 0.0], [w, -h, 20.0], [w, h, 20.0], [w, h, 0.0]],
         },
     ]);
-    map_of(CollisionBsp {
-        // z = 0: solid below; above it x = WALL_X: open before, solid after
-        bsp3d_nodes: Vec::from([
-            Bsp3dNode { plane: 0, children: [SOLID, 1] },
-            Bsp3dNode { plane: 1, children: [LEAF_0, SOLID] },
-        ]),
-        planes: Vec::from([Plane3d { n: [0.0, 0.0, 1.0], d: 0.0 }, Plane3d { n: [1.0, 0.0, 0.0], d: w }]),
-        leaves: Vec::from([Leaf { flags: 0, bsp2d_reference_count: 2, first_bsp2d_reference: 0 }]),
-        bsp2d_references: Vec::from([
-            Bsp2dReference { plane: 0, root: LEAF_0 },
-            // (the leaf is on the back of the wall's plane, which its surface is the back of)
-            Bsp2dReference { plane: 1 | SIGN, root: LEAF_0 | 1 },
-        ]),
-        bsp2d_nodes: Vec::new(),
-        surfaces,
-        edges,
-        vertices,
-    })
+    map_of(
+        CollisionBsp {
+            // z = 0: solid below; above it x = WALL_X: open before, solid after
+            bsp3d_nodes: Vec::from([
+                Bsp3dNode { plane: 0, children: [SOLID, 1] },
+                Bsp3dNode { plane: 1, children: [LEAF_0, SOLID] },
+            ]),
+            planes: Vec::from([Plane3d { n: [0.0, 0.0, 1.0], d: 0.0 }, Plane3d { n: [1.0, 0.0, 0.0], d: w }]),
+            leaves: Vec::from([Leaf { flags: 0, bsp2d_reference_count: 2, first_bsp2d_reference: 0 }]),
+            bsp2d_references: Vec::from([
+                Bsp2dReference { plane: 0, root: LEAF_0 },
+                // (the leaf is on the back of the wall's plane, which its surface is the back of)
+                Bsp2dReference { plane: 1 | SIGN, root: LEAF_0 | 1 },
+            ]),
+            bsp2d_nodes: Vec::new(),
+            surfaces,
+            edges,
+            vertices,
+            bounds: Default::default(),
+        }
+        .with_bounds(),
+    )
 }
 
 /// A flat floor at height 0 up to [`RAMP_START_X`], then a ramp up along +x
@@ -236,21 +244,25 @@ pub fn ramp_map(rise: f32) -> MapData {
     ]);
     // the ramp's plane: z = rise * (x - s), that is, -rise x + z = -rise s
     let ramp = unit_plane([-rise, 0.0, 1.0], -rise * s);
-    map_of(CollisionBsp {
-        // open above both planes
-        bsp3d_nodes: Vec::from([
-            Bsp3dNode { plane: 0, children: [SOLID, 1] },
-            Bsp3dNode { plane: 1, children: [SOLID, LEAF_0] },
-        ]),
-        planes: Vec::from([Plane3d { n: [0.0, 0.0, 1.0], d: 0.0 }, ramp]),
-        leaves: Vec::from([Leaf { flags: 0, bsp2d_reference_count: 2, first_bsp2d_reference: 0 }]),
-        bsp2d_references: Vec::from([
-            Bsp2dReference { plane: 0, root: LEAF_0 },
-            Bsp2dReference { plane: 1, root: LEAF_0 | 1 },
-        ]),
-        bsp2d_nodes: Vec::new(),
-        surfaces,
-        edges,
-        vertices,
-    })
+    map_of(
+        CollisionBsp {
+            // open above both planes
+            bsp3d_nodes: Vec::from([
+                Bsp3dNode { plane: 0, children: [SOLID, 1] },
+                Bsp3dNode { plane: 1, children: [SOLID, LEAF_0] },
+            ]),
+            planes: Vec::from([Plane3d { n: [0.0, 0.0, 1.0], d: 0.0 }, ramp]),
+            leaves: Vec::from([Leaf { flags: 0, bsp2d_reference_count: 2, first_bsp2d_reference: 0 }]),
+            bsp2d_references: Vec::from([
+                Bsp2dReference { plane: 0, root: LEAF_0 },
+                Bsp2dReference { plane: 1, root: LEAF_0 | 1 },
+            ]),
+            bsp2d_nodes: Vec::new(),
+            surfaces,
+            edges,
+            vertices,
+            bounds: Default::default(),
+        }
+        .with_bounds(),
+    )
 }

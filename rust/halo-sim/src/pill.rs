@@ -13,7 +13,7 @@
 
 use alloc::vec::Vec;
 
-use halo_map::collision::{project, CollisionBsp, Plane3d, MAX_SPHERE_FEATURES, PROJECTION};
+use halo_map::collision::{project, CollisionBsp, Plane3d, SphereHits, MAX_SPHERE_FEATURES, PROJECTION};
 
 use crate::math::{along, cross, dot, magnitude, magnitude_squared, normalize, scale, sqrt, sub, Vec3, EPSILON};
 
@@ -50,14 +50,45 @@ struct Cylinder {
     origin: Origin,
 }
 
-#[derive(Debug, Clone)]
+/// A prism's polygon: at most [`MAX_PRISM_POINTS`] points, kept in the prism itself.
+#[derive(Debug, Clone, Copy)]
+struct Points {
+    xy: [[f32; 2]; MAX_PRISM_POINTS],
+    len: usize,
+}
+
+impl Points {
+    fn of(points: impl Iterator<Item = [f32; 2]>) -> Points {
+        let mut out = Points { xy: [[0.0; 2]; MAX_PRISM_POINTS], len: 0 };
+        for p in points.take(MAX_PRISM_POINTS) {
+            out.xy[out.len] = p;
+            out.len += 1;
+        }
+        out
+    }
+}
+
+impl core::ops::Deref for Points {
+    type Target = [[f32; 2]];
+    fn deref(&self) -> &[[f32; 2]] {
+        &self.xy[..self.len]
+    }
+}
+
+impl core::ops::DerefMut for Points {
+    fn deref_mut(&mut self) -> &mut [[f32; 2]] {
+        &mut self.xy[..self.len]
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 struct Prism {
     plane: Plane3d,
     /// The slab's thickness in front of the plane.
     height: f32,
     axis: usize,
     sign: bool,
-    points: Vec<[f32; 2]>,
+    points: Points,
     origin: Origin,
 }
 
@@ -104,23 +135,29 @@ fn projection_axis(n: &Vec3) -> usize {
     }
 }
 
-impl Features {
-    fn is_empty(&self) -> bool {
-        self.spheres.is_empty() && self.cylinders.is_empty() && self.prisms.is_empty()
-    }
+/// Where the features of a pill's surroundings go as they are made: into a [`Features`] to be moved
+/// against, or into a [`Probe`] that judges a standing pill and keeps nothing. The counts are how many
+/// of each have been made (the engine stops at [`MAX_SPHERE_FEATURES`] of a kind).
+trait Collect {
+    fn sphere_count(&self) -> usize;
+    fn cylinder_count(&self) -> usize;
+    fn prism_count(&self) -> usize;
+    fn put_sphere(&mut self, sphere: Sphere);
+    fn put_cylinder(&mut self, cylinder: Cylinder);
+    fn put_prism(&mut self, prism: Prism);
 
     /// collision_features_from_point
     fn add_point(&mut self, point: Vec3, height: f32, width: f32, origin: Origin) {
-        if self.spheres.len() < MAX_SPHERE_FEATURES {
-            self.spheres.push(Sphere { center: point, radius: width, origin });
+        if self.sphere_count() < MAX_SPHERE_FEATURES {
+            self.put_sphere(Sphere { center: point, radius: width, origin });
         }
         if height > 0.0 {
             let new_height = point[2] - height;
-            if self.spheres.len() < MAX_SPHERE_FEATURES {
-                self.spheres.push(Sphere { center: [point[0], point[1], new_height], radius: width, origin });
+            if self.sphere_count() < MAX_SPHERE_FEATURES {
+                self.put_sphere(Sphere { center: [point[0], point[1], new_height], radius: width, origin });
             }
-            if self.cylinders.len() < MAX_SPHERE_FEATURES {
-                self.cylinders.push(Cylinder {
+            if self.cylinder_count() < MAX_SPHERE_FEATURES {
+                self.put_cylinder(Cylinder {
                     base: [point[0], point[1], new_height],
                     height: [0.0, 0.0, height],
                     width,
@@ -132,14 +169,14 @@ impl Features {
 
     /// collision_features_from_line
     fn add_line(&mut self, point: Vec3, vector: Vec3, height: f32, width: f32, origin: Origin) {
-        if self.cylinders.len() < MAX_SPHERE_FEATURES {
-            self.cylinders.push(Cylinder { base: point, height: vector, width, origin });
+        if self.cylinder_count() < MAX_SPHERE_FEATURES {
+            self.put_cylinder(Cylinder { base: point, height: vector, width, origin });
         }
         if height <= 0.0 {
             return;
         }
-        if self.cylinders.len() < MAX_SPHERE_FEATURES {
-            self.cylinders.push(Cylinder {
+        if self.cylinder_count() < MAX_SPHERE_FEATURES {
+            self.put_cylinder(Cylinder {
                 base: [point[0], point[1], point[2] - height],
                 height: vector,
                 width,
@@ -161,13 +198,13 @@ impl Features {
             let (normal, d) = if pass == 0 { ([n[0], n[1], 0.0], distance) } else { ([-n[0], -n[1], 0.0], -distance) };
             let axis = projection_axis(&normal);
             let sign = normal[axis] > 0.0;
-            if self.prisms.len() < MAX_SPHERE_FEATURES {
-                self.prisms.push(Prism {
+            if self.prism_count() < MAX_SPHERE_FEATURES {
+                self.put_prism(Prism {
                     plane: Plane3d { n: normal, d },
                     height: width,
                     axis,
                     sign,
-                    points: points.iter().map(|p| project(p, axis, sign)).collect(),
+                    points: Points::of(points.iter().map(|p| project(p, axis, sign))),
                     origin,
                 });
             }
@@ -177,7 +214,7 @@ impl Features {
 
     /// collision_features_from_polygon
     fn add_polygon(&mut self, points: &[Vec3], plane: Plane3d, height: f32, width: f32, origin: Origin) {
-        if self.prisms.len() >= MAX_SPHERE_FEATURES {
+        if self.prism_count() >= MAX_SPHERE_FEATURES {
             return;
         }
         let axis = projection_axis(&plane.n);
@@ -187,19 +224,19 @@ impl Features {
             height: width,
             axis,
             sign,
-            points: points.iter().map(|p| project(p, axis, sign)).collect(),
+            points: Points::of(points.iter().map(|p| project(p, axis, sign))),
             origin,
         };
         if height > 0.0 && plane.n[2] < 0.0 {
             prism.plane.d -= height * prism.plane.n[2];
             if axis != 2 {
                 let component = (PROJECTION[axis][sign as usize][1] == 2) as usize;
-                for p in &mut prism.points {
+                for p in prism.points.iter_mut() {
                     p[component] -= height;
                 }
             }
         }
-        self.prisms.push(prism);
+        self.put_prism(prism);
     }
 
     /// collision_features_from_vertex
@@ -246,10 +283,40 @@ impl Features {
 
     /// collision_features_from_surface
     fn add_surface(&mut self, bsp: &CollisionBsp, surface_index: i32, height: f32, width: f32) {
-        let Some(points) = bsp.surface_polygon(surface_index as usize, MAX_PRISM_POINTS) else { return };
+        let Some((points, count)) = bsp.surface_polygon_fixed::<MAX_PRISM_POINTS>(surface_index as usize) else {
+            return;
+        };
+        let points = &points[..count];
         let Some(plane) = bsp.surface_plane(surface_index as usize) else { return };
         let flags = bsp.surfaces[surface_index as usize].flags;
-        self.add_polygon(&points, plane, height, width, Origin { surface: surface_index, flags });
+        self.add_polygon(points, plane, height, width, Origin { surface: surface_index, flags });
+    }
+}
+
+impl Collect for Features {
+    fn sphere_count(&self) -> usize {
+        self.spheres.len()
+    }
+    fn cylinder_count(&self) -> usize {
+        self.cylinders.len()
+    }
+    fn prism_count(&self) -> usize {
+        self.prisms.len()
+    }
+    fn put_sphere(&mut self, sphere: Sphere) {
+        self.spheres.push(sphere);
+    }
+    fn put_cylinder(&mut self, cylinder: Cylinder) {
+        self.cylinders.push(cylinder);
+    }
+    fn put_prism(&mut self, prism: Prism) {
+        self.prisms.push(prism);
+    }
+}
+
+impl Features {
+    fn is_empty(&self) -> bool {
+        self.spheres.is_empty() && self.cylinders.is_empty() && self.prisms.is_empty()
     }
 
     /// collision_features_test_vector: the first feature the point meets
@@ -535,6 +602,7 @@ impl Features {
     /// The features the point is inside, when each is `margin` bigger
     /// (collision_features_test_point asks for the deepest of them): how
     /// deep, the way out, and where from.
+    #[cfg(test)]
     fn inside(&self, point: &Vec3, margin: f32) -> Vec<(f32, Plane3d, Origin)> {
         let mut found = Vec::new();
         for s in &self.spheres {
@@ -564,6 +632,64 @@ pub struct Footing {
     pub standing: bool,
 }
 
+/// What [`footing`] keeps of the features round a pill: it has no use for the features themselves,
+/// only for how deep the pill's base is in them and what it stands on, so each is judged as it is made.
+struct Probe {
+    base: Vec3,
+    drop: f32,
+    minimum_normal_k: f32,
+    counts: [usize; 3],
+    penetration: f32,
+    supported: bool,
+    standing: bool,
+}
+
+impl Probe {
+    /// A feature the base may be in: how deep (with no margin), and whether, with the `drop` as margin,
+    /// it holds the pill up (anything that is not an overhang, or a climbable surface) or is ground
+    /// a player stands on.
+    fn judge(&mut self, deep: Option<(f32, Plane3d)>, near: Option<(f32, Plane3d)>, origin: Origin) {
+        if let Some((depth, _)) = deep {
+            self.penetration = self.penetration.max(depth);
+        }
+        if let Some((_, plane)) = near {
+            let climbable = origin.flags & halo_map::collision::SURFACE_CLIMBABLE != 0;
+            self.supported |= climbable || plane.n[2] >= 0.0;
+            self.standing |= climbable || plane.n[2] >= self.minimum_normal_k;
+        }
+    }
+}
+
+impl Collect for Probe {
+    fn sphere_count(&self) -> usize {
+        self.counts[0]
+    }
+    fn cylinder_count(&self) -> usize {
+        self.counts[1]
+    }
+    fn prism_count(&self) -> usize {
+        self.counts[2]
+    }
+    fn put_sphere(&mut self, sphere: Sphere) {
+        self.counts[0] += 1;
+        self.judge(sphere.test_point(&self.base, 0.0), sphere.test_point(&self.base, self.drop), sphere.origin);
+    }
+    fn put_cylinder(&mut self, cylinder: Cylinder) {
+        self.counts[1] += 1;
+        self.judge(cylinder.test_point(&self.base, 0.0), cylinder.test_point(&self.base, self.drop), cylinder.origin);
+    }
+    fn put_prism(&mut self, prism: Prism) {
+        self.counts[2] += 1;
+        self.judge(prism.test_point(&self.base, 0.0), prism.test_point(&self.base, self.drop), prism.origin);
+    }
+}
+
+/// Memory a run of [`footing`]s reuses: the lists of what a sphere reaches.
+#[derive(Default)]
+pub(crate) struct Scratch {
+    hits: halo_map::collision::SphereHits,
+}
+
 /// Judge a pill whose base sphere's centre is at `base`: how deep it is in
 /// the map, and whether it stands on something (touching a surface that is
 /// not an overhang, or within `drop` of one); and whether it is on ground
@@ -577,25 +703,51 @@ pub(crate) fn footing(
     drop: f32,
     minimum_normal_k: f32,
 ) -> Footing {
+    footing_in(&mut Scratch::default(), bsp, base, height, radius, drop, minimum_normal_k)
+}
+
+/// [`footing`], keeping its working memory in `scratch` for the next.
+///
+/// Anything that is not an overhang holds a player up as far as validating
+/// goes, not only a slope within the tags' limit: the engine keeps a player
+/// on the surface they moved along for a tick or two after the ground
+/// gets steeper than that, and on a climbable one (a ladder's) however
+/// steep it is. A report that touches nothing at all is in the air. (A pill
+/// the engine put somewhere touches what it rests on, and is a hair inside it
+/// as often as a hair outside; standing on something is being within `drop` of it.)
+pub(crate) fn footing_in(
+    scratch: &mut Scratch,
+    bsp: &CollisionBsp,
+    base: Vec3,
+    height: f32,
+    radius: f32,
+    drop: f32,
+    minimum_normal_k: f32,
+) -> Footing {
     let center = [base[0], base[1], base[2] + height * 0.5];
-    let features = features_in_sphere(bsp, center, height * 0.5 + radius + drop, height, radius);
-    // Anything that is not an overhang holds a player up as far as validating
-    // goes, not only a slope within the tags' limit: the engine keeps a player
-    // on the surface they moved along for a tick or two after the ground
-    // gets steeper than that, and on a climbable one (a ladder's) however
-    // steep it is. A report that touches nothing at all is in the air.
-    let walkable =
-        |plane: &Plane3d, flags: u8| flags & halo_map::collision::SURFACE_CLIMBABLE != 0 || plane.n[2] >= 0.0;
-    // (a pill the engine put somewhere touches what it rests on, and is a hair
-    // inside it as often as a hair outside)
-    let penetration = features.inside(&base, 0.0).iter().fold(0.0f32, |deepest, (depth, _, _)| deepest.max(*depth));
-    // standing on something is being within `drop` of it
-    let near = features.inside(&base, drop);
-    let supported = near.iter().any(|(_, plane, origin)| walkable(plane, origin.flags));
-    let standing = near.iter().any(|(_, plane, origin)| {
-        origin.flags & halo_map::collision::SURFACE_CLIMBABLE != 0 || plane.n[2] >= minimum_normal_k
-    });
-    Footing { penetration, supported, standing }
+    let reach = height * 0.5 + radius + drop;
+    let mut probe =
+        Probe { base, drop, minimum_normal_k, counts: [0; 3], penetration: 0.0, supported: false, standing: false };
+    bsp.test_sphere_into(center, reach + FEATURE_MARGIN, &mut scratch.hits);
+    collect_features(&mut probe, bsp, &scratch.hits, height, radius);
+    Footing { penetration: probe.penetration, supported: probe.supported, standing: probe.standing }
+}
+
+/// What the pill may meet where a sphere found `hits`: the features of its vertices, edges and surfaces.
+fn collect_features(out: &mut impl Collect, bsp: &CollisionBsp, hits: &SphereHits, height: f32, width: f32) {
+    // (a sphere that reaches only vertices finds nothing to collide with)
+    if hits.surfaces.is_empty() && hits.edges.is_empty() {
+        return;
+    }
+    for &v in &hits.vertices {
+        out.add_vertex(bsp, v, height, width);
+    }
+    for &e in &hits.edges {
+        out.add_edge(bsp, e, height, width);
+    }
+    for &s in &hits.surfaces {
+        out.add_surface(bsp, s, height, width);
+    }
 }
 
 /// collision_get_features_in_sphere, for the structure BSP alone: what the
@@ -603,19 +755,7 @@ pub(crate) fn footing(
 fn features_in_sphere(bsp: &CollisionBsp, center: Vec3, radius: f32, height: f32, width: f32) -> Features {
     let mut features = Features::default();
     let hits = bsp.test_sphere(center, radius + FEATURE_MARGIN);
-    // (a sphere that reaches only vertices finds nothing to collide with)
-    if hits.surfaces.is_empty() && hits.edges.is_empty() {
-        return features;
-    }
-    for &v in &hits.vertices {
-        features.add_vertex(bsp, v, height, width);
-    }
-    for &e in &hits.edges {
-        features.add_edge(bsp, e, height, width);
-    }
-    for &s in &hits.surfaces {
-        features.add_surface(bsp, s, height, width);
-    }
+    collect_features(&mut features, bsp, &hits, height, width);
     features
 }
 
@@ -860,4 +1000,98 @@ pub(crate) fn move_pill(bsp: &CollisionBsp, position: Vec3, velocity: Vec3, heig
         };
     }
     move_point(position, velocity, &features)
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+    use super::*;
+    use alloc::format;
+    use std::eprintln;
+
+    /// `footing` as it was written before it stopped keeping the features (and its walk over every one
+    /// of them twice): build them all, then ask which the base is inside. The oracle of the test below.
+    fn footing_by_features(
+        bsp: &CollisionBsp,
+        base: Vec3,
+        height: f32,
+        radius: f32,
+        drop: f32,
+        minimum_normal_k: f32,
+    ) -> Footing {
+        let center = [base[0], base[1], base[2] + height * 0.5];
+        let features = features_in_sphere(bsp, center, height * 0.5 + radius + drop, height, radius);
+        // Anything that is not an overhang holds a player up as far as validating
+        // goes, not only a slope within the tags' limit: the engine keeps a player
+        // on the surface they moved along for a tick or two after the ground
+        // gets steeper than that, and on a climbable one (a ladder's) however
+        // steep it is. A report that touches nothing at all is in the air.
+        let walkable =
+            |plane: &Plane3d, flags: u8| flags & halo_map::collision::SURFACE_CLIMBABLE != 0 || plane.n[2] >= 0.0;
+        // (a pill the engine put somewhere touches what it rests on, and is a hair
+        // inside it as often as a hair outside)
+        let penetration = features.inside(&base, 0.0).iter().fold(0.0f32, |deepest, (depth, _, _)| deepest.max(*depth));
+        // standing on something is being within `drop` of it
+        let near = features.inside(&base, drop);
+        let supported = near.iter().any(|(_, plane, origin)| walkable(plane, origin.flags));
+        let standing = near.iter().any(|(_, plane, origin)| {
+            origin.flags & halo_map::collision::SURFACE_CLIMBABLE != 0 || plane.n[2] >= minimum_normal_k
+        });
+        Footing { penetration, supported, standing }
+    }
+
+    #[test]
+    fn footing_is_what_asking_the_built_features_gives_on_every_map_round_every_vertex() {
+        let Ok(dir) = std::env::var("HALO_MAP_DIR") else {
+            eprintln!("HALO_MAP_DIR is not set: skipping, this test needs the game's own map files");
+            return;
+        };
+        let (mut compared, mut supported, mut inside) = (0u64, 0u64, 0u64);
+        for name in [
+            "beavercreek",
+            "bloodgulch",
+            "boardingaction",
+            "carousel",
+            "chillout",
+            "damnation",
+            "hangemhigh",
+            "longest",
+            "prisoner",
+            "putput",
+            "ratrace",
+            "sidewinder",
+            "wizard",
+        ] {
+            let path = std::path::Path::new(&dir).join(format!("{name}.map"));
+            let map =
+                crate::MapData::from(halo_map::HaloMap::from_path(&path).unwrap_or_else(|e| panic!("{name}: {e}")));
+            let m = &map.movement;
+            let radius = m.collision_radius;
+            let mut scratch = Scratch::default();
+            let stride = if cfg!(debug_assertions) { 16 } else { 2 };
+            for vertex in map.collision.vertices.iter().step_by(stride) {
+                let p = vertex.point;
+                for offset in [[0.0, 0.0, 0.0], [0.3, 0.2, 0.5], [-0.8, 0.5, 0.05], [0.05, -0.6, 1.0], [1.5, 1.5, -0.4]]
+                {
+                    let base = [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]];
+                    for (height, drop) in [
+                        (m.collision_height_standing - 2.0 * radius, crate::GROUND_TOLERANCE),
+                        (m.collision_height_standing - 2.0 * radius, 0.0),
+                        (m.collision_height_crouching - 2.0 * radius, crate::GROUND_TOLERANCE),
+                        (m.collision_height_standing - 2.0 * radius, 0.02),
+                    ] {
+                        let old = footing_by_features(&map.collision, base, height, radius, drop, m.minimum_normal_k);
+                        let new =
+                            footing_in(&mut scratch, &map.collision, base, height, radius, drop, m.minimum_normal_k);
+                        assert_eq!(new, old, "{name}: base {base:?} height {height} drop {drop}");
+                        compared += 1;
+                        supported += old.supported as u64;
+                        inside += (old.penetration > 0.0) as u64;
+                    }
+                }
+            }
+        }
+        eprintln!("{compared} footings compared, {supported} supported, {inside} inside something");
+        assert!(supported > 0 && inside > 0);
+    }
 }

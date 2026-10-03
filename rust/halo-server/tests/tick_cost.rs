@@ -15,7 +15,7 @@
 //! the thread's CPU time (`/proc/thread-self/schedstat`), best of three runs. `TICKS` (default 600) and
 //! `PLAYERS` (500) set the run.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use halo_match_driver::walkers::Walkers;
@@ -43,7 +43,7 @@ const STAGES: [&str; 6] = [
 ];
 
 /// A tick's thread CPU time by stage, in ns.
-fn run(map_dir: &PathBuf, players: u16, ticks: u64, skip: u64) -> ([f64; 6], u64) {
+fn run(map_dir: &Path, players: u16, ticks: u64, skip: u64) -> ([f64; 6], u64) {
     let halo_map = halo_map::HaloMap::from_path(map_dir.join("bloodgulch.map")).expect("load the map");
     let anchors: Vec<[f32; 3]> = halo_map.player_starts.iter().map(|s| s.position).collect();
     let map = MapData::from(halo_map);

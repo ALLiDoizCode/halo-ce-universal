@@ -17,7 +17,8 @@ import argparse
 import collections
 import re
 
-SPAN = re.compile(r'Timing span "(?P<name>[^"]+)": (?P<value>[\d.]+)\s*(?P<unit>ns|µs|us|ms|s)\b')
+# (the log's lines are JSON: the quotes of the span's name are escaped)
+SPAN = re.compile(r'Timing span \\?"(?P<name>[^"\\]+)\\?": (?P<value>[\d.]+)\s*(?P<unit>ns|µs|us|ms|s)\b')
 UNIT = {"ns": 1e-6, "µs": 1e-3, "us": 1e-3, "ms": 1.0, "s": 1e3}
 
 

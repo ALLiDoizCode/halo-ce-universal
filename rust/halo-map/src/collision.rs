@@ -131,6 +131,18 @@ pub struct SphereHits {
 /// The engine's cap on each list of a sphere test.
 pub const MAX_SPHERE_FEATURES: usize = 256;
 
+/// A sphere round each surface's vertices (centre and radius), for ruling a surface out of a sphere test
+/// without walking its edges ([`CollisionBsp::with_bounds`]). Derived from the blocks, so it takes no
+/// part in whether two BSPs are equal; empty (nothing is ruled out) until it is made.
+#[derive(Debug, Clone, Default)]
+pub struct SurfaceBounds(Vec<[f32; 4]>);
+
+impl PartialEq for SurfaceBounds {
+    fn eq(&self, _: &SurfaceBounds) -> bool {
+        true
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CollisionBsp {
     pub bsp3d_nodes: Vec<Bsp3dNode>,
@@ -141,6 +153,8 @@ pub struct CollisionBsp {
     pub surfaces: Vec<Surface>,
     pub edges: Vec<Edge>,
     pub vertices: Vec<Vertex>,
+    /// See [`CollisionBsp::with_bounds`].
+    pub bounds: SurfaceBounds,
 }
 
 /// The result of range-checking one kind of index.
@@ -182,6 +196,33 @@ struct Ctx<'a> {
 }
 
 impl CollisionBsp {
+    /// This BSP with a bounding sphere made for each surface, which [`CollisionBsp::test_sphere`] uses
+    /// to leave out the work of surfaces that are plainly out of reach. Call it once the blocks are
+    /// final (loading a map and [`CollisionBsp::from_bytes`] do): the spheres are not kept up to date
+    /// if a block is changed afterwards. A surface whose edges do not close in a loop has none.
+    pub fn with_bounds(mut self) -> CollisionBsp {
+        let mut bounds = Vec::with_capacity(self.surfaces.len());
+        for (surface_index, surface) in self.surfaces.iter().enumerate() {
+            let mut points: Vec<[f32; 3]> = Vec::new();
+            let mut edge_index = surface.first_edge;
+            let mut closed = false;
+            for _ in 0..=self.edges.len() {
+                let Some(edge) = self.edges.get(edge_index as usize) else { break };
+                let reverse = (edge.surfaces[1] == surface_index as i32) as usize;
+                let Some(vertex) = self.vertices.get(edge.vertices[reverse] as usize) else { break };
+                points.push(vertex.point);
+                edge_index = edge.edges[reverse];
+                if edge_index == surface.first_edge {
+                    closed = true;
+                    break;
+                }
+            }
+            bounds.push(if closed { bounding_sphere(&points) } else { [0.0, 0.0, 0.0, f32::INFINITY] });
+        }
+        self.bounds = SurfaceBounds(bounds);
+        self
+    }
+
     /// Test a ray from `point` along `vector` (the full displacement; the hit
     /// is at `point + vector * t`) up to fraction `maximum_t`.
     ///
@@ -213,20 +254,33 @@ impl CollisionBsp {
     /// Like [`CollisionBsp::test_vector`] it indexes the blocks without
     /// further checks.
     pub fn test_sphere(&self, center: [f32; 3], radius: f32) -> SphereHits {
+        let mut hits = SphereHits::default();
+        self.test_sphere_into(center, radius, &mut hits);
+        hits
+    }
+
+    /// [`CollisionBsp::test_sphere`] into `hits`, which is cleared first: for callers that ask a great
+    /// many times and keep the lists' memory.
+    pub fn test_sphere_into(&self, center: [f32; 3], radius: f32, hits: &mut SphereHits) {
+        hits.surfaces.clear();
+        hits.edges.clear();
+        hits.vertices.clear();
         let mut ctx = SphereCtx {
             bsp: self,
             center,
             radius,
-            hits: SphereHits::default(),
-            stack: Vec::new(),
+            hits: core::mem::take(hits),
+            stack: PlaneStack::new(),
             projection: 0,
             sign: false,
             center2d: [0.0; 2],
+            tested: [(0, 0); TESTED],
+            tested_count: 0,
         };
         if !self.bsp3d_nodes.is_empty() {
             sphere_recursive(&mut ctx, 0);
         }
-        ctx.hits
+        *hits = ctx.hits;
     }
 
     /// Drop a vertical ray from `point` straight down `length` world units and
@@ -274,6 +328,30 @@ impl CollisionBsp {
             edge_index = edge.edges[reverse];
             if edge_index == surface.first_edge {
                 return Some(out);
+            }
+        }
+    }
+
+    /// [`CollisionBsp::surface_polygon`] for a polygon of at most `N` vertices, without allocating: the
+    /// vertices and how many there are.
+    pub fn surface_polygon_fixed<const N: usize>(&self, surface_index: usize) -> Option<([[f32; 3]; N], usize)> {
+        let surface = self.surfaces.get(surface_index)?;
+        let mut out = [[0.0; 3]; N];
+        let mut count = 0;
+        let mut edge_index = surface.first_edge;
+        loop {
+            let edge = self.edges.get(edge_index as usize)?;
+            let reverse = (edge.surfaces[1] == surface_index as i32) as usize;
+            if edge.surfaces[reverse] != surface_index as i32 {
+                return None;
+            }
+            let point = self.vertices.get(edge.vertices[reverse] as usize)?.point;
+            // (one more than `N` is too many, as for `surface_polygon`)
+            *out.get_mut(count)? = point;
+            count += 1;
+            edge_index = edge.edges[reverse];
+            if edge_index == surface.first_edge {
+                return Some((out, count));
             }
         }
     }
@@ -365,16 +443,81 @@ impl CollisionBsp {
     }
 }
 
+/// The plane designators on the way down to a leaf. A BSP is a few dozen planes deep at most, so
+/// they are kept in the context itself, with a heap list for the (never seen) deeper case.
+struct PlaneStack {
+    inline: [i32; PlaneStack::INLINE],
+    len: usize,
+    spill: Vec<i32>,
+}
+
+impl PlaneStack {
+    const INLINE: usize = 64;
+
+    fn new() -> PlaneStack {
+        PlaneStack { inline: [0; PlaneStack::INLINE], len: 0, spill: Vec::new() }
+    }
+
+    fn push(&mut self, plane: i32) {
+        if self.len < PlaneStack::INLINE {
+            self.inline[self.len] = plane;
+        } else {
+            self.spill.push(plane);
+        }
+        self.len += 1;
+    }
+
+    fn pop(&mut self) {
+        self.len -= 1;
+        if self.len >= PlaneStack::INLINE {
+            self.spill.pop();
+        }
+    }
+
+    fn contains(&self, plane: i32) -> bool {
+        self.inline[..self.len.min(PlaneStack::INLINE)].contains(&plane) || self.spill.contains(&plane)
+    }
+}
+
+/// How far beyond a surface's bounding sphere and the sphere test's radius a surface has to be for its
+/// edges not to be looked at: far more than the rounding of the sums that compare them.
+const FAR_MARGIN: f32 = 0.01;
+
+/// A sphere that holds all of `points`: their mean and the farthest of them from it (a little more).
+fn bounding_sphere(points: &[[f32; 3]]) -> [f32; 4] {
+    let n = points.len() as f32;
+    let mut c = [0.0f32; 3];
+    for p in points {
+        for i in 0..3 {
+            c[i] += p[i] / n;
+        }
+    }
+    let mut farthest = 0.0f32;
+    for p in points {
+        let d = ((p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2) + (p[2] - c[2]).powi(2)).sqrt();
+        farthest = farthest.max(d);
+    }
+    [c[0], c[1], c[2], farthest * 1.001 + 0.001]
+}
+
+/// How many (surface, reference plane) pairs a sphere test remembers having tested.
+const TESTED: usize = 48;
+
 struct SphereCtx<'a> {
     bsp: &'a CollisionBsp,
     center: [f32; 3],
     radius: f32,
     hits: SphereHits,
     /// The plane designators on the way down to the leaf.
-    stack: Vec<i32>,
+    stack: PlaneStack,
     projection: usize,
     sign: bool,
     center2d: [f32; 2],
+    /// The surfaces already tested, with the plane of the reference they were reached by: a surface
+    /// that is reached again by the same plane (from another leaf it lies in) gives the same answer,
+    /// which is in the lists already, so it is not tested twice.
+    tested: [(i32, i32); TESTED],
+    tested_count: usize,
 }
 
 fn add_feature(list: &mut Vec<i32>, index: i32) {
@@ -408,39 +551,55 @@ fn vector_intersects_sphere(point: [f32; 3], vector: [f32; 3], center: [f32; 3],
 }
 
 /// collision_bsp.c: collision_surface_test_sphere
+///
+/// One walk round the surface's edges does what the engine's three do (the vertices within the
+/// radius, the edges the sphere reaches, and, if neither found anything, whether the centre is over
+/// the polygon): each list gets its entries in the same order, so the result is the same.
 fn surface_test_sphere(ctx: &mut SphereCtx, surface_index: i32) {
     let bsp = ctx.bsp;
     let surface = &bsp.surfaces[surface_index as usize];
     let radius_squared = ctx.radius * ctx.radius;
     let mut hit_feature = false;
+    // (the centre is over the polygon while no edge has it on the wrong side)
+    let mut over = true;
+    // a surface that is out of reach by more than any rounding (a hundredth of a unit) has no vertex
+    // in the sphere and no edge that meets it: only whether the centre is over it is left to find out
+    let far = bsp.bounds.0.get(surface_index as usize).is_some_and(|b| {
+        let (dx, dy, dz) = (b[0] - ctx.center[0], b[1] - ctx.center[1], b[2] - ctx.center[2]);
+        let reach = b[3] + ctx.radius + FAR_MARGIN;
+        dx * dx + dy * dy + dz * dz > reach * reach
+    });
 
     let mut edge_index = surface.first_edge;
     loop {
         let edge = &bsp.edges[edge_index as usize];
         let reverse = (edge.surfaces[1] == surface_index) as usize;
         let vertex_index = edge.vertices[reverse];
-        let v = bsp.vertices[vertex_index as usize].point;
-        let (dx, dy, dz) = (v[0] - ctx.center[0], v[1] - ctx.center[1], v[2] - ctx.center[2]);
-        if dx * dx + dy * dy + dz * dz <= radius_squared {
-            add_feature(&mut ctx.hits.vertices, vertex_index);
-            hit_feature = true;
-        }
-        edge_index = edge.edges[reverse];
-        if edge_index == surface.first_edge {
-            break;
-        }
-    }
-
-    let mut edge_index = surface.first_edge;
-    loop {
-        let edge = &bsp.edges[edge_index as usize];
-        let reverse = (edge.surfaces[1] == surface_index) as usize;
-        let v0 = bsp.vertices[edge.vertices[reverse] as usize].point;
+        let v0 = bsp.vertices[vertex_index as usize].point;
         let v1 = bsp.vertices[edge.vertices[1 - reverse] as usize].point;
-        let vector = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
-        if vector_intersects_sphere(v0, vector, ctx.center, ctx.radius) {
-            add_feature(&mut ctx.hits.edges, edge_index);
-            hit_feature = true;
+        if !far {
+            let (dx, dy, dz) = (v0[0] - ctx.center[0], v0[1] - ctx.center[1], v0[2] - ctx.center[2]);
+            if dx * dx + dy * dy + dz * dz <= radius_squared {
+                add_feature(&mut ctx.hits.vertices, vertex_index);
+                hit_feature = true;
+            }
+            let vector = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
+            if vector_intersects_sphere(v0, vector, ctx.center, ctx.radius) {
+                add_feature(&mut ctx.hits.edges, edge_index);
+                hit_feature = true;
+            }
+        }
+        if over {
+            let p0 = project(&v0, ctx.projection, ctx.sign);
+            let p1 = project(&v1, ctx.projection, ctx.sign);
+            let a = [p0[0] - ctx.center2d[0], p0[1] - ctx.center2d[1]];
+            let b = [p1[0] - ctx.center2d[0], p1[1] - ctx.center2d[1]];
+            // (not "at least 0": a NaN does not put the centre outside, as in the engine's loop, which gives up only on a negative)
+            over = (a[0] * b[1] - a[1] * b[0]).partial_cmp(&0.0) != Some(core::cmp::Ordering::Less);
+        }
+        if far && !over {
+            // (nothing in it can add the surface now)
+            return;
         }
         edge_index = edge.edges[reverse];
         if edge_index == surface.first_edge {
@@ -448,35 +607,19 @@ fn surface_test_sphere(ctx: &mut SphereCtx, surface_index: i32) {
         }
     }
 
-    if !hit_feature {
-        // no vertex or edge is near: the sphere's centre must be over the polygon
-        let mut edge_index = surface.first_edge;
-        loop {
-            let edge = &bsp.edges[edge_index as usize];
-            let reverse = (edge.surfaces[1] == surface_index) as usize;
-            let p0 = project(&bsp.vertices[edge.vertices[reverse] as usize].point, ctx.projection, ctx.sign);
-            let p1 = project(&bsp.vertices[edge.vertices[1 - reverse] as usize].point, ctx.projection, ctx.sign);
-            let v0 = [p0[0] - ctx.center2d[0], p0[1] - ctx.center2d[1]];
-            let v1 = [p1[0] - ctx.center2d[0], p1[1] - ctx.center2d[1]];
-            if v0[0] * v1[1] - v0[1] * v1[0] < 0.0 {
-                return;
-            }
-            edge_index = edge.edges[reverse];
-            if edge_index == surface.first_edge {
-                break;
-            }
-        }
+    // no vertex or edge is near: the sphere's centre must be over the polygon
+    if hit_feature || over {
+        add_feature(&mut ctx.hits.surfaces, surface_index);
     }
-    add_feature(&mut ctx.hits.surfaces, surface_index);
 }
 
 /// collision_bsp.c: bsp2d_test_sphere_recursive
-fn bsp2d_sphere_recursive(ctx: &mut SphereCtx, mut child_index: i32) {
+fn bsp2d_sphere_recursive(ctx: &mut SphereCtx, mut child_index: i32, reference_plane: i32) {
     while child_index & SIGN == 0 {
         let node = ctx.bsp.bsp2d_nodes[child_index as usize];
         let distance = (node.n[0] * ctx.center2d[0] + node.n[1] * ctx.center2d[1]) - node.d;
         if distance <= ctx.radius {
-            bsp2d_sphere_recursive(ctx, node.children[0]);
+            bsp2d_sphere_recursive(ctx, node.children[0], reference_plane);
         }
         if distance < -ctx.radius {
             return;
@@ -485,7 +628,16 @@ fn bsp2d_sphere_recursive(ctx: &mut SphereCtx, mut child_index: i32) {
     }
     // (-1 is no surface)
     if child_index != NONE {
-        surface_test_sphere(ctx, child_index & MASK);
+        let surface_index = child_index & MASK;
+        let key = (surface_index, reference_plane);
+        if ctx.tested[..ctx.tested_count].contains(&key) {
+            return;
+        }
+        if ctx.tested_count < TESTED {
+            ctx.tested[ctx.tested_count] = key;
+            ctx.tested_count += 1;
+        }
+        surface_test_sphere(ctx, surface_index);
     }
 }
 
@@ -517,7 +669,7 @@ fn sphere_recursive(ctx: &mut SphereCtx, mut node_index: i32) {
     let first = leaf.first_bsp2d_reference;
     for reference_index in first..first + leaf.bsp2d_reference_count as i32 {
         let reference = ctx.bsp.bsp2d_references[reference_index as usize];
-        if !ctx.stack.contains(&reference.plane) {
+        if !ctx.stack.contains(reference.plane) {
             continue;
         }
         let plane = ctx.bsp.planes[(reference.plane & MASK) as usize];
@@ -538,7 +690,7 @@ fn sphere_recursive(ctx: &mut SphereCtx, mut node_index: i32) {
         };
         ctx.sign = (plane.n[ctx.projection] > 0.0) != (reference.plane & SIGN != 0);
         ctx.center2d = project(&projected, ctx.projection, ctx.sign);
-        bsp2d_sphere_recursive(ctx, reference.root);
+        bsp2d_sphere_recursive(ctx, reference.root, reference.plane);
     }
 }
 

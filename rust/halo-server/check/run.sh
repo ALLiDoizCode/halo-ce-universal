@@ -222,7 +222,12 @@ wait "$load" || echo "the load program failed: see $OUT/load.log"
 if [ -n "${MODULE_FEATURES:-}" ]; then
   # the module's own log (the stage timings): the match's database is gone once the server stops
   mkdir -p "$OUT/module-logs"
-  find "$OUT/stdb/data" -name '*.log' -path '*module_logs*' -exec cp {} "$OUT/module-logs/" \; 2>/dev/null || true
+  # (a file a database: they are all called by the day's date, in folders of their own; the match the
+  # crowd is in is the first, and its database is deleted a little after the match ends, so HOLD
+  # should be shorter than END_SECS for this to find it)
+  for f in $(find "$OUT/stdb/data" -name '*.log' -path '*module_logs*' 2>/dev/null); do
+    cp "$f" "$OUT/module-logs/$(echo "${f#"$OUT"/stdb/data/}" | tr / _)" || true
+  done
 fi
 if [ -n "$game" ]; then kill -TERM "$game" 2>/dev/null || true; wait "$game" 2>/dev/null || true; fi
 if [ -n "$relay" ]; then kill -TERM "$relay" 2>/dev/null || true; fi

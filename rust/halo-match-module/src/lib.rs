@@ -166,6 +166,7 @@ pub struct MatchTick {
 
 /// One player. Position and facing are the last move the server accepted.
 #[table(accessor = player, public)]
+#[derive(Clone)]
 pub struct PlayerRow {
     #[primary_key]
     id: u16,
@@ -684,39 +685,37 @@ fn add_to_roster(ctx: &ReducerContext, id: u16, identity: Option<Identity>) {
 /// `halo_sim::Store` over the `player` table. Position writes keep the
 /// rejection counters.
 ///
-/// A move reads the player's row, then asks how long since it moved, then writes it: the row from the
-/// read is kept for the other two, so that a move is one lookup and one write and not three lookups
-/// and a write (each of which is a call to the host). The kept row is only ever one the last read
-/// returned, and any write or removal through the store drops it.
+/// Every call to the host costs, and a tick looks at every player (a move reads the player's row and
+/// writes it, the rules and the items read them all): [`TableStore::load`] reads the whole table once,
+/// and from then on the store answers from what it read and writes through to the table, so that a
+/// tick reads each row once. It is a copy of the table for as long as the store lives, and nothing else
+/// writes the position columns in that time (the rejection counters the tick writes after the
+/// simulation are not read through it).
 struct TableStore<'a> {
     ctx: &'a ReducerContext,
     tick: u64,
-    read: RefCell<Option<PlayerRow>>,
+    /// Every row as of now, once loaded.
+    rows: RefCell<Option<BTreeMap<PlayerId, PlayerRow>>>,
 }
 
 impl<'a> TableStore<'a> {
     fn new(ctx: &'a ReducerContext, tick: u64) -> TableStore<'a> {
-        TableStore { ctx, tick, read: RefCell::new(None) }
+        TableStore { ctx, tick, rows: RefCell::new(None) }
     }
 
-    /// The row the last read of `id` returned, if that was the last thing the store did: taken, as the
-    /// write that follows replaces it.
-    fn take_kept(&self, id: PlayerId) -> Option<PlayerRow> {
-        let mut read = self.read.borrow_mut();
-        if read.as_ref().is_some_and(|row| row.id == id) {
-            read.take()
-        } else {
-            None
-        }
+    /// Read every player's row, for the rest of the store's life.
+    fn load(&self) {
+        let rows = self.ctx.db.player().iter().map(|row| (row.id, row)).collect();
+        *self.rows.borrow_mut() = Some(rows);
     }
 }
 
 impl Store for TableStore<'_> {
     fn player(&self, id: PlayerId) -> Option<Player> {
-        let row = self.ctx.db.player().id().find(id);
-        let player = row.as_ref().map(to_player);
-        *self.read.borrow_mut() = row;
-        player
+        if let Some(rows) = self.rows.borrow().as_ref() {
+            return rows.get(&id).map(to_player);
+        }
+        self.ctx.db.player().id().find(id).as_ref().map(to_player)
     }
 
     fn set_player(&mut self, p: Player) {
@@ -736,55 +735,65 @@ impl Store for TableStore<'_> {
             free_z: p.free_z,
             ..row
         };
-        let known = self.take_kept(p.id).or_else(|| table.id().find(p.id));
-        *self.read.borrow_mut() = None;
-        match known {
-            Some(row) => {
-                table.id().update(moved(row));
-            }
-            None => {
-                let fresh = PlayerRow {
-                    id: p.id,
-                    x,
-                    y,
-                    z,
-                    yaw: p.yaw,
-                    pitch: p.pitch,
-                    updated_tick: self.tick,
-                    rejected_moves: 0,
-                    last_reject: REJECT_NONE,
-                    last_reject_tick: 0,
-                    flags: p.flags,
-                    air_ticks: p.air_ticks,
-                    air_z: p.air_z,
-                    free_ticks: p.free_ticks,
-                    free_z: p.free_z,
-                };
-                table.insert(fresh);
-            }
+        let known = match self.rows.borrow().as_ref() {
+            Some(rows) => rows.get(&p.id).cloned(),
+            None => table.id().find(p.id),
+        };
+        let written = match known {
+            Some(row) => table.id().update(moved(row)),
+            None => table.insert(PlayerRow {
+                id: p.id,
+                x,
+                y,
+                z,
+                yaw: p.yaw,
+                pitch: p.pitch,
+                updated_tick: self.tick,
+                rejected_moves: 0,
+                last_reject: REJECT_NONE,
+                last_reject_tick: 0,
+                flags: p.flags,
+                air_ticks: p.air_ticks,
+                air_z: p.air_z,
+                free_ticks: p.free_ticks,
+                free_z: p.free_z,
+            }),
+        };
+        if let Some(rows) = self.rows.borrow_mut().as_mut() {
+            rows.insert(p.id, written);
         }
     }
 
     fn remove_player(&mut self, id: PlayerId) -> bool {
-        *self.read.borrow_mut() = None;
+        if let Some(rows) = self.rows.borrow_mut().as_mut() {
+            rows.remove(&id);
+        }
         self.ctx.db.player().id().delete(id)
     }
 
     fn player_ids(&self) -> Vec<PlayerId> {
+        if let Some(rows) = self.rows.borrow().as_ref() {
+            return rows.keys().copied().collect();
+        }
         let mut ids: Vec<PlayerId> = self.ctx.db.player().iter().map(|p| p.id).collect();
         ids.sort_unstable();
         ids
     }
 
     fn players(&self) -> Vec<Player> {
+        if let Some(rows) = self.rows.borrow().as_ref() {
+            return rows.values().map(to_player).collect();
+        }
         let mut all: Vec<Player> = self.ctx.db.player().iter().map(|r| to_player(&r)).collect();
         all.sort_unstable_by_key(|p| p.id);
         all
     }
 
     fn ticks_since_move(&self, id: PlayerId) -> u32 {
-        let kept = self.read.borrow().as_ref().filter(|row| row.id == id).map(|row| row.updated_tick);
-        let updated = kept.or_else(|| self.ctx.db.player().id().find(id).map(|row| row.updated_tick));
+        let updated = match self.rows.borrow().as_ref() {
+            Some(rows) => rows.get(&id).map(|row| row.updated_tick),
+            None => self.ctx.db.player().id().find(id).map(|row| row.updated_tick),
+        };
         let since = updated.map_or(1, |updated| self.tick.saturating_sub(updated));
         since.clamp(1, u32::MAX as u64) as u32
     }
@@ -947,6 +956,15 @@ impl GameStore for TableGame<'_> {
         let mut all: Vec<Contestant> = self.ctx.db.standing().iter().map(|r| contestant_of(&r)).collect();
         all.sort_unstable_by_key(|c| c.id);
         all
+    }
+
+    fn contestants_of(&self, ids: &[PlayerId]) -> Vec<Option<Contestant>> {
+        // (a lookup is a call to the host: with this many to find, one pass over the table is cheaper)
+        if ids.len() < 16 {
+            return ids.iter().map(|&id| self.contestant(id)).collect();
+        }
+        let all = self.contestants();
+        ids.iter().map(|&id| all.binary_search_by_key(&id, |c| c.id).ok().map(|i| all[i])).collect()
     }
 
     fn unspawned(&self) -> Vec<Contestant> {
@@ -1980,6 +1998,7 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
     let (mut hits, mut rejected_hits, mut not_where_seen) = (0u32, 0u32, 0u64);
     if let Some(map) = current_map(ctx) {
         let mut store = TableStore::new(ctx, marker.tick);
+        store.load();
         let mut game = TableGame { ctx };
         let mut rng = Rng::seeded(marker.tick);
         if marker.tick.is_multiple_of(TICKS_PER_SECOND as u64) {
@@ -2089,8 +2108,9 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
         stage.end();
         // where the server saw everyone, for the next ticks' hit reports
         let stage = Stage::begin("tick.8 trails");
+        // (the store has them: the rejection counters written above are the only change to the rows since it read them)
         TRAILS.with(|t| {
-            t.borrow_mut().record(marker.tick, ctx.db.player().iter().map(|p| (p.id, [p.x, p.y, p.z])));
+            t.borrow_mut().record(marker.tick, store.players().iter().map(|p| (p.id, p.position)));
         });
         stage.end();
     } else if !inputs.is_empty() {

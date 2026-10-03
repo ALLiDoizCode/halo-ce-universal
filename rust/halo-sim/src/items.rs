@@ -558,22 +558,34 @@ pub fn tick(
     }
 
     // what nobody has held for long enough goes; so do the oldest of too many
+    // (what is gone is what was removed here: `all` is what the store held, and the store is not
+    // asked again for each item of it, which for the server's tables is a call to the host each)
     let mut all = items.items();
+    let mut gone: Vec<ItemId> = Vec::new();
     for item in &all {
         if tick > item.last_owned.saturating_add(PURGE_TICKS) {
             items.remove_item(item.id);
+            gone.push(item.id);
             events.push(ItemEvent::Purged { item: item.id });
         }
     }
-    all.retain(|i| items.item(i.id).is_some());
+    // (`gone` is in the order of `all`, which is in id order)
+    let mut next = 0;
+    all.retain(|i| {
+        let removed = gone.get(next) == Some(&i.id);
+        next += removed as usize;
+        !removed
+    });
     if all.len() > MAX_ITEMS {
         let mut dropped: Vec<&Item> = all.iter().filter(|i| i.placement == NO_PLACEMENT).collect();
         dropped.sort_by_key(|i| (i.last_owned, i.id));
+        let mut too_many: Vec<ItemId> = Vec::new();
         for item in dropped.into_iter().take(all.len() - MAX_ITEMS) {
             items.remove_item(item.id);
+            too_many.push(item.id);
             events.push(ItemEvent::Purged { item: item.id });
         }
-        all.retain(|i| items.item(i.id).is_some());
+        all.retain(|i| !too_many.contains(&i.id));
     }
 
     // every item as it is now: a falling one is stepped a tick
@@ -749,5 +761,49 @@ mod tests {
         }
         // game time 0 is the first tick after the clock began: tick 1; then every 300
         assert_eq!(spawned_at, [1, 301, 601, 901]);
+    }
+    /// A resting dropped item, last held at `last_owned`.
+    fn resting_drop(last_owned: u64) -> Item {
+        Item { resting: true, last_owned, ..falling([0.0, 0.0, 0.0], [0.0; 3]) }
+    }
+
+    fn tick_of(items: &mut MemoryItems, tick: u64) -> Vec<ItemEvent> {
+        let map = flat_floor_map();
+        let mut combat = crate::combat::MemoryCombat::new();
+        let store = crate::MemoryStore::new();
+        let mut game = crate::rules::MemoryGame::new(crate::rules::Rules::slayer());
+        crate::rules::begin(&mut game, 0);
+        super::tick(items, &mut combat, &store, &game, &map, &mut Rng::seeded(1), tick, &[])
+    }
+
+    #[test]
+    fn an_item_nobody_has_held_for_thirty_seconds_goes_and_the_rest_stay() {
+        let mut items = MemoryItems::new();
+        // held at ticks 100, 5000, 200, 6000, 300: at tick 1000 + PURGE_TICKS + 250 those held before 1250 are old
+        let ids: Vec<ItemId> =
+            [100, 5000, 200, 6000, 300].iter().map(|t| items.insert_item(resting_drop(*t))).collect();
+        let at = PURGE_TICKS + 250;
+        let events = tick_of(&mut items, at);
+        let purged: Vec<ItemId> =
+            events.iter().filter_map(|e| if let ItemEvent::Purged { item } = e { Some(*item) } else { None }).collect();
+        assert_eq!(purged, [ids[0], ids[2]], "the two held at 100 and 200, in id order");
+        assert_eq!(items.items().iter().map(|i| i.id).collect::<Vec<_>>(), [ids[1], ids[3], ids[4]]);
+    }
+
+    #[test]
+    fn beyond_the_most_items_the_longest_unheld_dropped_ones_go() {
+        let mut items = MemoryItems::new();
+        // MAX_ITEMS + 3 drops, the first three put down latest (held last at the highest ticks): so the
+        // ones that go are the three held longest ago, not the first three made
+        let mut ids = Vec::new();
+        for i in 0..MAX_ITEMS + 3 {
+            let last_owned = if i < 3 { 1_000 + i as u64 } else { 10 + i as u64 };
+            ids.push(items.insert_item(resting_drop(last_owned)));
+        }
+        let events = tick_of(&mut items, 20);
+        let purged: Vec<ItemId> =
+            events.iter().filter_map(|e| if let ItemEvent::Purged { item } = e { Some(*item) } else { None }).collect();
+        assert_eq!(purged, [ids[3], ids[4], ids[5]], "the three with the least last_owned");
+        assert_eq!(items.items().len(), MAX_ITEMS);
     }
 }
