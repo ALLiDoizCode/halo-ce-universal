@@ -26,9 +26,10 @@ const PLACED_CLEAR: f32 = 0.001;
 /// fall from it.
 const STALL_TICKS: u32 = 15;
 
-/// How far ahead of the server an acrobat's body may be (the inputs on their way,
-/// a few ticks of a fall at most) before the server's word is taken instead.
-const ACROBAT_LAG: f32 = 1.5;
+/// How far ahead of the server a walker's body may be (the inputs on their way: the server
+/// shows a tick or two of them behind, a few ticks of a fall at most for an acrobat) before the
+/// server's word is taken instead.
+const SYNC_LAG: f32 = 1.5;
 
 pub struct Walkers {
     pub map: MapData,
@@ -241,12 +242,12 @@ impl Walkers {
             let position = [row.x, row.y, row.z];
             self.mirror.set_player(Player::new(row.id, position, row.yaw, row.pitch));
             self.moved_at.insert(row.id, row.updated_tick);
-            // (a walker the server has somewhere else than they thought is put there, at rest: for
-            // an acrobat, whose jump and fall are in the speed the body carries, only when it is
-            // somewhere else than the inputs still on their way account for)
+            // (a walker the server has somewhere else than they thought is put there, at rest: but
+            // only when it is somewhere else than the inputs still on their way account for. The
+            // server shows a walker where an input of a tick or two ago put them; put there and
+            // at rest every tick, a walker would never get up to the speed of a walk)
             let off = |a: [f32; 3], b: [f32; 3]| (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>().sqrt();
-            let lost = if self.acrobatics { off(self.bodies[index].position, position) > ACROBAT_LAG } else { true };
-            if lost && self.bodies[index].position != position {
+            if off(self.bodies[index].position, position) > SYNC_LAG {
                 self.bodies[index] = resting(&self.map, position);
             }
             if row.rejected_moves > self.rejects_seen[index] {
@@ -290,4 +291,55 @@ fn resting(map: &MapData, position: [f32; 3]) -> Body {
 /// The height standing on the ground below `from`.
 fn ground_below(map: &MapData, from: [f32; 3], length: f32) -> Option<f32> {
     map.collision.ray_down(from, length).map(|hit| hit.z + 0.01)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PlayerRow;
+    use halo_sim::fixtures::flat_floor_map;
+
+    /// How far one walker gets in 3 s, told by a server that shows their position `lag` inputs old
+    /// (as the load program has it from the server's tables: the inputs it sent are on their way).
+    fn distance_walked(lag: usize) -> f32 {
+        let (mut w, spawn) = Walkers::new(flat_floor_map(), &[[0.0, 0.0, 0.0]], 1, 1);
+        let start = spawn[0].position;
+        let mut sent = vec![start; lag + 1];
+        w.set_course(0, 1.0, 0.5);
+        for tick in 1..=90u64 {
+            let inputs = w.next_inputs();
+            sent.push(inputs[0].position);
+            let shown = sent[sent.len() - 1 - lag];
+            let row = PlayerRow {
+                id: 0,
+                x: shown[0],
+                y: shown[1],
+                z: shown[2],
+                yaw: 0.0,
+                pitch: 0.0,
+                updated_tick: tick,
+                rejected_moves: 0,
+                last_reject: 0,
+                last_reject_tick: 0,
+                flags: 0,
+                air_ticks: 0,
+                air_z: 0.0,
+                free_ticks: 0,
+                free_z: 0.0,
+            };
+            w.sync_with_server([&row]);
+        }
+        let end = sent[sent.len() - 1];
+        ((end[0] - start[0]).powi(2) + (end[1] - start[1]).powi(2)).sqrt()
+    }
+
+    #[test]
+    fn a_walker_whose_server_shows_them_a_tick_or_two_behind_still_walks_at_speed() {
+        let free = distance_walked(0);
+        assert!(free > 3.0, "a walker walks: {free}");
+        for lag in 1..=4 {
+            let d = distance_walked(lag);
+            assert!(d > 0.9 * free, "with the server {lag} ticks behind a walker got {d} of the {free} they walk");
+        }
+    }
 }
