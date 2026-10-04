@@ -601,7 +601,8 @@ impl Prism {
 impl Features {
     /// The features the point is inside, when each is `margin` bigger
     /// (collision_features_test_point asks for the deepest of them): how
-    /// deep, the way out, and where from.
+    /// deep, the way out, and where from. Only the tests ask it now: [`footing`] judges each feature as
+    /// it is made, and the tests hold it to what this gives.
     #[cfg(test)]
     fn inside(&self, point: &Vec3, margin: f32) -> Vec<(f32, Plane3d, Origin)> {
         let mut found = Vec::new();
@@ -1038,6 +1039,42 @@ mod tests {
             origin.flags & halo_map::collision::SURFACE_CLIMBABLE != 0 || plane.n[2] >= minimum_normal_k
         });
         Footing { penetration, supported, standing }
+    }
+
+    #[test]
+    fn footing_is_what_asking_the_built_features_gives_on_the_fixtures_maps_over_a_grid() {
+        use crate::fixtures::{flat_floor_map, items_map, ramp_map, walled_floor_map, WALL_X};
+        for map in [flat_floor_map(), walled_floor_map(), ramp_map(0.5), items_map()] {
+            let m = &map.movement;
+            let radius = m.collision_radius;
+            let mut scratch = Scratch::default();
+            let mut supported = 0;
+            // (a grid across the floor, under it, over it and through the wall, in 0.37s so as to meet no edge squarely)
+            for ix in -40..=40 {
+                for iy in -8..=8 {
+                    for iz in -4..=6 {
+                        let base = [WALL_X + ix as f32 * 0.37, iy as f32 * 0.37, iz as f32 * 0.21];
+                        for drop in [0.0, crate::GROUND_TOLERANCE] {
+                            let height = m.collision_height_standing - 2.0 * radius;
+                            let old =
+                                footing_by_features(&map.collision, base, height, radius, drop, m.minimum_normal_k);
+                            let new = footing_in(
+                                &mut scratch,
+                                &map.collision,
+                                base,
+                                height,
+                                radius,
+                                drop,
+                                m.minimum_normal_k,
+                            );
+                            assert_eq!(new, old, "base {base:?} drop {drop}");
+                            supported += old.supported as u32;
+                        }
+                    }
+                }
+            }
+            assert!(supported > 100, "the grid reaches the floor");
+        }
     }
 
     #[test]

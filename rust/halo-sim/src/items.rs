@@ -762,6 +762,7 @@ mod tests {
         // game time 0 is the first tick after the clock began: tick 1; then every 300
         assert_eq!(spawned_at, [1, 301, 601, 901]);
     }
+
     /// A resting dropped item, last held at `last_owned`.
     fn resting_drop(last_owned: u64) -> Item {
         Item { resting: true, last_owned, ..falling([0.0, 0.0, 0.0], [0.0; 3]) }

@@ -11,7 +11,8 @@
 //! for each tick, sent as soon as the previous tick is seen; every fourth tick the owner kills a player
 //! (so that deaths, the weapons they drop, respawns beside starts and the items on the ground are all in
 //! it). Which tick a batch lands in depends on the machine keeping up, so a run on a busy machine can
-//! differ from another: compare runs that agree with themselves (run each side twice).
+//! differ from another (the run says how many ticks it skipped; one that skipped none can still have had
+//! a batch land a tick late): compare runs that agree with themselves, and run each side more than once.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -49,6 +50,7 @@ fn the_tables_after_a_scripted_run_of_the_module_on_blood_gulch() {
 
     let mut seen = owner.wait_for_tick(1, Duration::from_secs(10));
     let first = seen.marker.tick;
+    let (mut skipped, mut misaligned) = (0u64, 0u64);
     for step in 0..TICKS {
         walkers.sync_with_server(seen.players.values());
         let inputs = walkers.next_inputs();
@@ -59,7 +61,12 @@ fn the_tables_after_a_scripted_run_of_the_module_on_blood_gulch() {
             owner.report_death(victim, (killer != victim).then_some(killer)).unwrap();
         }
         owner.submit(&inputs);
-        seen = owner.wait_for_tick(seen.marker.tick + 1, Duration::from_secs(10));
+        let next = owner.wait_for_tick(seen.marker.tick + 1, Duration::from_secs(10));
+        // (a tick that is not the next, or that did not take exactly one batch of everyone's moves, is
+        // one the machine did not keep up with: the run is then not the script)
+        skipped += next.marker.tick - seen.marker.tick - 1;
+        misaligned += u64::from(next.marker.inputs != u32::from(PLAYERS));
+        seen = next;
     }
     owner.stop();
     // (what the last tick wrote has reached the owner's copy of the tables by now)
@@ -89,7 +96,12 @@ fn the_tables_after_a_scripted_run_of_the_module_on_blood_gulch() {
     let marker = owner.marker().unwrap();
     writeln!(text, "marker: rejected_total {} hits_total {}", marker.rejected_total, marker.hits_total).unwrap();
     let digest = text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01B3));
-    eprintln!("digest {digest:016x} of {} bytes, {} players", text.len(), owner.players().len());
+    eprintln!(
+        "digest {digest:016x} of {} bytes, {} players; ticks skipped {skipped}, ticks that did not take one batch {misaligned} \
+         (only runs with none of either are the script)",
+        text.len(),
+        owner.players().len()
+    );
     if let Some(path) = std::env::var_os("DIGEST_OUT") {
         std::fs::write(path, &text).unwrap();
     }

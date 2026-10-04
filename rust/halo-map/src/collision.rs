@@ -480,8 +480,11 @@ impl PlaneStack {
 }
 
 /// How far beyond a surface's bounding sphere and the sphere test's radius a surface has to be for its
-/// edges not to be looked at: far more than the rounding of the sums that compare them.
-const FAR_MARGIN: f32 = 0.01;
+/// edges not to be looked at. The edge test (`vector_intersects_sphere`) subtracts two products of the
+/// size of the square of the distance to the edge's start, so its answer is only right to about
+/// `f32::EPSILON * distance^2 / radius` (a hundredth of a unit at 500 units out for the smallest sphere
+/// asked for): a tenth is ten times that, and costs next to nothing in the surfaces it fails to rule out.
+const FAR_MARGIN: f32 = 0.1;
 
 /// A sphere that holds all of `points`: their mean and the farthest of them from it (a little more).
 fn bounding_sphere(points: &[[f32; 3]]) -> [f32; 4] {
@@ -562,7 +565,7 @@ fn surface_test_sphere(ctx: &mut SphereCtx, surface_index: i32) {
     let mut hit_feature = false;
     // (the centre is over the polygon while no edge has it on the wrong side)
     let mut over = true;
-    // a surface that is out of reach by more than any rounding (a hundredth of a unit) has no vertex
+    // a surface that is out of reach by more than any rounding (a tenth of a unit) has no vertex
     // in the sphere and no edge that meets it: only whether the centre is over it is left to find out
     let far = bsp.bounds.0.get(surface_index as usize).is_some_and(|b| {
         let (dx, dy, dz) = (b[0] - ctx.center[0], b[1] - ctx.center[1], b[2] - ctx.center[2]);
