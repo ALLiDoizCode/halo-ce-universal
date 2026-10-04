@@ -437,8 +437,15 @@ packs and the weapons are made; the grenades are the grenades' ticket's.
   does it once a frame. The public tables `powerup` (who is camouflaged, and
   until which tick) and `kit` (the rounds a player's weapons have: a client
   subscribes to its own row) are small.
-- The game makes an engine object for each item (`large_mode_update_items`),
-  at rest as far as the engine is concerned, and puts it where the library says;
+- The game makes an engine object for the server's items nearest the local
+  player (`large_mode_update_items`): those within 50 world units (60 for one
+  already shown), and of those the 64 nearest. The engine pays a game tick and a
+  frame for each object (a pile of 400 weapons took the frame rate to 4 to 60
+  a second, issue #41), and the server owns every item and takes what the
+  player reaches whether the game shows it or not; the nearest item, the one
+  the server gives, is always shown. The log's `items:` line says how many the
+  server holds and how many are drawn. Each object is at rest as far as the
+  engine is concerned, and is put where the library says;
   the engine's own item spawning, purging and pickups are off in the mode
   (`game_engine_update_item_spawn`, `game_engine_update_purge`,
   `players_decide_pickups`), and an item the engine made that the server did not
@@ -456,7 +463,7 @@ packs and the weapons are made; the grenades are the grenades' ticket's.
 - `large.autouse` (`HALO_LARGE_AUTOUSE`) presses the action button twice a
   second from that many seconds after the weapon is in hand: the tests use it.
 
-`rust/halo-client/tests/items_headless.rs` runs two real games (`headless`
+`rust/halo-client/tests/items_headless.rs` runs real games (`headless`
 above, with `--test items_headless -- --test-threads=1`).
 
 ### Pick a server from the list
