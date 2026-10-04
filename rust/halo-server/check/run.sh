@@ -188,6 +188,16 @@ relay=""
       fi
     done
     echo "$line" >> "$OUT/cpu.log"
+    # CPU time of each thread of SpacetimeDB, which does not grow when the machine is busy the way a
+    # tick's wall-clock time does: threads.log has one line each, "<unix time> <tid>:<name>:<ticks> ..."
+    pid=$(pgrep -n -f "(^|/)spacetimedb-standalone( |$)" || true)
+    if [ -n "$pid" ]; then
+      tline="$(date +%s.%N)"
+      for task in /proc/$pid/task/*; do
+        tline="$tline $(awk '{gsub(/[()]/, "", $2); print $1 ":" $2 ":" $14 + $15}' "$task/stat" 2>/dev/null)"
+      done
+      echo "$tline" >> "$OUT/threads.log"
+    fi
     # what the game has been sent over its connection to SpacetimeDB (the slow state: scores,
     # the player list, the items), in bytes since it connected
     rx=$(ss -tinp 'dport = :3000' 2>/dev/null | grep -A1 '"halo"' | grep -o 'bytes_received:[0-9]*' | head -1 | cut -d: -f2 || true)

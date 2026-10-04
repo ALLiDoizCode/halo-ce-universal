@@ -44,6 +44,29 @@ def cpu(path, start, end):
     print("cores used on average over the full-match seconds (from /proc, " + f"{t1 - t0:.0f} s): " + ", ".join(f"{k} {v:.2f}" for k, v in used.items()))
 
 
+def threads(path, start, end):
+    """The busiest threads of SpacetimeDB over the full-match seconds, in CPU time (threads.log). The
+    thread that runs the match's tick is the one that is busy 30 times a second, so its CPU time a tick
+    is its share of a core over 30: a figure that a busy machine does not stretch the way it does a
+    tick's wall-clock time (though a sibling thread sharing the core still slows it)."""
+    rows = []
+    try:
+        for text in open(path):
+            fields = text.split()
+            rows.append((float(fields[0]), {p.split(":")[0]: (p.split(":")[1], int(p.split(":")[2])) for p in fields[1:]}))
+    except (OSError, ValueError, IndexError):
+        return
+    window = [r for r in rows if start <= r[0] <= end]
+    if len(window) < 2:
+        return
+    (t0, a), (t1, b) = window[0], window[-1]
+    used = sorted(((b[k][1] - a[k][1]) / 100.0 / (t1 - t0), k, b[k][0]) for k in b if k in a)[::-1][:3]
+    print(
+        f"busiest threads of spacetimedb-standalone, CPU time over {t1 - t0:.0f} s: "
+        + ", ".join(f"{name} {tid} {cores:.3f} cores = {cores / 30 * 1000:.2f} ms a tick" for cores, tid, name in used)
+    )
+
+
 def parts(path, whole, full):
     """Tick age in its parts, side by side with what the players saw (load-report.txt, next to the log).
 
@@ -123,6 +146,7 @@ def main():
     try:
         began = float(open(os.path.join(os.path.dirname(path), "server.start")).read())
         cpu(os.path.join(os.path.dirname(path), "cpu.log"), began + first["at"], began + last["at"])
+        threads(os.path.join(os.path.dirname(path), "threads.log"), began + first["at"], began + last["at"])
     except (OSError, ValueError):
         pass
     print(
