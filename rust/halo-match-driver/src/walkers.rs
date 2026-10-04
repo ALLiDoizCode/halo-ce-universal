@@ -321,6 +321,27 @@ mod tests {
     use crate::PlayerRow;
     use halo_sim::fixtures::flat_floor_map;
 
+    /// The server's row for a player at `position`, last moved on `updated_tick`.
+    fn row(id: u16, position: [f32; 3], updated_tick: u64, rejected_moves: u64) -> PlayerRow {
+        PlayerRow {
+            id,
+            x: position[0],
+            y: position[1],
+            z: position[2],
+            yaw: 0.0,
+            pitch: 0.0,
+            updated_tick,
+            rejected_moves,
+            last_reject: 0,
+            last_reject_tick: 0,
+            flags: 0,
+            air_ticks: 0,
+            air_z: 0.0,
+            free_ticks: 0,
+            free_z: 0.0,
+        }
+    }
+
     /// How far one walker gets in 3 s, told by a server that shows their position `lag` inputs old
     /// (as the load program has it from the server's tables: the inputs it sent are on their way).
     fn distance_walked(lag: usize) -> f32 {
@@ -332,23 +353,7 @@ mod tests {
             let inputs = w.next_inputs();
             sent.push(inputs[0].position);
             let shown = sent[sent.len() - 1 - lag];
-            let row = PlayerRow {
-                id: 0,
-                x: shown[0],
-                y: shown[1],
-                z: shown[2],
-                yaw: 0.0,
-                pitch: 0.0,
-                updated_tick: tick,
-                rejected_moves: 0,
-                last_reject: 0,
-                last_reject_tick: 0,
-                flags: 0,
-                air_ticks: 0,
-                air_z: 0.0,
-                free_ticks: 0,
-                free_z: 0.0,
-            };
+            let row = row(0, shown, tick, 0);
             w.sync_with_server([&row]);
         }
         let end = sent[sent.len() - 1];
@@ -386,23 +391,7 @@ mod tests {
                 view = (0..players)
                     .map(|id| {
                         let p = server.mirror.player(id).unwrap();
-                        PlayerRow {
-                            id,
-                            x: p.position[0],
-                            y: p.position[1],
-                            z: p.position[2],
-                            yaw: p.yaw,
-                            pitch: p.pitch,
-                            updated_tick: server.moved_at.get(&id).copied().unwrap_or(0),
-                            rejected_moves: refused[id as usize],
-                            last_reject: 0,
-                            last_reject_tick: 0,
-                            flags: 0,
-                            air_ticks: 0,
-                            air_z: 0.0,
-                            free_ticks: 0,
-                            free_z: 0.0,
-                        }
+                        row(id, p.position, server.moved_at.get(&id).copied().unwrap_or(0), refused[id as usize])
                     })
                     .collect();
                 client.sync_with_server(view.iter());
