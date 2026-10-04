@@ -22,13 +22,16 @@ const MAX_STRIDE: f32 = 0.25;
 /// How far into a wall a walker's start may be.
 const PLACED_CLEAR: f32 = 0.001;
 
-/// How many ticks in a row a walker may stand at an edge, turning about, before they are let
-/// fall from it.
-const STALL_TICKS: u32 = 15;
+/// How hard a walker pushes ahead at most (of a run). The server judges a move against the player's
+/// last accepted one, and the ticks since: two inputs of a tick the gateway hands the server as one
+/// (the later of them), or an input lost on the way, make a move of two walks' strides in one tick's
+/// time, which a full run's is too long for (the bound is under twice a run) and 85% of it is not.
+const WALK_THROTTLE: f32 = 0.85;
 
-/// How far ahead of the server an acrobat's body may be (the inputs on their way,
-/// a few ticks of a fall at most) before the server's word is taken instead.
-const ACROBAT_LAG: f32 = 1.5;
+/// How far ahead of the server a walker's body may be (the inputs on their way: the server
+/// shows a tick or two of them behind, a few ticks of a fall at most for an acrobat) before the
+/// server's word is taken instead.
+const SYNC_LAG: f32 = 1.5;
 
 pub struct Walkers {
     pub map: MapData,
@@ -47,8 +50,6 @@ pub struct Walkers {
     ticks: u64,
     /// Per walker, how hard they push ahead (1 unless [`Walkers::set_throttle`] says).
     throttles: Vec<f32>,
-    /// Per walker, how many ticks in a row they have stood still at an edge, or are falling free of one.
-    stalled: Vec<u32>,
     /// The tick of each player's last accepted move, as the module's `updated_tick` holds it
     /// (the speed bound grows with the ticks since).
     moved_at: BTreeMap<u16, u64>,
@@ -144,7 +145,6 @@ impl Walkers {
                 acrobatics: false,
                 ticks: 0,
                 throttles: vec![1.0; players as usize],
-                stalled: vec![0; players as usize],
                 moved_at: BTreeMap::new(),
             },
             spawn,
@@ -200,11 +200,8 @@ impl Walkers {
             walk(
                 &self.map,
                 &mut body,
-                // (an acrobat at most at 85% throttle: the two inputs of a tick the gateway may
-                // hand the server as one are two ticks of running downhill, which the bound
-                // has room for at that, not at a full run)
                 &Controls {
-                    forward: self.throttles[i] * if self.acrobatics { 0.85 } else { 1.0 },
+                    forward: self.throttles[i] * WALK_THROTTLE,
                     strafe: 0.0,
                     yaw: self.headings[i],
                     pitch: 0.0,
@@ -216,11 +213,7 @@ impl Walkers {
             let before = self.bodies[i].position;
             let flat = ((body.position[0] - before[0]).powi(2) + (body.position[1] - before[1]).powi(2)).sqrt();
             let stride = (flat.powi(2) + (body.position[2] - before[2]).powi(2)).sqrt();
-            // (a walker who has stood at an edge for a while is hanging on a wall's face or a ledge,
-            // where turning about does not free them: they are let fall, as an acrobat is)
-            let falling_free = self.acrobatics || self.stalled[i] > STALL_TICKS;
-            let off_the_ground = if falling_free { flat > MAX_STRIDE } else { body.airborne || stride > MAX_STRIDE };
-            self.stalled[i] = if off_the_ground || (body.airborne && falling_free) { self.stalled[i] + 1 } else { 0 };
+            let off_the_ground = if self.acrobatics { flat > MAX_STRIDE } else { body.airborne || stride > MAX_STRIDE };
             let position = if off_the_ground {
                 // an edge: stand still and turn to a new random heading
                 self.headings[i] = self.rng.next_f32() * core::f32::consts::TAU;
@@ -251,12 +244,12 @@ impl Walkers {
             let position = [row.x, row.y, row.z];
             self.mirror.set_player(Player::new(row.id, position, row.yaw, row.pitch));
             self.moved_at.insert(row.id, row.updated_tick);
-            // (a walker the server has somewhere else than they thought is put there, at rest: for
-            // an acrobat, whose jump and fall are in the speed the body carries, only when it is
-            // somewhere else than the inputs still on their way account for)
+            // (a walker the server has somewhere else than they thought is put there, at rest: but
+            // only when it is somewhere else than the inputs still on their way account for. The
+            // server shows a walker where an input of a tick or two ago put them; put there and
+            // at rest every tick, a walker would never get up to the speed of a walk)
             let off = |a: [f32; 3], b: [f32; 3]| (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>().sqrt();
-            let lost = if self.acrobatics { off(self.bodies[index].position, position) > ACROBAT_LAG } else { true };
-            if lost && self.bodies[index].position != position {
+            if off(self.bodies[index].position, position) > SYNC_LAG {
                 self.bodies[index] = resting(&self.map, position);
             }
             if row.rejected_moves > self.rejects_seen[index] {
@@ -320,4 +313,144 @@ fn resting(map: &MapData, position: [f32; 3]) -> Body {
 /// The height standing on the ground below `from`.
 fn ground_below(map: &MapData, from: [f32; 3], length: f32) -> Option<f32> {
     map.collision.ray_down(from, length).map(|hit| hit.z + 0.01)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PlayerRow;
+    use halo_sim::fixtures::flat_floor_map;
+
+    /// How far one walker gets in 3 s, told by a server that shows their position `lag` inputs old
+    /// (as the load program has it from the server's tables: the inputs it sent are on their way).
+    fn distance_walked(lag: usize) -> f32 {
+        let (mut w, spawn) = Walkers::new(flat_floor_map(), &[[0.0, 0.0, 0.0]], 1, 1);
+        let start = spawn[0].position;
+        let mut sent = vec![start; lag + 1];
+        w.set_course(0, 1.0, 0.5);
+        for tick in 1..=90u64 {
+            let inputs = w.next_inputs();
+            sent.push(inputs[0].position);
+            let shown = sent[sent.len() - 1 - lag];
+            let row = PlayerRow {
+                id: 0,
+                x: shown[0],
+                y: shown[1],
+                z: shown[2],
+                yaw: 0.0,
+                pitch: 0.0,
+                updated_tick: tick,
+                rejected_moves: 0,
+                last_reject: 0,
+                last_reject_tick: 0,
+                flags: 0,
+                air_ticks: 0,
+                air_z: 0.0,
+                free_ticks: 0,
+                free_z: 0.0,
+            };
+            w.sync_with_server([&row]);
+        }
+        let end = sent[sent.len() - 1];
+        ((end[0] - start[0]).powi(2) + (end[1] - start[1]).powi(2)).sqrt()
+    }
+
+    #[test]
+    fn a_walker_whose_server_shows_them_a_tick_or_two_behind_still_walks_at_speed() {
+        let free = distance_walked(0);
+        assert!(free > 3.0, "a walker walks: {free}");
+        for lag in 1..=4 {
+            let d = distance_walked(lag);
+            assert!(d > 0.9 * free, "with the server {lag} ticks behind a walker got {d} of the {free} they walk");
+        }
+    }
+
+    /// A client of `players` walkers and a server (the same walk, run as the module runs it) on a flat
+    /// floor, joined by a link that takes `delay` ticks from a tick being seen to the input answering
+    /// it being applied, and loses `loss` of the inputs and of the views of the server's tables.
+    /// Returns (moves the server refused, how far the walkers got on average).
+    fn linked(loss: f32, delay: usize, jitter: f32) -> (usize, f32) {
+        let players = 20;
+        let (mut client, spawn) = Walkers::new(flat_floor_map(), &[[0.0, 0.0, 0.0]], players, 3);
+        let (mut server, _) = Walkers::new(flat_floor_map(), &[[0.0, 0.0, 0.0]], players, 3);
+        let mut link = Rng::seeded(99);
+        let mut arriving: Vec<Vec<PlayerInput>> = vec![Vec::new(); 400 + delay + 2];
+        let mut view: Vec<PlayerRow> = Vec::new();
+        let mut last_arrival = vec![0usize; players as usize];
+        let mut refused = vec![0u64; players as usize];
+        let mut total_refused = 0;
+        let ticks = 300;
+        for tick in 1..=ticks {
+            // the client sees the server's tables as of the tick before, unless that was lost
+            if view.is_empty() || link.next_f32() >= loss {
+                view = (0..players)
+                    .map(|id| {
+                        let p = server.mirror.player(id).unwrap();
+                        PlayerRow {
+                            id,
+                            x: p.position[0],
+                            y: p.position[1],
+                            z: p.position[2],
+                            yaw: p.yaw,
+                            pitch: p.pitch,
+                            updated_tick: server.moved_at.get(&id).copied().unwrap_or(0),
+                            rejected_moves: refused[id as usize],
+                            last_reject: 0,
+                            last_reject_tick: 0,
+                            flags: 0,
+                            air_ticks: 0,
+                            air_z: 0.0,
+                            free_ticks: 0,
+                            free_z: 0.0,
+                        }
+                    })
+                    .collect();
+                client.sync_with_server(view.iter());
+                for input in client.next_inputs() {
+                    if link.next_f32() >= loss {
+                        // (a little jitter: an input may arrive a tick after the one sent next, and
+                        // the two are then handed to the server as one, the later of them)
+                        let late = usize::from(link.next_f32() < jitter);
+                        let at = (tick + delay + late).max(last_arrival[input.player as usize]);
+                        last_arrival[input.player as usize] = at;
+                        arriving[at].push(input);
+                    }
+                }
+            }
+            // (two inputs of a player in one tick: the later one is the one the server gets)
+            let mut batch: Vec<PlayerInput> = Vec::new();
+            for input in std::mem::take(&mut arriving[tick]) {
+                match batch.iter_mut().find(|i| i.player == input.player) {
+                    Some(earlier) => *earlier = input,
+                    None => batch.push(input),
+                }
+            }
+            for event in server.apply(&batch, tick as u64) {
+                if let Event::MoveRejected { player, .. } = event {
+                    refused[player as usize] += 1;
+                    total_refused += 1;
+                }
+            }
+        }
+        let walked: f32 = (0..players)
+            .map(|id| {
+                let (a, b) = (spawn[id as usize].position, server.mirror.player(id).unwrap().position);
+                (a[0] - b[0]).hypot(a[1] - b[1])
+            })
+            .sum::<f32>()
+            / players as f32;
+        (total_refused, walked)
+    }
+
+    #[test]
+    fn a_walker_whose_inputs_are_lost_or_bunched_on_the_way_is_not_refused_and_still_walks() {
+        let (_, free) = linked(0.0, 2, 0.0);
+        for (loss, jitter) in [(0.0, 0.3), (0.05, 0.3), (0.15, 0.6)] {
+            for delay in 0..=2 {
+                let (refused, walked) = linked(loss, delay, jitter);
+                assert_eq!(refused, 0, "{refused} moves refused at loss {loss} and jitter {jitter}, delay {delay}");
+                assert!(walked > 0.6 * free, "got {walked} of the {free} walked, loss {loss} jitter {jitter}");
+            }
+        }
+    }
 }
