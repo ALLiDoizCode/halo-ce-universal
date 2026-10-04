@@ -61,6 +61,7 @@ pub enum Event {
 pub fn step(store: &mut impl Store, inputs: &[PlayerInput], map: &MapData, _rng: &mut Rng) -> Vec<Event> {
     let mut events = Vec::with_capacity(inputs.len());
     let mut seen = BTreeSet::new();
+    let mut scratch = crate::pill::Scratch::default();
     for input in inputs {
         if !seen.insert(input.player) {
             events.push(Event::MoveRejected { player: input.player, reason: RejectReason::DuplicateInput });
@@ -70,7 +71,7 @@ pub fn step(store: &mut impl Store, inputs: &[PlayerInput], map: &MapData, _rng:
             events.push(Event::MoveRejected { player: input.player, reason: RejectReason::UnknownPlayer });
             continue;
         };
-        match validate(map, &player, input, store.ticks_since_move(input.player)) {
+        match validate(&mut scratch, map, &player, input, store.ticks_since_move(input.player)) {
             Ok(air) => {
                 let flags = (input.flags & CLIENT_FLAGS) | if air.ticks > 0 { FLAG_AIRBORNE } else { 0 };
                 store.set_player(Player {

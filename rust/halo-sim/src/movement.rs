@@ -2,7 +2,7 @@ use halo_map::collision::{TEST_BACK_FACING, TEST_FRONT_FACING};
 
 use crate::map::MapData;
 use crate::math::sqrt;
-use crate::pill::footing;
+use crate::pill::{footing_in, Scratch};
 use crate::state::{Player, FLAG_CROUCHED};
 use crate::step::{PlayerInput, RejectReason};
 use crate::walk::GRAVITY;
@@ -134,7 +134,13 @@ fn air_slack(map: &MapData) -> f32 {
 /// stand on) a player is held to the speed bound going up, to the top of a
 /// jump above where they left the ground, and to the same fall going down. A
 /// report on the ground ends it, if it is no higher than a jump reaches.
-pub(crate) fn validate(map: &MapData, player: &Player, input: &PlayerInput, ticks: u32) -> Result<Air, RejectReason> {
+pub(crate) fn validate(
+    scratch: &mut Scratch,
+    map: &MapData,
+    player: &Player,
+    input: &PlayerInput,
+    ticks: u32,
+) -> Result<Air, RejectReason> {
     let from = player.position;
     let before = Air { ticks: player.air_ticks, z: player.air_z, free_ticks: player.free_ticks, free_z: player.free_z };
     let to = input.position;
@@ -176,11 +182,12 @@ pub(crate) fn validate(map: &MapData, player: &Player, input: &PlayerInput, tick
     {
         return Err(RejectReason::ThroughSurface);
     }
-    let footing = footing(&map.collision, base_to, height, radius, GROUND_TOLERANCE, m.minimum_normal_k);
+    let footing = footing_in(scratch, &map.collision, base_to, height, radius, GROUND_TOLERANCE, m.minimum_normal_k);
     if footing.penetration > PENETRATION_TOLERANCE {
         // a player can be put a little inside something (a start next to an
         // overhang) and the engine lets them stay: what no move does is go deeper
-        let before = crate::pill::footing(
+        let before = footing_in(
+            scratch,
             &map.collision,
             base_from,
             m.collision_height_standing - 2.0 * radius,
@@ -216,7 +223,8 @@ pub(crate) fn validate(map: &MapData, player: &Player, input: &PlayerInput, tick
                 if delta[2] >= 0.0 {
                     return Err(RejectReason::TooFast);
                 }
-            } else if crate::pill::footing(
+            } else if footing_in(
+                scratch,
                 &map.collision,
                 base_to,
                 height,

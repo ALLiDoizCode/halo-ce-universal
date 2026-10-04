@@ -166,6 +166,7 @@ pub struct MatchTick {
 
 /// One player. Position and facing are the last move the server accepted.
 #[table(accessor = player, public)]
+#[derive(Clone)]
 pub struct PlayerRow {
     #[primary_key]
     id: u16,
@@ -683,13 +684,37 @@ fn add_to_roster(ctx: &ReducerContext, id: u16, identity: Option<Identity>) {
 
 /// `halo_sim::Store` over the `player` table. Position writes keep the
 /// rejection counters.
+///
+/// Every call to the host costs, and a tick looks at every player (a move reads the player's row and
+/// writes it, the rules and the items read them all): [`TableStore::load`] reads the whole table once,
+/// and from then on the store answers from what it read and writes through to the table, so that a
+/// tick reads each row once. It is a copy of the table for as long as the store lives, and nothing else
+/// writes the position columns in that time (the rejection counters the tick writes after the
+/// simulation are not read through it).
 struct TableStore<'a> {
     ctx: &'a ReducerContext,
     tick: u64,
+    /// Every row as of now, once loaded.
+    rows: RefCell<Option<BTreeMap<PlayerId, PlayerRow>>>,
+}
+
+impl<'a> TableStore<'a> {
+    fn new(ctx: &'a ReducerContext, tick: u64) -> TableStore<'a> {
+        TableStore { ctx, tick, rows: RefCell::new(None) }
+    }
+
+    /// Read every player's row, for the rest of the store's life.
+    fn load(&self) {
+        let rows = self.ctx.db.player().iter().map(|row| (row.id, row)).collect();
+        *self.rows.borrow_mut() = Some(rows);
+    }
 }
 
 impl Store for TableStore<'_> {
     fn player(&self, id: PlayerId) -> Option<Player> {
+        if let Some(rows) = self.rows.borrow().as_ref() {
+            return rows.get(&id).map(to_player);
+        }
         self.ctx.db.player().id().find(id).as_ref().map(to_player)
     }
 
@@ -710,51 +735,66 @@ impl Store for TableStore<'_> {
             free_z: p.free_z,
             ..row
         };
-        match table.id().find(p.id) {
-            Some(row) => {
-                table.id().update(moved(row));
-            }
-            None => {
-                let fresh = PlayerRow {
-                    id: p.id,
-                    x,
-                    y,
-                    z,
-                    yaw: p.yaw,
-                    pitch: p.pitch,
-                    updated_tick: self.tick,
-                    rejected_moves: 0,
-                    last_reject: REJECT_NONE,
-                    last_reject_tick: 0,
-                    flags: p.flags,
-                    air_ticks: p.air_ticks,
-                    air_z: p.air_z,
-                    free_ticks: p.free_ticks,
-                    free_z: p.free_z,
-                };
-                table.insert(fresh);
-            }
+        let known = match self.rows.borrow().as_ref() {
+            Some(rows) => rows.get(&p.id).cloned(),
+            None => table.id().find(p.id),
+        };
+        let written = match known {
+            Some(row) => table.id().update(moved(row)),
+            None => table.insert(PlayerRow {
+                id: p.id,
+                x,
+                y,
+                z,
+                yaw: p.yaw,
+                pitch: p.pitch,
+                updated_tick: self.tick,
+                rejected_moves: 0,
+                last_reject: REJECT_NONE,
+                last_reject_tick: 0,
+                flags: p.flags,
+                air_ticks: p.air_ticks,
+                air_z: p.air_z,
+                free_ticks: p.free_ticks,
+                free_z: p.free_z,
+            }),
+        };
+        if let Some(rows) = self.rows.borrow_mut().as_mut() {
+            rows.insert(p.id, written);
         }
     }
 
     fn remove_player(&mut self, id: PlayerId) -> bool {
+        if let Some(rows) = self.rows.borrow_mut().as_mut() {
+            rows.remove(&id);
+        }
         self.ctx.db.player().id().delete(id)
     }
 
     fn player_ids(&self) -> Vec<PlayerId> {
+        if let Some(rows) = self.rows.borrow().as_ref() {
+            return rows.keys().copied().collect();
+        }
         let mut ids: Vec<PlayerId> = self.ctx.db.player().iter().map(|p| p.id).collect();
         ids.sort_unstable();
         ids
     }
 
     fn players(&self) -> Vec<Player> {
+        if let Some(rows) = self.rows.borrow().as_ref() {
+            return rows.values().map(to_player).collect();
+        }
         let mut all: Vec<Player> = self.ctx.db.player().iter().map(|r| to_player(&r)).collect();
         all.sort_unstable_by_key(|p| p.id);
         all
     }
 
     fn ticks_since_move(&self, id: PlayerId) -> u32 {
-        let since = self.ctx.db.player().id().find(id).map_or(1, |row| self.tick.saturating_sub(row.updated_tick));
+        let updated = match self.rows.borrow().as_ref() {
+            Some(rows) => rows.get(&id).map(|row| row.updated_tick),
+            None => self.ctx.db.player().id().find(id).map(|row| row.updated_tick),
+        };
+        let since = updated.map_or(1, |updated| self.tick.saturating_sub(updated));
         since.clamp(1, u32::MAX as u64) as u32
     }
 }
@@ -916,6 +956,15 @@ impl GameStore for TableGame<'_> {
         let mut all: Vec<Contestant> = self.ctx.db.standing().iter().map(|r| contestant_of(&r)).collect();
         all.sort_unstable_by_key(|c| c.id);
         all
+    }
+
+    fn contestants_of(&self, ids: &[PlayerId]) -> Vec<Option<Contestant>> {
+        // (a lookup is a call to the host: with this many to find, one pass over the table is cheaper)
+        if ids.len() < 16 {
+            return ids.iter().map(|&id| self.contestant(id)).collect();
+        }
+        let all = self.contestants();
+        ids.iter().map(|&id| all.binary_search_by_key(&id, |c| c.id).ok().map(|i| all[i])).collect()
     }
 
     fn unspawned(&self) -> Vec<Contestant> {
@@ -1477,7 +1526,7 @@ pub fn join(ctx: &ReducerContext, udp_key: Vec<u8>) -> Result<(), String> {
         add_to_roster(ctx, id, Some(ctx.sender()));
         let mut game = TableGame { ctx };
         rules::enter(&mut game, id, roster_team(ctx, id), tick);
-        let mut store = TableStore { ctx, tick };
+        let mut store = TableStore::new(ctx, tick);
         let mut rng = Rng::seeded(tick ^ ((id as u64) << 32) ^ 0x5EED);
         let events = rules::spawn_due(&mut store, &mut game, &map, &mut rng, tick);
         log_events(&events);
@@ -1875,6 +1924,27 @@ pub fn report_death(ctx: &ReducerContext, victim: u16, killer: u16) -> Result<()
     Ok(())
 }
 
+/// A timed stage of the tick, for the profile of where its time goes (`--features stage-timing`; the
+/// host logs "Timing span" lines with each stage's duration, see `rust/halo-server/check/stages.py`).
+/// Without the feature it is nothing and costs nothing.
+#[cfg(feature = "stage-timing")]
+struct Stage(#[allow(dead_code)] spacetimedb::log_stopwatch::LogStopwatch);
+#[cfg(not(feature = "stage-timing"))]
+struct Stage;
+
+impl Stage {
+    #[cfg(feature = "stage-timing")]
+    fn begin(name: &str) -> Stage {
+        Stage(spacetimedb::log_stopwatch::LogStopwatch::new(name))
+    }
+    #[cfg(not(feature = "stage-timing"))]
+    fn begin(_name: &str) -> Stage {
+        Stage
+    }
+    /// Stop the stage here (it stops by itself at the end of its scope).
+    fn end(self) {}
+}
+
 /// One simulation tick (scheduled; the server calls it, nobody else may).
 #[reducer]
 pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
@@ -1885,6 +1955,7 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
     marker.tick += 1;
     marker.stamped_us = ctx.timestamp.to_micros_since_unix_epoch();
 
+    let stage = Stage::begin("tick.1 read inputs");
     let mut batches: Vec<InputBatch> = ctx.db.input_batch().iter().collect();
     batches.sort_unstable_by_key(|b| b.id);
     let mut decoded = Vec::with_capacity(batches.len());
@@ -1896,7 +1967,9 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
         }
     }
     let inputs = halo_sim::wire::collapse_batches(decoded);
+    stage.end();
 
+    let stage = Stage::begin("tick.2 read deaths and hit reports");
     let mut deaths: Vec<PendingDeath> = ctx.db.pending_death().iter().collect();
     deaths.sort_unstable_by_key(|d| d.id);
     for death in &deaths {
@@ -1919,16 +1992,20 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
         }
     }
 
+    stage.end();
+
     let mut rejected = 0u32;
     let (mut hits, mut rejected_hits, mut not_where_seen) = (0u32, 0u32, 0u64);
     if let Some(map) = current_map(ctx) {
-        let mut store = TableStore { ctx, tick: marker.tick };
+        let mut store = TableStore::new(ctx, marker.tick);
+        store.load();
         let mut game = TableGame { ctx };
         let mut rng = Rng::seeded(marker.tick);
         if marker.tick.is_multiple_of(TICKS_PER_SECOND as u64) {
             ensure_fighters(ctx, &map, marker.tick);
         }
         // the hits first: the damage they do, and the deaths, are this tick's
+        let stage = Stage::begin("tick.3 combat resolve");
         let dealt = TRAILS.with(|t| {
             halo_sim::combat::resolve(
                 &store,
@@ -1952,8 +2029,12 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
             }
         }
         deaths.extend(dealt.deaths);
+        stage.end();
+        let stage = Stage::begin("tick.4 rules play");
         let outcome = rules::play(&mut store, &mut game, &map, &mut rng, marker.tick, &deaths, &inputs);
+        stage.end();
         log_events(&outcome.events);
+        let stage = Stage::begin("tick.5 deaths and spawns");
         // a player who died puts their weapons down; a player who spawned has the weapon
         // and the rounds the match starts them with
         let mut item_events: Vec<ItemEvent> = Vec::new();
@@ -1976,7 +2057,9 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
                 spawn_combat(ctx, &map, *player, marker.tick);
             }
         }
+        stage.end();
         // the items: what the placements make, what falls, what the players take
+        let stage = Stage::begin("tick.6 items");
         let mut requests: Vec<Request> =
             ctx.db.use_request().iter().map(|r| Request { player: r.player, slot: r.slot }).collect();
         requests.sort_unstable_by_key(|r| r.player);
@@ -1994,6 +2077,8 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
             &requests,
         ));
         log_item_events(&item_events);
+        stage.end();
+        let stage = Stage::begin("tick.7 rejected moves");
         for event in outcome.moves {
             let Event::MoveRejected { player, reason } = event else { continue };
             rejected += 1;
@@ -2020,14 +2105,19 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
                 ctx.db.player().id().update(row);
             }
         }
+        stage.end();
         // where the server saw everyone, for the next ticks' hit reports
+        let stage = Stage::begin("tick.8 trails");
+        // (the store has them: the rejection counters written above are the only change to the rows since it read them)
         TRAILS.with(|t| {
-            t.borrow_mut().record(marker.tick, ctx.db.player().iter().map(|p| (p.id, [p.x, p.y, p.z])));
+            t.borrow_mut().record(marker.tick, store.players().iter().map(|p| (p.id, p.position)));
         });
+        stage.end();
     } else if !inputs.is_empty() {
         log::warn!("no map is loaded: dropped {} inputs", inputs.len());
     }
 
+    let stage = Stage::begin("tick.9 upkeep and marker");
     // once a second: seats whose player has been away for the grace period go
     if marker.tick.is_multiple_of(TICKS_PER_SECOND as u64) {
         let grace = ctx.db.match_config().id().find(ONLY).map_or(DEFAULT_AWAY_GRACE_TICKS, |c| c.away_grace_ticks);
@@ -2059,5 +2149,6 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
     marker.hits_total += hits as u64;
     marker.rejected_not_where_seen_total += not_where_seen;
     ctx.db.match_tick().id().update(marker);
+    stage.end();
     Ok(())
 }

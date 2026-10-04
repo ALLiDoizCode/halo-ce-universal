@@ -104,6 +104,10 @@ pub struct Report {
     /// sent) over the ticks of this report's window: the median and the slowest.
     pub send_ms_p50: f64,
     pub send_ms_max: f64,
+    /// How old a tick was when it reached the gateway (the stamp to its arrival), in ms: the tick
+    /// time plus the commit and the delivery. The player's tick age is this plus the send.
+    pub arrival_ms_p50: f64,
+    pub arrival_ms_max: f64,
 }
 
 impl RunningMatch {
@@ -241,6 +245,8 @@ impl RunningMatch {
             report.inputs_late = stats.inputs_late.saturating_sub(before.inputs_late);
             report.inputs_unbound = stats.inputs_unbound.saturating_sub(before.inputs_unbound);
             report.ticks_missed = stats.ticks_skipped.saturating_sub(before.ticks_skipped);
+            report.arrival_ms_p50 = stats.arrival_ms.p50;
+            report.arrival_ms_max = stats.arrival_ms.max;
         }
         if let Some(gateway) = &self.gateway {
             let window = gateway.take_send_window();

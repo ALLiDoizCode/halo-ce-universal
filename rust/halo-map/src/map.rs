@@ -1176,5 +1176,5 @@ fn parse_collision_bsp(raw: &Raw, space: &Space, cb: usize) -> Result<CollisionB
         let o = p + i * SZ_VERTEX;
         out.vertices.push(Vertex { point: raw.f32s(o)?, first_edge: raw.i32(o + 12)? });
     }
-    Ok(out)
+    Ok(out.with_bounds())
 }

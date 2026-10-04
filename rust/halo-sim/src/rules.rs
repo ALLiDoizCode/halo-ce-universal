@@ -227,6 +227,11 @@ pub trait GameStore {
     fn remove_contestant(&mut self, id: PlayerId) -> bool;
     /// Every contestant, in id order.
     fn contestants(&self) -> Vec<Contestant>;
+    /// The contestant with each of these ids, in the order of `ids` (`None` for one that is not a
+    /// contestant). A store for which each lookup is dear may answer them all in one pass.
+    fn contestants_of(&self, ids: &[PlayerId]) -> Vec<Option<Contestant>> {
+        ids.iter().map(|&id| self.contestant(id)).collect()
+    }
     /// The contestants who are not alive (a store with an index on life may
     /// answer from it), in id order.
     fn unspawned(&self) -> Vec<Contestant> {
@@ -495,14 +500,14 @@ pub fn play(
     // know goes to the step, which refuses it), and not at once after a spawn: what
     // their client sent before it heard of the spawn is still on its way, from where
     // their body was, and would be refused as a move across the map
+    let ids: Vec<PlayerId> = inputs.iter().map(|i| i.player).collect();
     let living: Vec<PlayerInput> = inputs
         .iter()
-        .filter(|i| {
-            game.contestant(i.player).is_none_or(|c| {
-                c.is_alive() && (c.spawned_tick == 0 || tick > c.spawned_tick + SPAWN_INPUT_DELAY_TICKS)
-            })
+        .zip(game.contestants_of(&ids))
+        .filter(|(_, c)| {
+            c.is_none_or(|c| c.is_alive() && (c.spawned_tick == 0 || tick > c.spawned_tick + SPAWN_INPUT_DELAY_TICKS))
         })
-        .copied()
+        .map(|(i, _)| *i)
         .collect();
     let moves = step(store, &living, map, rng);
 
@@ -544,11 +549,16 @@ pub fn spawn_due(
     });
 
     let teams = state.rules.teams;
+    // (the players are read at once, in id order: a store may find that dearer to ask for one by one)
+    let bodies = store.players();
     let mut occupants: Vec<Occupant> = game
         .contestants()
         .iter()
         .filter(|c| c.is_alive())
-        .filter_map(|c| store.player(c.id).map(|p| Occupant { position: p.position, team: c.team }))
+        .filter_map(|c| {
+            let body = bodies.binary_search_by_key(&c.id, |p| p.id).ok().map(|i| &bodies[i])?;
+            Some(Occupant { position: body.position, team: c.team })
+        })
         .collect();
     // a team (or, without teams, everyone) with no spot left for one has none for the next
     let (mut none_free, mut none_beside) = ([false; TEAMS as usize], [false; TEAMS as usize]);

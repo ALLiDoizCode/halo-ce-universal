@@ -42,6 +42,9 @@
 #                   loses that share of its datagrams, each way
 #   BIN_DIR         a folder with halo-server and the other programs, already built (to compare two
 #                   builds of the server by the same script); without it the script builds them
+#   NO_BUILD [unset]  1: do not build anything (MATCH_WASM [the module's release build] is the match module to run)
+#   MODULE_FEATURES [none]  cargo features for the match module, e.g. stage-timing (module-logs/ gets the
+#                   host's timing lines; python3 check/stages.py module-logs/* summarises them)
 #   OUT             where logs and reports go [rust/halo-server/target/slayer-check/<time>]
 #
 # The script builds the modules and programs it needs.
@@ -80,11 +83,18 @@ mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
 ulimit -n 65536
 
-(cd "$rust/halo-match-module" && cargo build --locked --release --target wasm32-unknown-unknown 2>&1 | tail -1)
-(cd "$rust/halo-root-module" && cargo build --locked --release --target wasm32-unknown-unknown 2>&1 | tail -1)
-if [ -z "${BIN_DIR:-}" ]; then
-  (cd "$rust/halo-server" && cargo build --locked --release 2>&1 | tail -1)
+# NO_BUILD=1 skips the builds (they are done beforehand, so that a run that holds the machine does not
+# also hold it for a compile); MATCH_WASM names the match module to run then.
+# MODULE_FEATURES=stage-timing: the match module times the stages of its tick (see stages.py)
+# BIN_DIR: the programs are already built there, so only the modules are built
+if [ -z "${NO_BUILD:-}" ]; then
+  (cd "$rust/halo-match-module" && cargo build --locked --release --target wasm32-unknown-unknown ${MODULE_FEATURES:+--features "$MODULE_FEATURES"} 2>&1 | tail -1)
+  (cd "$rust/halo-root-module" && cargo build --locked --release --target wasm32-unknown-unknown 2>&1 | tail -1)
+  if [ -z "${BIN_DIR:-}" ]; then
+    (cd "$rust/halo-server" && cargo build --locked --release 2>&1 | tail -1)
+  fi
 fi
+MATCH_WASM=${MATCH_WASM:-$rust/halo-match-module/target/wasm32-unknown-unknown/release/halo_match_module.wasm}
 bin="${BIN_DIR:-$rust/halo-server/target/release}"
 
 # the server's configuration: one server, one rotation entry
@@ -99,7 +109,7 @@ database = "halo-root"
 module = "$rust/halo-root-module/target/wasm32-unknown-unknown/release/halo_root_module.wasm"
 
 [match]
-module = "$rust/halo-match-module/target/wasm32-unknown-unknown/release/halo_match_module.wasm"
+module = "$MATCH_WASM"
 maps_dir = "$HALO_MAP_DIR"
 
 [[server]]
@@ -185,6 +195,16 @@ relay=""
       fi
     done
     echo "$line" >> "$OUT/cpu.log"
+    # CPU time of each thread of SpacetimeDB, which does not grow when the machine is busy the way a
+    # tick's wall-clock time does: threads.log has one line each, "<unix time> <tid>:<name>:<ticks> ..."
+    pid=$(pgrep -n -f "(^|/)spacetimedb-standalone( |$)" || true)
+    if [ -n "$pid" ]; then
+      tline="$(date +%s.%N)"
+      for task in /proc/$pid/task/*; do
+        tline="$tline $(awk '{gsub(/[()]/, "", $2); print $1 ":" $2 ":" $14 + $15}' "$task/stat" 2>/dev/null)"
+      done
+      echo "$tline" >> "$OUT/threads.log"
+    fi
     # what the game has been sent over its connection to SpacetimeDB (the slow state: scores,
     # the player list, the items), in bytes since it connected
     rx=$(ss -tinp 'dport = :3000' 2>/dev/null | grep -A1 '"halo"' | grep -o 'bytes_received:[0-9]*' | head -1 | cut -d: -f2 || true)
@@ -216,6 +236,16 @@ if [ "$GAME" = 1 ]; then
 fi
 
 wait "$load" || echo "the load program failed: see $OUT/load.log"
+if [ -n "${MODULE_FEATURES:-}" ]; then
+  # the module's own log (the stage timings): the match's database is gone once the server stops
+  mkdir -p "$OUT/module-logs"
+  # (a file a database: they are all called by the day's date, in folders of their own; the match the
+  # crowd is in is the first, and its database is deleted a little after the match ends, so HOLD
+  # should be shorter than END_SECS for this to find it)
+  for f in $(find "$OUT/stdb/data" -name '*.log' -path '*module_logs*' 2>/dev/null); do
+    cp "$f" "$OUT/module-logs/$(echo "${f#"$OUT"/stdb/data/}" | tr / _)" || true
+  done
+fi
 if [ -n "$game" ]; then kill -TERM "$game" 2>/dev/null || true; wait "$game" 2>/dev/null || true; fi
 if [ -n "$relay" ]; then kill -TERM "$relay" 2>/dev/null || true; fi
 cleanup
