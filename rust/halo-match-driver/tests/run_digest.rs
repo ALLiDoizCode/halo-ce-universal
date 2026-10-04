@@ -84,8 +84,10 @@ fn the_tables_after_a_scripted_run_of_the_module_on_blood_gulch() {
     for row in owner.fighters().values() {
         writeln!(text, "{row:?}").unwrap();
     }
-    for row in owner.items().values() {
-        writeln!(text, "{row:?}").unwrap();
+    // (an item's id is where SpacetimeDB's counter was when it was made, which depends on how many ids the
+    // database had been allotted in blocks before, not on the simulation: the items are told by their order)
+    for (rank, row) in owner.items().values().enumerate() {
+        writeln!(text, "{:?}", halo_match_driver::ItemRow { id: rank as u32, ..row.clone() }).unwrap();
     }
     for row in owner.kits().values() {
         writeln!(text, "{row:?}").unwrap();
