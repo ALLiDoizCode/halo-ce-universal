@@ -22,6 +22,12 @@ const MAX_STRIDE: f32 = 0.25;
 /// How far into a wall a walker's start may be.
 const PLACED_CLEAR: f32 = 0.001;
 
+/// How hard a walker pushes ahead at most (of a run). The server judges a move against the player's
+/// last accepted one, and the ticks since: two inputs of a tick the gateway hands the server as one
+/// (the later of them), or an input lost on the way, make a move of two walks' strides in one tick's
+/// time, which a full run's is too long for (the bound is under twice a run) and 85% of it is not.
+const WALK_THROTTLE: f32 = 0.85;
+
 /// How far ahead of the server a walker's body may be (the inputs on their way: the server
 /// shows a tick or two of them behind, a few ticks of a fall at most for an acrobat) before the
 /// server's word is taken instead.
@@ -194,11 +200,8 @@ impl Walkers {
             walk(
                 &self.map,
                 &mut body,
-                // (an acrobat at most at 85% throttle: the two inputs of a tick the gateway may
-                // hand the server as one are two ticks of running downhill, which the bound
-                // has room for at that, not at a full run)
                 &Controls {
-                    forward: self.throttles[i] * if self.acrobatics { 0.85 } else { 1.0 },
+                    forward: self.throttles[i] * WALK_THROTTLE,
                     strafe: 0.0,
                     yaw: self.headings[i],
                     pitch: 0.0,
@@ -359,6 +362,95 @@ mod tests {
         for lag in 1..=4 {
             let d = distance_walked(lag);
             assert!(d > 0.9 * free, "with the server {lag} ticks behind a walker got {d} of the {free} they walk");
+        }
+    }
+
+    /// A client of `players` walkers and a server (the same walk, run as the module runs it) on a flat
+    /// floor, joined by a link that takes `delay` ticks from a tick being seen to the input answering
+    /// it being applied, and loses `loss` of the inputs and of the views of the server's tables.
+    /// Returns (moves the server refused, how far the walkers got on average).
+    fn linked(loss: f32, delay: usize, jitter: f32) -> (usize, f32) {
+        let players = 20;
+        let (mut client, spawn) = Walkers::new(flat_floor_map(), &[[0.0, 0.0, 0.0]], players, 3);
+        let (mut server, _) = Walkers::new(flat_floor_map(), &[[0.0, 0.0, 0.0]], players, 3);
+        let mut link = Rng::seeded(99);
+        let mut arriving: Vec<Vec<PlayerInput>> = vec![Vec::new(); 400 + delay + 2];
+        let mut view: Vec<PlayerRow> = Vec::new();
+        let mut last_arrival = vec![0usize; players as usize];
+        let mut refused = vec![0u64; players as usize];
+        let mut total_refused = 0;
+        let ticks = 300;
+        for tick in 1..=ticks {
+            // the client sees the server's tables as of the tick before, unless that was lost
+            if view.is_empty() || link.next_f32() >= loss {
+                view = (0..players)
+                    .map(|id| {
+                        let p = server.mirror.player(id).unwrap();
+                        PlayerRow {
+                            id,
+                            x: p.position[0],
+                            y: p.position[1],
+                            z: p.position[2],
+                            yaw: p.yaw,
+                            pitch: p.pitch,
+                            updated_tick: server.moved_at.get(&id).copied().unwrap_or(0),
+                            rejected_moves: refused[id as usize],
+                            last_reject: 0,
+                            last_reject_tick: 0,
+                            flags: 0,
+                            air_ticks: 0,
+                            air_z: 0.0,
+                            free_ticks: 0,
+                            free_z: 0.0,
+                        }
+                    })
+                    .collect();
+                client.sync_with_server(view.iter());
+                for input in client.next_inputs() {
+                    if link.next_f32() >= loss {
+                        // (a little jitter: an input may arrive a tick after the one sent next, and
+                        // the two are then handed to the server as one, the later of them)
+                        let late = usize::from(link.next_f32() < jitter);
+                        let at = (tick + delay + late).max(last_arrival[input.player as usize]);
+                        last_arrival[input.player as usize] = at;
+                        arriving[at].push(input);
+                    }
+                }
+            }
+            // (two inputs of a player in one tick: the later one is the one the server gets)
+            let mut batch: Vec<PlayerInput> = Vec::new();
+            for input in std::mem::take(&mut arriving[tick]) {
+                match batch.iter_mut().find(|i| i.player == input.player) {
+                    Some(earlier) => *earlier = input,
+                    None => batch.push(input),
+                }
+            }
+            for event in server.apply(&batch, tick as u64) {
+                if let Event::MoveRejected { player, .. } = event {
+                    refused[player as usize] += 1;
+                    total_refused += 1;
+                }
+            }
+        }
+        let walked: f32 = (0..players)
+            .map(|id| {
+                let (a, b) = (spawn[id as usize].position, server.mirror.player(id).unwrap().position);
+                (a[0] - b[0]).hypot(a[1] - b[1])
+            })
+            .sum::<f32>()
+            / players as f32;
+        (total_refused, walked)
+    }
+
+    #[test]
+    fn a_walker_whose_inputs_are_lost_or_bunched_on_the_way_is_not_refused_and_still_walks() {
+        let (_, free) = linked(0.0, 2, 0.0);
+        for (loss, jitter) in [(0.0, 0.3), (0.05, 0.3), (0.15, 0.6)] {
+            for delay in 0..=2 {
+                let (refused, walked) = linked(loss, delay, jitter);
+                assert_eq!(refused, 0, "{refused} moves refused at loss {loss} and jitter {jitter}, delay {delay}");
+                assert!(walked > 0.6 * free, "got {walked} of the {free} walked, loss {loss} jitter {jitter}");
+            }
         }
     }
 }
