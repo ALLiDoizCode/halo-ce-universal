@@ -187,6 +187,7 @@ relay=""
       # (by the program's path: the name the kernel keeps is cut to 15 characters)
       case "$name" in
         halo) pid=$(pgrep -x -n halo || true) ;;
+        halo-server) pid=$(pgrep -x -n halo-server || true) ;;
         *) pid=$(pgrep -n -f "(^|/)$name( |$)" || true) ;;
       esac
       if [ -n "$pid" ] && [ -r "/proc/$pid/stat" ]; then
@@ -204,6 +205,16 @@ relay=""
         tline="$tline $(awk '{gsub(/[()]/, "", $2); print $1 ":" $2 ":" $14 + $15}' "$task/stat" 2>/dev/null)"
       done
       echo "$tline" >> "$OUT/threads.log"
+    fi
+    # the same for the server: its threads (gateway-send-N, gateway-recv, the SDK's) say where a tick's
+    # CPU goes (server-threads.log; python3 check/threads.py server-threads.log shows it per tick)
+    pid=$(pgrep -x -n halo-server || true)
+    if [ -n "$pid" ]; then
+      tline="$(date +%s.%N)"
+      for task in /proc/$pid/task/*; do
+        tline="$tline $(awk '{gsub(/[()]/, "", $2); print $1 ":" $2 ":" $14 ":" $15}' "$task/stat" 2>/dev/null)"
+      done
+      echo "$tline" >> "$OUT/server-threads.log"
     fi
     # what the game has been sent over its connection to SpacetimeDB (the slow state: scores,
     # the player list, the items), in bytes since it connected
