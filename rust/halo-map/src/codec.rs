@@ -174,11 +174,12 @@ impl CollisionBsp {
                 .collect(),
             edges: (0..counts[6]).map(|_| Edge { vertices: c.i32s(), edges: c.i32s(), surfaces: c.i32s() }).collect(),
             vertices: (0..counts[7]).map(|_| Vertex { point: c.f32s(), first_edge: c.i32() }).collect(),
+            bounds: Default::default(),
         };
         if let Some(bad) = bsp.check_indices(ANY_MATERIAL).into_iter().find(|c| c.bad > 0) {
             return Err(MapError::IndexOutOfRange { field: bad.field, count: bad.bad });
         }
-        Ok(bsp)
+        Ok(bsp.with_bounds())
     }
 
     fn counts(&self) -> [usize; 8] {
@@ -215,6 +216,7 @@ mod tests {
                 Vertex { point: [0.0, 0.0, 0.5], first_edge: 0 },
                 Vertex { point: [1.0, 0.0, 0.5], first_edge: 1 },
             ],
+            bounds: Default::default(),
         }
     }
 

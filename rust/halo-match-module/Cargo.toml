@@ -19,3 +19,8 @@ spacetimedb = "=2.10.2"
 log = "0.4"
 halo-sim = { path = "../halo-sim" }
 halo-map = { path = "../halo-map" }
+
+[features]
+# Time the tick's stages with the host's console timers (the log gets a line per stage per tick):
+# the profile of where a tick's time goes. Off in the module that is published.
+stage-timing = []

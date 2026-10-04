@@ -18,7 +18,7 @@ LINE = re.compile(
     r"rejected hits (?P<hits>\d+) \(\+(?P<hitsw>\d+)\) \| "
     r"hits accepted (?P<accepted>\d+), refused as target-not-where-seen (?P<unseen>\d+) \| "
     r"inputs late (?P<late>\d+) unbound (?P<unbound>\d+) \| "
-    r"gateway ticks missed (?P<missed>\d+), send p50 (?P<sp50>[\d.]+) max (?P<smax>[\d.]+) ms"
+    r"gateway ticks missed (?P<missed>\d+), arrival p50 (?P<ap50>[\d.]+) max (?P<amax>[\d.]+) ms, send p50 (?P<sp50>[\d.]+) max (?P<smax>[\d.]+) ms"
 )
 
 
@@ -42,6 +42,58 @@ def cpu(path, start, end):
     (t0, a), (t1, b) = window[0], window[-1]
     used = {k: (b[k] - a[k]) / 100.0 / (t1 - t0) for k in b if k in a}
     print("cores used on average over the full-match seconds (from /proc, " + f"{t1 - t0:.0f} s): " + ", ".join(f"{k} {v:.2f}" for k, v in used.items()))
+
+
+def threads(path, start, end):
+    """The busiest threads of SpacetimeDB over the full-match seconds, in CPU time (threads.log). The
+    thread that runs the match's tick is the one that is busy 30 times a second, so its CPU time a tick
+    is its share of a core over 30: a figure that a busy machine does not stretch the way it does a
+    tick's wall-clock time (though a sibling thread sharing the core still slows it)."""
+    rows = []
+    try:
+        for text in open(path):
+            fields = text.split()
+            rows.append((float(fields[0]), {p.split(":")[0]: (p.split(":")[1], int(p.split(":")[2])) for p in fields[1:]}))
+    except (OSError, ValueError, IndexError):
+        return
+    window = [r for r in rows if start <= r[0] <= end]
+    if len(window) < 2:
+        return
+    (t0, a), (t1, b) = window[0], window[-1]
+    used = sorted(((b[k][1] - a[k][1]) / 100.0 / (t1 - t0), k, b[k][0]) for k in b if k in a)[::-1][:3]
+    print(
+        f"busiest threads of spacetimedb-standalone, CPU time over {t1 - t0:.0f} s: "
+        + ", ".join(f"{name} {tid} {cores:.3f} cores = {cores / 30 * 1000:.2f} ms a tick" for cores, tid, name in used)
+    )
+
+
+def parts(path, whole, full):
+    """Tick age in its parts, side by side with what the players saw (load-report.txt, next to the log).
+
+    The stamp on a tick is the start of the tick, so a player's tick age is the tick time, then the
+    commit and the delivery to the gateway, then the gateway's send up to that player's datagram.
+    The arrival figure (the stamp to the tick reaching the gateway) holds the first two; the player's
+    age less it is the send. The gateway's figures are over the whole run so far, so the last full
+    second's are used; the tick time is the mean over the full seconds.
+    """
+    last = full[-1]
+    mean_whole = sum(whole) / len(whole)
+    print(
+        f"tick age in parts (ms): tick time {mean_whole:.2f} mean | on reaching the gateway p50 {last['ap50']:.2f} "
+        f"max {last['amax']:.2f} (so commit and delivery add about {last['ap50'] - mean_whole:.2f} to the tick time) | "
+        f"gateway send p50 {last['sp50']:.2f} max {last['smax']:.2f}"
+    )
+    try:
+        text = open(os.path.join(os.path.dirname(path), "load-report.txt")).read()
+    except OSError:
+        return
+    m = re.search(r"tick age on arrival\s+p50 ([\d.]+)\s+p99 ([\d.]+)\s+max ([\d.]+) ms", text)
+    if m:
+        p50 = float(m.group(1))
+        print(
+            f"tick age the players saw (load report): p50 {p50:.2f}  p99 {float(m.group(2)):.2f}  max {float(m.group(3)):.2f} ms; "
+            f"p50 less the gateway's arrival p50 is {p50 - last['ap50']:.2f} ms (the send to the median player and the loopback)"
+        )
 
 
 def main():
@@ -90,9 +142,11 @@ def main():
     )
     last = full[-1]
     first = full[0]
+    parts(path, whole, full)
     try:
         began = float(open(os.path.join(os.path.dirname(path), "server.start")).read())
         cpu(os.path.join(os.path.dirname(path), "cpu.log"), began + first["at"], began + last["at"])
+        threads(os.path.join(os.path.dirname(path), "threads.log"), began + first["at"], began + last["at"])
     except (OSError, ValueError):
         pass
     print(
