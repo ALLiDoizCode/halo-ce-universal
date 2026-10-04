@@ -21,5 +21,5 @@ pub mod planner;
 pub mod unit;
 
 pub use datagram::{Ack, ClientMessage, ServerMessage, Snapshot, Welcome};
-pub use planner::{Entry, Observer, Planner, PlannerConfig, Scratch, STALENESS_BOUND_TICKS};
+pub use planner::{Entry, Observer, Planner, PlannerConfig, STALENESS_BOUND_TICKS};
 pub use unit::{Bounds, PackedState, UnitState};

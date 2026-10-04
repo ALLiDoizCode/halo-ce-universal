@@ -41,7 +41,7 @@ use halo_wire::datagram::{
     Challenge, ClientMessage, Refused, Welcome, IP_UDP_OVERHEAD, MAX_DATAGRAM, REFUSED_BAD_PROOF, REFUSED_NO_SEAT,
     REFUSED_STALE,
 };
-use halo_wire::planner::{Entry, Observer, Planner, PlannerConfig, Scratch};
+use halo_wire::planner::{Entry, Observer, Planner, PlannerConfig};
 use halo_wire::unit::{Bounds, PackedState, UnitState};
 use spacetimedb_sdk::{Compression, DbContext, Table, TableWithPrimaryKey};
 
@@ -116,7 +116,6 @@ struct TickWork {
 struct Job {
     work: TickWork,
     started: Instant,
-    prelude: Duration,
     remaining: AtomicUsize,
 }
 
@@ -262,7 +261,7 @@ impl Gateway {
                 if previous.len() > rows.len() {
                     previous.retain(|id, _| work.index.contains_key(id));
                 }
-                let job = Arc::new(Job { work, started, prelude: started.elapsed(), remaining: AtomicUsize::new(senders.len()) });
+                let job = Arc::new(Job { work, started, remaining: AtomicUsize::new(senders.len()) });
                 if shared.in_flight.fetch_add(1, Relaxed) > 0 {
                     stats.send_overruns.fetch_add(1, Relaxed);
                 }
@@ -527,15 +526,8 @@ fn send_loop(
     let stats = &shared.stats;
     // each recipient's planner, and the session generation it belongs to
     let mut planners: HashMap<u16, (Planner, u32)> = HashMap::new();
-    let (mut pc, mut sc, mut sc2, mut wall, mut jobn, mut dg) = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
     let mut outbox = Outbox::default();
-    // working space for planning, lent to each recipient's planner in turn
-    let mut scratch = Scratch::default();
-    let (mut lag, mut pre) = (0u64, 0u64);
     while let Ok(job) = jobs.recv() {
-        let job_wall = Instant::now();
-        lag += job_wall.duration_since(job.started).as_nanos() as u64 - job.prelude.as_nanos() as u64;
-        pre += job.prelude.as_nanos() as u64;
         let recipients = shared.sessions.read().unwrap().partition(index, modulus);
         planners.retain(|id, _| recipients.iter().any(|r| r.player == *id));
         let work = &job.work;
@@ -556,41 +548,17 @@ fn send_loop(
                 })
                 .or_insert_with(|| (Planner::new(config), generation));
             planner.acknowledge(shared.acks.lock().unwrap().get(player));
-            let t0 = thread_cpu_ns();
-            let plan = planner.plan_with(&mut scratch, &observer, &work.entries, work.tick);
-            let t1 = thread_cpu_ns();
-            pc += t1 - t0;
+            let plan = planner.plan(&observer, &work.entries, work.tick);
             states += plan.states as u64;
             for datagram in plan.datagrams {
                 outbox.pending.push(Outgoing { to: addr, bytes: datagram });
             }
-            sc += thread_cpu_ns() - t1;
             if outbox.pending.len() >= SEND_BATCH {
-                let t2 = thread_cpu_ns();
                 outbox.flush(transport, stats);
-                sc2 += thread_cpu_ns() - t2;
             }
         }
-        let t2 = thread_cpu_ns();
         outbox.flush(transport, stats);
-        sc2 += thread_cpu_ns() - t2;
         let (datagrams, bytes) = (std::mem::take(&mut outbox.datagrams), std::mem::take(&mut outbox.bytes));
-        wall += job_wall.elapsed().as_nanos() as u64;
-        jobn += 1;
-        dg += datagrams;
-        if jobn == 150 {
-            eprintln!(
-                "PROFILE thread {index}: per tick plan cpu {:.2} ms, send cpu {:.2} ms, flush cpu {:.2} ms, prelude {:.2} ms, wake lag {:.2} ms, job wall {:.2} ms, {} datagrams",
-                pc as f64 / 1e6 / 150.0,
-                sc as f64 / 1e6 / 150.0,
-                sc2 as f64 / 1e6 / 150.0,
-                pre as f64 / 1e6 / 150.0,
-                lag as f64 / 1e6 / 150.0,
-                wall as f64 / 1e6 / 150.0,
-                dg / 150
-            );
-            (pc, sc, sc2, wall, jobn, dg, lag, pre) = (0, 0, 0, 0, 0, 0, 0, 0);
-        }
         stats.datagrams_sent.fetch_add(datagrams, Relaxed);
         stats.wire_bytes_sent.fetch_add(bytes, Relaxed);
         stats.states_sent.fetch_add(states, Relaxed);
@@ -602,8 +570,41 @@ fn send_loop(
     }
 }
 
-fn thread_cpu_ns() -> u64 {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
-    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    /// Fails every datagram over 100 bytes.
+    struct Picky;
+    impl Transport for Picky {
+        fn recv(&self, _: &mut [u8]) -> io::Result<Option<(usize, SocketAddr)>> {
+            Ok(None)
+        }
+        fn send_to(&self, datagram: &[u8], _: SocketAddr) -> io::Result<()> {
+            if datagram.len() > 100 {
+                Err(io::ErrorKind::InvalidInput.into())
+            } else {
+                Ok(())
+            }
+        }
+        fn local_addr(&self) -> SocketAddr {
+            "127.0.0.1:1".parse().unwrap()
+        }
+    }
+
+    #[test]
+    fn a_flush_counts_what_was_sent_and_the_failures_apart() {
+        let stats = Stats::new(1);
+        let mut outbox = Outbox::default();
+        let to: SocketAddr = "127.0.0.1:2".parse().unwrap();
+        for len in [10, 200, 30, 300, 50] {
+            outbox.pending.push(Outgoing { to, bytes: vec![0; len] });
+        }
+        outbox.flush(&Picky, &stats);
+        assert_eq!(outbox.datagrams, 3);
+        assert_eq!(outbox.bytes, (10 + 30 + 50 + 3 * IP_UDP_OVERHEAD) as u64);
+        assert_eq!(stats.send_errors.load(Relaxed), 2);
+        assert!(outbox.pending.is_empty());
+    }
 }

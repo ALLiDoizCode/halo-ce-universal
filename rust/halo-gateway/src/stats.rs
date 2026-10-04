@@ -109,6 +109,10 @@ impl Stats {
             t.send_us.remove(0);
         }
         t.send_us.push(micros);
+        // (nobody may be taking the window: keep it as bounded as the whole)
+        if t.send_window_us.len() >= MAX_TIMINGS {
+            t.send_window_us.remove(0);
+        }
         t.send_window_us.push(micros);
     }
 

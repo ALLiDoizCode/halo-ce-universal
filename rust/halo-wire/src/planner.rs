@@ -139,8 +139,12 @@ pub struct Planner {
     credit: f32,
     /// Accumulated priority, indexed by player id.
     priority: Vec<f32>,
-    /// Working space for `plan`, when the caller does not lend its own.
-    scratch: Scratch,
+    /// For ranking.
+    scratch: Vec<Ranked>,
+    /// For ranking: `scratch` as sort keys.
+    keys: Vec<u64>,
+    /// For choosing the near players of the share: (priority, index, place in `scratch`).
+    near: Vec<(f32, u32, u32)>,
     /// The number of the next Snapshot.
     next_seq: u16,
     /// The most recent Snapshots sent and not yet known to have arrived or
@@ -188,17 +192,6 @@ struct Ranked {
     index: u32,
 }
 
-/// Working space of [`Planner::plan_with`]: nothing in it outlives a call.
-#[derive(Debug, Clone, Default)]
-pub struct Scratch {
-    /// Everyone but the recipient, for ranking.
-    ranked: Vec<Ranked>,
-    /// `ranked` as sort keys.
-    keys: Vec<u64>,
-    /// For choosing the near players of the share: (priority, index, place in `ranked`).
-    near: Vec<(f32, u32, u32)>,
-}
-
 /// The bits of a sort key that hold the world index.
 const KEY_INDEX_BITS: u32 = 30;
 const KEY_INDEX_MASK: u64 = (1 << KEY_INDEX_BITS) - 1;
@@ -210,7 +203,10 @@ fn rank_key(r: &Ranked) -> u64 {
     // total_cmp's order as an unsigned integer, ascending with the value
     let ascending = (bits ^ (((bits >> 31) as u32) >> 1) as i32) as u32 ^ 0x8000_0000;
     debug_assert!(u64::from(r.index) <= KEY_INDEX_MASK);
-    (u64::from(!r.urgent) << 63) | (u64::from(!r.in_share) << 62) | (u64::from(!ascending) << KEY_INDEX_BITS) | u64::from(r.index)
+    (u64::from(!r.urgent) << 63)
+        | (u64::from(!r.in_share) << 62)
+        | (u64::from(!ascending) << KEY_INDEX_BITS)
+        | u64::from(r.index)
 }
 
 impl Planner {
@@ -221,7 +217,9 @@ impl Planner {
             per_tick,
             credit: per_tick,
             priority: Vec::new(),
-            scratch: Scratch::default(),
+            scratch: Vec::new(),
+            keys: Vec::new(),
+            near: Vec::new(),
             next_seq: 1,
             in_flight: VecDeque::new(),
             last_sent: Vec::new(),
@@ -264,16 +262,6 @@ impl Planner {
     /// `world` should be in a stable order, such as ascending player id, which
     /// breaks ties.
     pub fn plan(&mut self, me: &Observer, world: &[Entry], tick: u32) -> Plan {
-        let mut scratch = std::mem::take(&mut self.scratch);
-        let plan = self.plan_with(&mut scratch, me, world, tick);
-        self.scratch = scratch;
-        plan
-    }
-
-    /// [`Planner::plan`] with working space of the caller's. A sender that plans for many
-    /// recipients keeps one [`Scratch`] and lends it to each in turn, so that the space is
-    /// not one more thing for the processor's cache to hold for every recipient.
-    pub fn plan_with(&mut self, sc: &mut Scratch, me: &Observer, world: &[Entry], tick: u32) -> Plan {
         self.credit = (self.credit + self.per_tick).min(self.per_tick * 2.0);
         let cfg = self.config;
         let near2 = cfg.near_radius * cfg.near_radius;
@@ -293,7 +281,7 @@ impl Planner {
             self.urgent.resize(max_id, false);
             self.present.resize(max_id, 0);
         }
-        sc.ranked.clear();
+        self.scratch.clear();
         for (index, other) in world.iter().enumerate() {
             let id = other.player();
             if id == me.player {
@@ -324,7 +312,7 @@ impl Planner {
             let overdue = !never && tick + 1 - self.last_sent[slot] >= cfg.max_stale_ticks;
             let p = &mut self.priority[slot];
             *p += weight;
-            sc.ranked.push(Ranked {
+            self.scratch.push(Ranked {
                 // (a player never sent to this recipient is brought up to date before anything else)
                 urgent: self.urgent[slot] || never,
                 overdue,
@@ -349,60 +337,60 @@ impl Planner {
         // as long as the wave lasts. Only a tick's quota of them goes first, those waiting longest;
         // the rest follow in the next ticks. The quota is what the bound needs on
         // average, so the bound still holds, and the wave is flushed within a few ticks.
-        let quota = sc.ranked.len().div_ceil(cfg.max_stale_ticks.max(1) as usize).max(1);
-        if sc.ranked.iter().filter(|r| r.overdue).count() > quota {
-            let mut due: Vec<usize> = (0..sc.ranked.len()).filter(|i| sc.ranked[*i].overdue).collect();
+        let quota = self.scratch.len().div_ceil(cfg.max_stale_ticks.max(1) as usize).max(1);
+        if self.scratch.iter().filter(|r| r.overdue).count() > quota {
+            let mut due: Vec<usize> = (0..self.scratch.len()).filter(|i| self.scratch[*i].overdue).collect();
             let order = |a: &usize, b: &usize| {
-                let (a, b) = (&sc.ranked[*a], &sc.ranked[*b]);
+                let (a, b) = (&self.scratch[*a], &self.scratch[*b]);
                 a.since.cmp(&b.since).then(b.priority.total_cmp(&a.priority)).then(a.index.cmp(&b.index))
             };
             due.select_nth_unstable_by(quota - 1, order);
             for i in &due[quota..] {
-                sc.ranked[*i].overdue = false;
+                self.scratch[*i].overdue = false;
             }
         }
         let mut near_wanting = 0;
-        for r in &mut sc.ranked {
+        for r in &mut self.scratch {
             r.urgent |= r.overdue;
             near_wanting += (r.near && !r.urgent) as usize;
         }
 
-        let take = affordable(self.credit, sc.ranked.len());
+        let take = affordable(self.credit, self.scratch.len());
         // The near players go ahead of the rest only up to their share of what the tick pays for,
         // the highest accumulated priority first. Those beyond it compete with everyone else.
         let share = (cfg.near_share.clamp(0.0, 1.0) * take as f32).round() as usize;
         let wants = |r: &Ranked| r.near && !r.urgent;
         if near_wanting <= share {
             // (the usual case: all of them fit)
-            for r in &mut sc.ranked {
+            for r in &mut self.scratch {
                 r.in_share = wants(r);
             }
         } else {
-            sc.near.clear();
-            for (slot, r) in sc.ranked.iter().enumerate() {
+            self.near.clear();
+            for (slot, r) in self.scratch.iter().enumerate() {
                 if wants(r) {
-                    sc.near.push((r.priority, r.index, slot as u32));
+                    self.near.push((r.priority, r.index, slot as u32));
                 }
             }
             if share > 0 {
-                sc.near.select_nth_unstable_by(share - 1, |a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+                self.near.select_nth_unstable_by(share - 1, |a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
             }
-            for &(_, _, slot) in &sc.near[..share] {
-                sc.ranked[slot as usize].in_share = true;
+            for &(_, _, slot) in &self.near[..share] {
+                self.scratch[slot as usize].in_share = true;
             }
         }
         // urgent players first, then near ones within the share, then by accumulated priority, then
         // by world order: one integer a player, so that ranking compares integers
-        sc.keys.clear();
-        sc.keys.extend(sc.ranked.iter().map(rank_key));
-        if take > 0 && take < sc.keys.len() {
-            sc.keys.select_nth_unstable(take - 1);
+        self.keys.clear();
+        self.keys.extend(self.scratch.iter().map(rank_key));
+        if take > 0 && take < self.keys.len() {
+            self.keys.select_nth_unstable(take - 1);
         }
-        sc.keys[..take].sort_unstable();
+        self.keys[..take].sort_unstable();
 
         let mut datagrams = Vec::new();
         let mut buf = Vec::with_capacity(MAX_DATAGRAM);
-        for chunk in sc.keys[..take].chunks(MAX_STATES_PER_SNAPSHOT) {
+        for chunk in self.keys[..take].chunks(MAX_STATES_PER_SNAPSHOT) {
             let seq = self.next_seq;
             self.next_seq = next_snapshot_seq(seq);
             begin_snapshot(&mut buf, tick, seq);

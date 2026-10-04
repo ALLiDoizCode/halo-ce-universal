@@ -32,7 +32,8 @@ fn fnv(hash: &mut u64, bytes: &[u8]) {
 fn run(players: u16, budget: u32, loss: f32, ticks: u32, seed: u64) -> u64 {
     let mut rng = Rng(seed);
     let ids: Vec<u16> = (0..players).filter(|i| i % 11 != 7).collect();
-    let mut pos: Vec<[f32; 3]> = ids.iter().map(|_| [rng.unit() * 80.0 - 40.0, rng.unit() * 80.0 - 40.0, 0.0]).collect();
+    let mut pos: Vec<[f32; 3]> =
+        ids.iter().map(|_| [rng.unit() * 80.0 - 40.0, rng.unit() * 80.0 - 40.0, 0.0]).collect();
     let recipients = [ids[0], ids[ids.len() / 2], ids[ids.len() - 1]];
     let mut planners: Vec<Planner> =
         recipients.iter().map(|_| Planner::new(PlannerConfig::with_budget(budget))).collect();
@@ -99,4 +100,5 @@ fn the_plan_is_byte_for_byte_what_it_was() {
     assert_eq!(got, PINNED);
 }
 
-const PINNED: [u64; 5] = [0x4f22090629f735bb, 0xd8c5a48e63a33d86, 0x16bf6abd079fed43, 0xb2803eed1075894b, 0xb8fb17536ed43868];
+const PINNED: [u64; 5] =
+    [0x4f22090629f735bb, 0xd8c5a48e63a33d86, 0x16bf6abd079fed43, 0xb2803eed1075894b, 0xb8fb17536ed43868];
