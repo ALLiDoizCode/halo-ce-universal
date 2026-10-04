@@ -29,6 +29,7 @@
 #                   HUNT [400]: how far (world units) a player with no target looks for an enemy to walk to;
 #                   NAV_CELL [0.5]: width (world units) of the squares of the grid of walkable ground the
 #                   hunters are steered over, round walls and cliffs (0: no grid, straight at the enemy)
+#   SEND_THREADS [4]  the gateway's sending threads
 #   BUDGET [90000]  bytes a second per player; LOSS [0] chance a datagram of a
 #                   simulated player is lost, each way
 #   GAME [0]        1: also start the real game once the simulated players are in
@@ -39,6 +40,8 @@
 #                   GAME_ENV extra "NAME=value" settings for it, space separated;
 #                   GAME_LOSS: e.g. 0.02, to put the game behind a relay (halo-udp-loss) that
 #                   loses that share of its datagrams, each way
+#   BIN_DIR         a folder with halo-server and the other programs, already built (to compare two
+#                   builds of the server by the same script); without it the script builds them
 #   NO_BUILD [unset]  1: do not build anything (MATCH_WASM [the module's release build] is the match module to run)
 #   MODULE_FEATURES [none]  cargo features for the match module, e.g. stage-timing (module-logs/ gets the
 #                   host's timing lines; python3 check/stages.py module-logs/* summarises them)
@@ -66,6 +69,7 @@ RANGE=${RANGE:-25}
 HUNT=${HUNT:-400}
 NAV_CELL=${NAV_CELL:-0.5}
 BUDGET=${BUDGET:-90000}
+SEND_THREADS=${SEND_THREADS:-4}
 LOSS=${LOSS:-0}
 GAME=${GAME:-0}
 GAME_SECS=${GAME_SECS:-400}
@@ -82,13 +86,16 @@ ulimit -n 65536
 # NO_BUILD=1 skips the builds (they are done beforehand, so that a run that holds the machine does not
 # also hold it for a compile); MATCH_WASM names the match module to run then.
 # MODULE_FEATURES=stage-timing: the match module times the stages of its tick (see stages.py)
+# BIN_DIR: the programs are already built there, so only the modules are built
 if [ -z "${NO_BUILD:-}" ]; then
   (cd "$rust/halo-match-module" && cargo build --locked --release --target wasm32-unknown-unknown ${MODULE_FEATURES:+--features "$MODULE_FEATURES"} 2>&1 | tail -1)
   (cd "$rust/halo-root-module" && cargo build --locked --release --target wasm32-unknown-unknown 2>&1 | tail -1)
-  (cd "$rust/halo-server" && cargo build --locked --release 2>&1 | tail -1)
+  if [ -z "${BIN_DIR:-}" ]; then
+    (cd "$rust/halo-server" && cargo build --locked --release 2>&1 | tail -1)
+  fi
 fi
 MATCH_WASM=${MATCH_WASM:-$rust/halo-match-module/target/wasm32-unknown-unknown/release/halo_match_module.wasm}
-bin="$rust/halo-server/target/release"
+bin="${BIN_DIR:-$rust/halo-server/target/release}"
 
 # the server's configuration: one server, one rotation entry
 cat > "$OUT/server.toml" <<TOML
@@ -111,7 +118,7 @@ title = "Slayer check"
 bind = "127.0.0.1:7777"
 advertise = "127.0.0.1"
 budget = $BUDGET
-send_threads = 4
+send_threads = $SEND_THREADS
 log_secs = 1
 handover_secs = 5
 end_secs = $END_SECS

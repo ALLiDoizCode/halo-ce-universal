@@ -141,6 +141,8 @@ pub struct Planner {
     priority: Vec<f32>,
     /// For ranking.
     scratch: Vec<Ranked>,
+    /// For ranking: `scratch` as sort keys.
+    keys: Vec<u64>,
     /// For choosing the near players of the share: (priority, index, place in `scratch`).
     near: Vec<(f32, u32, u32)>,
     /// The number of the next Snapshot.
@@ -190,6 +192,23 @@ struct Ranked {
     index: u32,
 }
 
+/// The bits of a sort key that hold the world index.
+const KEY_INDEX_BITS: u32 = 30;
+const KEY_INDEX_MASK: u64 = (1 << KEY_INDEX_BITS) - 1;
+
+/// A player's place in the ranking as one integer, smaller is sent first: urgent, then in the near
+/// share, then the highest accumulated priority (in `f32::total_cmp` order), then the lowest world index.
+fn rank_key(r: &Ranked) -> u64 {
+    let bits = r.priority.to_bits() as i32;
+    // total_cmp's order as an unsigned integer, ascending with the value
+    let ascending = (bits ^ (((bits >> 31) as u32) >> 1) as i32) as u32 ^ 0x8000_0000;
+    debug_assert!(u64::from(r.index) <= KEY_INDEX_MASK);
+    (u64::from(!r.urgent) << 63)
+        | (u64::from(!r.in_share) << 62)
+        | (u64::from(!ascending) << KEY_INDEX_BITS)
+        | u64::from(r.index)
+}
+
 impl Planner {
     pub fn new(config: PlannerConfig) -> Planner {
         let per_tick = config.budget_bytes_per_second as f32 / TICKS_PER_SECOND as f32;
@@ -199,6 +218,7 @@ impl Planner {
             credit: per_tick,
             priority: Vec::new(),
             scratch: Vec::new(),
+            keys: Vec::new(),
             near: Vec::new(),
             next_seq: 1,
             in_flight: VecDeque::new(),
@@ -359,28 +379,24 @@ impl Planner {
                 self.scratch[slot as usize].in_share = true;
             }
         }
-        // urgent players first, then near ones within the share, then by accumulated priority, then by world order
-        let by_priority = |a: &Ranked, b: &Ranked| {
-            b.urgent
-                .cmp(&a.urgent)
-                .then(b.in_share.cmp(&a.in_share))
-                .then(b.priority.total_cmp(&a.priority))
-                .then(a.index.cmp(&b.index))
-        };
-        if take > 0 && take < self.scratch.len() {
-            self.scratch.select_nth_unstable_by(take - 1, by_priority);
+        // urgent players first, then near ones within the share, then by accumulated priority, then
+        // by world order: one integer a player, so that ranking compares integers
+        self.keys.clear();
+        self.keys.extend(self.scratch.iter().map(rank_key));
+        if take > 0 && take < self.keys.len() {
+            self.keys.select_nth_unstable(take - 1);
         }
-        self.scratch[..take].sort_unstable_by(by_priority);
+        self.keys[..take].sort_unstable();
 
         let mut datagrams = Vec::new();
         let mut buf = Vec::with_capacity(MAX_DATAGRAM);
-        for chunk in self.scratch[..take].chunks(MAX_STATES_PER_SNAPSHOT) {
+        for chunk in self.keys[..take].chunks(MAX_STATES_PER_SNAPSHOT) {
             let seq = self.next_seq;
             self.next_seq = next_snapshot_seq(seq);
             begin_snapshot(&mut buf, tick, seq);
             let mut sent = Sent { seq, tick, states: Vec::with_capacity(chunk.len()) };
-            for ranked in chunk {
-                let entry = &world[ranked.index as usize];
+            for key in chunk {
+                let entry = &world[(key & KEY_INDEX_MASK) as usize];
                 let slot = entry.player() as usize;
                 append_state(&mut buf, &entry.packed);
                 sent.states.push((entry.player(), self.priority[slot]));

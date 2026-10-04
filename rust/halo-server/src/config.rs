@@ -63,6 +63,19 @@ bind = "0.0.0.0:7777"
 advertise = "play.example.org"
 budget = 90000                   # bytes a second each player may be sent (headers included)
 send_threads = 4                 # threads the gateway sends with
+                                 # Cores for a 500-player match (measured on Blood Gulch at 90 KB/s on a
+                                 # Ryzen 7 5800X; the server is this program with its gateway and its
+                                 # sending threads, and SpacetimeDB is a process of its own):
+                                 #   server: sending one tick to everyone costs about 10 ms of CPU
+                                 #     (0.36 cores on average), in a burst each tick. Over 2 cores the burst
+                                 #     takes 6.5 to 7.4 ms at the median, over all 16 threads 4.0 ms. Give
+                                 #     it 4 cores to keep a tick's sending under 5 ms (4 is arithmetic, not
+                                 #     measured: 10 ms of CPU is 2 cores for 5 ms with nothing else on
+                                 #     them, and the inputs of 500 players arrive in the same burst), and
+                                 #     never fewer than 2: no tick was missed on 2.
+                                 #   SpacetimeDB: 2 cores (0.2 to 0.3 used on average, in bursts of the
+                                 #     tick's own time, 4 to 6 ms).
+                                 # send_threads = 4 was no worse than 2 on 2 cores, and is right for 4 or more.
 log_secs = 10                    # seconds between lines of the log
 handover_secs = 5                # seconds the last match stays up after the next is announced
 end_secs = 15                    # seconds a finished match shows its final scoreboard before the next

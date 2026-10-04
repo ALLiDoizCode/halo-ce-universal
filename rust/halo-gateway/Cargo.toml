@@ -18,6 +18,7 @@ halo-wire = { path = "../halo-wire" }
 halo-match-driver = { path = "../halo-match-driver" }
 halo-map = { path = "../halo-map" }
 getrandom = "0.3"
+libc = "0.2"
 
 [profile.release]
 debug = 1

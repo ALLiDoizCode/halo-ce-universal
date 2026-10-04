@@ -46,8 +46,8 @@ use halo_wire::unit::{Bounds, PackedState, UnitState};
 use spacetimedb_sdk::{Compression, DbContext, Table, TableWithPrimaryKey};
 
 use crate::board::{AckBoard, Bound, InputBoard, Recipient, Sessions};
-use crate::stats::{Stats, StatsSnapshot};
-use crate::transport::Transport;
+use crate::stats::{Spread, Stats, StatsSnapshot};
+use crate::transport::{Outgoing, Transport};
 
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
@@ -310,6 +310,11 @@ impl Gateway {
         self.shared.stats.snapshot()
     }
 
+    /// The times to send a tick since this was last called: what a report window saw.
+    pub fn take_send_window(&self) -> Spread {
+        self.shared.stats.take_send_window()
+    }
+
     /// Players bound to an address now.
     pub fn sessions(&self) -> usize {
         self.shared.sessions.read().unwrap().len()
@@ -478,6 +483,38 @@ fn authenticate(
     Ok(bounds)
 }
 
+/// Datagrams a sending thread holds before it hands them to the transport in one call.
+const SEND_BATCH: usize = 64;
+
+/// A sending thread's datagrams waiting to go, and what has gone since it was last emptied.
+#[derive(Default)]
+struct Outbox {
+    pending: Vec<Outgoing>,
+    sent: Vec<bool>,
+    datagrams: u64,
+    bytes: u64,
+}
+
+impl Outbox {
+    /// Send everything pending; count each datagram that went (and its bytes) or failed.
+    fn flush(&mut self, transport: &dyn Transport, stats: &Stats) {
+        if self.pending.is_empty() {
+            return;
+        }
+        self.sent.clear();
+        self.sent.resize(self.pending.len(), false);
+        transport.send_batch(&self.pending, &mut self.sent);
+        for (out, ok) in self.pending.drain(..).zip(&self.sent) {
+            if *ok {
+                self.datagrams += 1;
+                self.bytes += (out.bytes.len() + IP_UDP_OVERHEAD) as u64;
+            } else {
+                stats.send_errors.fetch_add(1, Relaxed);
+            }
+        }
+    }
+}
+
 fn send_loop(
     index: usize,
     modulus: usize,
@@ -489,11 +526,12 @@ fn send_loop(
     let stats = &shared.stats;
     // each recipient's planner, and the session generation it belongs to
     let mut planners: HashMap<u16, (Planner, u32)> = HashMap::new();
+    let mut outbox = Outbox::default();
     while let Ok(job) = jobs.recv() {
         let recipients = shared.sessions.read().unwrap().partition(index, modulus);
         planners.retain(|id, _| recipients.iter().any(|r| r.player == *id));
         let work = &job.work;
-        let (mut datagrams, mut bytes, mut states) = (0u64, 0u64, 0u64);
+        let mut states = 0u64;
         for Recipient { player, addr, generation } in recipients {
             let Some(&at) = work.index.get(&player) else { continue };
             let me = &work.entries[at];
@@ -512,18 +550,15 @@ fn send_loop(
             planner.acknowledge(shared.acks.lock().unwrap().get(player));
             let plan = planner.plan(&observer, &work.entries, work.tick);
             states += plan.states as u64;
-            for datagram in &plan.datagrams {
-                match transport.send_to(datagram, addr) {
-                    Ok(()) => {
-                        datagrams += 1;
-                        bytes += (datagram.len() + IP_UDP_OVERHEAD) as u64;
-                    }
-                    Err(_) => {
-                        stats.send_errors.fetch_add(1, Relaxed);
-                    }
-                }
+            for datagram in plan.datagrams {
+                outbox.pending.push(Outgoing { to: addr, bytes: datagram });
+            }
+            if outbox.pending.len() >= SEND_BATCH {
+                outbox.flush(transport, stats);
             }
         }
+        outbox.flush(transport, stats);
+        let (datagrams, bytes) = (std::mem::take(&mut outbox.datagrams), std::mem::take(&mut outbox.bytes));
         stats.datagrams_sent.fetch_add(datagrams, Relaxed);
         stats.wire_bytes_sent.fetch_add(bytes, Relaxed);
         stats.states_sent.fetch_add(states, Relaxed);
@@ -532,5 +567,44 @@ fn send_loop(
             stats.record_send(job.started.elapsed().as_micros() as u32);
             shared.in_flight.fetch_sub(1, Relaxed);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    /// Fails every datagram over 100 bytes.
+    struct Picky;
+    impl Transport for Picky {
+        fn recv(&self, _: &mut [u8]) -> io::Result<Option<(usize, SocketAddr)>> {
+            Ok(None)
+        }
+        fn send_to(&self, datagram: &[u8], _: SocketAddr) -> io::Result<()> {
+            if datagram.len() > 100 {
+                Err(io::ErrorKind::InvalidInput.into())
+            } else {
+                Ok(())
+            }
+        }
+        fn local_addr(&self) -> SocketAddr {
+            "127.0.0.1:1".parse().unwrap()
+        }
+    }
+
+    #[test]
+    fn a_flush_counts_what_was_sent_and_the_failures_apart() {
+        let stats = Stats::new(1);
+        let mut outbox = Outbox::default();
+        let to: SocketAddr = "127.0.0.1:2".parse().unwrap();
+        for len in [10, 200, 30, 300, 50] {
+            outbox.pending.push(Outgoing { to, bytes: vec![0; len] });
+        }
+        outbox.flush(&Picky, &stats);
+        assert_eq!(outbox.datagrams, 3);
+        assert_eq!(outbox.bytes, (10 + 30 + 50 + 3 * IP_UDP_OVERHEAD) as u64);
+        assert_eq!(stats.send_errors.load(Relaxed), 2);
+        assert!(outbox.pending.is_empty());
     }
 }

@@ -711,6 +711,7 @@ dependencies = [
  "halo-match-driver",
  "halo-sim",
  "halo-wire",
+ "libc",
  "spacetimedb-sdk",
 ]
 

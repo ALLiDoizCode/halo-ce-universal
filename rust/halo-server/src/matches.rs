@@ -100,6 +100,8 @@ pub struct Report {
     pub inputs_late: u64,
     pub inputs_unbound: u64,
     pub ticks_missed: u64,
+    /// Sending a tick to every player (from the tick reaching the gateway to its last datagram
+    /// sent) over the ticks of this report's window: the median and the slowest.
     pub send_ms_p50: f64,
     pub send_ms_max: f64,
     /// How old a tick was when it reached the gateway (the stamp to its arrival), in ms: the tick
@@ -243,10 +245,13 @@ impl RunningMatch {
             report.inputs_late = stats.inputs_late.saturating_sub(before.inputs_late);
             report.inputs_unbound = stats.inputs_unbound.saturating_sub(before.inputs_unbound);
             report.ticks_missed = stats.ticks_skipped.saturating_sub(before.ticks_skipped);
-            report.send_ms_p50 = stats.send_ms.p50;
-            report.send_ms_max = stats.send_ms.max;
             report.arrival_ms_p50 = stats.arrival_ms.p50;
             report.arrival_ms_max = stats.arrival_ms.max;
+        }
+        if let Some(gateway) = &self.gateway {
+            let window = gateway.take_send_window();
+            report.send_ms_p50 = window.p50;
+            report.send_ms_max = window.max;
         }
         self.window = Window {
             at: now,
