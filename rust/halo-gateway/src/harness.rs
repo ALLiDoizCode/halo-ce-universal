@@ -571,11 +571,34 @@ impl Truth {
 /// a fresh `truth` starts at the present: the ticks queued from before it
 /// (while the players were still joining, and nobody was sent to) are not
 /// part of what the walk is measured against.
-pub fn run_walk(client: &MatchClient, walkers: &mut Walkers, crowd: &Crowd, truth: &mut Truth, duration: Duration) {
+///
+/// Returns the rounds of inputs sent (one for each wait that ended with a tick, however many were waiting).
+pub fn run_walk(
+    client: &MatchClient,
+    walkers: &mut Walkers,
+    crowd: &Crowd,
+    truth: &mut Truth,
+    duration: Duration,
+) -> usize {
+    run_walk_stalling(client, walkers, crowd, truth, duration, 0, Duration::ZERO)
+}
+
+/// [`run_walk`], with the walk stopped for `stall` after every `every` rounds (none if 0): a client on a
+/// machine that stops it for a while, which then has a backlog of ticks to catch up on.
+pub fn run_walk_stalling(
+    client: &MatchClient,
+    walkers: &mut Walkers,
+    crowd: &Crowd,
+    truth: &mut Truth,
+    duration: Duration,
+    every: usize,
+    stall: Duration,
+) -> usize {
     if truth.ticks.is_empty() {
         client.discard_ticks();
     }
     let until = Instant::now() + duration;
+    let mut rounds = 0;
     while Instant::now() < until {
         let Some(mut seen) = client.next_tick(Duration::from_secs(10)) else { panic!("no tick for 10 s") };
         truth.record(&seen);
@@ -585,8 +608,23 @@ pub fn run_walk(client: &MatchClient, walkers: &mut Walkers, crowd: &Crowd, trut
         }
         walkers.sync_with_server(seen.players.values());
         crowd.send_inputs(&walkers.next_inputs());
+        rounds += 1;
+        if every > 0 && rounds % every == 0 {
+            std::thread::sleep(stall);
+        }
     }
+    rounds
 }
+
+/// How many near players a recipient can have and still be sent all of them every tick, at `budget`
+/// bytes a second (`PlannerConfig::near_capacity`).
+pub fn near_capacity(budget: u32) -> usize {
+    halo_wire::planner::PlannerConfig::with_budget(budget).near_capacity()
+}
+
+/// The rate near players must average for a recipient with more of them than
+/// the near share holds (they take turns).
+pub const NEAR_CROWDED_MIN_HZ: f64 = 20.0;
 
 /// How often the players of one distance band were updated.
 #[derive(Debug, Clone, PartialEq)]
@@ -644,9 +682,92 @@ pub struct Report {
     pub age_counts: Vec<u64>,
     /// The greatest age seen, in ticks (a tick is 33.3 ms).
     pub max_age_ticks: u32,
+    /// The pairs of the first band by how crowded the recipient was: entry `n`
+    /// holds the (recipient, other, tick) triples, in that band, of recipients
+    /// that had `n` players in it that tick. Tells recipients whose near
+    /// players fit the planner's near share from those whose do not
+    /// ([`Report::near_when_fitting`], [`Report::near_when_crowded`]).
+    pub near_by_count: Vec<NearRate>,
+}
+
+/// Pairs in the first (near) band and how many were updated.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct NearRate {
+    pub pairs: u64,
+    pub updated: u64,
+}
+
+impl NearRate {
+    /// The fraction of pairs updated in a tick, 0 to 1.
+    pub fn fraction_updated(&self) -> f64 {
+        self.updated as f64 / self.pairs.max(1) as f64
+    }
+
+    /// Updates a second for the average pair.
+    pub fn hz(&self) -> f64 {
+        self.fraction_updated() * TICKS_PER_SECOND as f64
+    }
 }
 
 impl Report {
+    /// The near band's pairs of recipients that had at most `capacity` near
+    /// players that tick: the planner promises every one of them every tick
+    /// (`PlannerConfig::near_capacity`).
+    pub fn near_when_fitting(&self, capacity: usize) -> NearRate {
+        self.near_split(capacity).0
+    }
+
+    /// The near band's pairs of recipients that had more than `capacity` near
+    /// players: they take turns.
+    pub fn near_when_crowded(&self, capacity: usize) -> NearRate {
+        self.near_split(capacity).1
+    }
+
+    fn near_split(&self, capacity: usize) -> (NearRate, NearRate) {
+        let (mut fit, mut crowded) = (NearRate::default(), NearRate::default());
+        for (count, rate) in self.near_by_count.iter().enumerate() {
+            let side = if count <= capacity { &mut fit } else { &mut crowded };
+            side.pairs += rate.pairs;
+            side.updated += rate.updated;
+        }
+        (fit, crowded)
+    }
+
+    /// The wire bar for near players (#45): a recipient whose near count fits
+    /// the near share (`capacity`) has every near player updated in at least
+    /// 99.9% of ticks; one whose does not still averages [`NEAR_CROWDED_MIN_HZ`]
+    /// for them. `Err` says which failed.
+    pub fn near_service(&self, capacity: usize) -> Result<(), String> {
+        let (fit, crowded) = self.near_split(capacity);
+        if fit.pairs > 0 && fit.fraction_updated() < 0.999 {
+            return Err(format!(
+                "players within 10 wu of a recipient with up to {capacity} of them were updated in {:.3}% of ticks",
+                fit.fraction_updated() * 100.0
+            ));
+        }
+        if crowded.pairs > 0 && crowded.hz() < NEAR_CROWDED_MIN_HZ {
+            return Err(format!(
+                "players within 10 wu of a recipient with more than {capacity} of them were updated at {:.2} Hz (floor {NEAR_CROWDED_MIN_HZ})",
+                crowded.hz()
+            ));
+        }
+        Ok(())
+    }
+
+    /// One line on how the near players were served, by whether the recipient's
+    /// near count fit the near share.
+    pub fn near_summary(&self, capacity: usize) -> String {
+        let (fit, crowded) = self.near_split(capacity);
+        format!(
+            "near players, recipients with up to {capacity} near: {:.3}% of ticks ({:.2} Hz, {} pairs); with more: {:.2} Hz ({} pairs)",
+            fit.fraction_updated() * 100.0,
+            fit.hz(),
+            fit.pairs,
+            crowded.hz(),
+            crowded.pairs
+        )
+    }
+
     /// The share of (recipient, other, tick) triples whose newest state was older than `ticks` ticks.
     pub fn share_older_than(&self, ticks: usize) -> f64 {
         let total: u64 = self.age_counts.iter().sum();
@@ -785,6 +906,7 @@ pub fn analyze(crowd: &Crowd, truth: &Truth, window: Range<u32>, edges: &[f32]) 
     let mut last_update = vec![0u32; capacity * capacity];
     let mut age_counts = vec![0u64; MAX_AGE_TICKS + 1];
     let mut max_age = 0u32;
+    let mut near_by_count = vec![NearRate::default(); crowd.players.len() + 1];
 
     let mut ages = Vec::new();
     let mut bytes = vec![0u64; crowd.players.len()];
@@ -806,6 +928,7 @@ pub fn analyze(crowd: &Crowd, truth: &Truth, window: Range<u32>, edges: &[f32]) 
                 None => missed += in_world as u64,
             }
             let Some(from) = at.positions[me] else { continue };
+            let mut near = NearRate::default();
             for (other, position) in at.positions.iter().enumerate() {
                 let Some(position) = position else { continue };
                 if other == me {
@@ -814,11 +937,13 @@ pub fn analyze(crowd: &Crowd, truth: &Truth, window: Range<u32>, edges: &[f32]) 
                 let d = [position[0] - from[0], position[1] - from[1], position[2] - from[2]];
                 let band = band_of(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
                 pairs[band] += 1;
+                near.pairs += (band == 0) as u64;
                 let slot = &mut last_update[me * capacity + other];
                 let was_updated = receipt.as_ref().is_some_and(|r| r.has_state_of(other as u16));
                 gaps.observe(me, other, tick, before, band, was_updated);
                 if was_updated {
                     updated[band] += 1;
+                    near.updated += (band == 0) as u64;
                     *slot = tick;
                 }
                 if *slot != 0 {
@@ -827,6 +952,10 @@ pub fn analyze(crowd: &Crowd, truth: &Truth, window: Range<u32>, edges: &[f32]) 
                     age_counts[(age as usize).min(MAX_AGE_TICKS)] += 1;
                 }
             }
+            // (`near.pairs` is the number of near players: one pair each this tick)
+            let slot = &mut near_by_count[(near.pairs as usize).min(crowd.players.len())];
+            slot.pairs += near.pairs;
+            slot.updated += near.updated;
         }
     }
 
@@ -864,6 +993,7 @@ pub fn analyze(crowd: &Crowd, truth: &Truth, window: Range<u32>, edges: &[f32]) 
             .collect(),
         age_counts,
         max_age_ticks: max_age,
+        near_by_count,
     }
 }
 
@@ -938,6 +1068,45 @@ mod tests {
 
     const NEAR: usize = 0;
     const FAR: usize = 3;
+
+    /// A report with only the near band's pairs by near count: `(count, pairs, updated)`.
+    fn report_with_near(counts: &[(usize, u64, u64)]) -> Report {
+        let mut near_by_count = vec![NearRate::default(); 300];
+        for &(count, pairs, updated) in counts {
+            near_by_count[count] = NearRate { pairs, updated };
+        }
+        Report {
+            players: 0,
+            ticks: 0,
+            seconds: 0.0,
+            mean_download: 0.0,
+            max_download: 0.0,
+            missed_ticks: 0,
+            expected_receipts: 0,
+            tick_age_ms: Spread::of(vec![0.0]),
+            bands: Vec::new(),
+            age_counts: vec![0; MAX_AGE_TICKS + 1],
+            max_age_ticks: 0,
+            near_by_count,
+        }
+    }
+
+    #[test]
+    fn near_players_are_held_to_every_tick_only_for_recipients_whose_near_count_fits_the_share() {
+        // 100 near: all of them sent every tick; 150 near: 21 Hz (70% of ticks)
+        let report = report_with_near(&[(100, 10_000, 10_000), (150, 15_000, 10_500)]);
+        assert_eq!(report.near_service(100), Ok(()));
+        assert!((report.near_when_crowded(100).hz() - 21.0).abs() < 1e-9);
+        assert_eq!(report.near_when_fitting(100).pairs, 10_000);
+        // a recipient with 100 near whose near players missed ticks fails the 99.9% bar
+        let missed = report_with_near(&[(100, 10_000, 9_980), (150, 15_000, 15_000)]);
+        assert!(missed.near_service(100).unwrap_err().contains("99"), "{:?}", missed.near_service(100));
+        // so does a crowd that is served under 20 Hz
+        let slow = report_with_near(&[(100, 10_000, 10_000), (220, 22_000, 14_000)]);
+        assert!(slow.near_service(100).unwrap_err().contains("20"), "{:?}", slow.near_service(100));
+        // the same missed ticks do not count against a recipient whose count is over the share
+        assert_eq!(missed.near_service(99), Ok(()));
+    }
 
     /// Feed a tracker one pair (0, 1): `at(tick)` is `Some((band, updated))`
     /// when both are in the world.

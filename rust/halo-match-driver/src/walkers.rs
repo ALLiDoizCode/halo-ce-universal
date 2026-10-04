@@ -22,6 +22,10 @@ const MAX_STRIDE: f32 = 0.25;
 /// How far into a wall a walker's start may be.
 const PLACED_CLEAR: f32 = 0.001;
 
+/// How many ticks in a row a walker may stand at an edge, turning about, before they are let
+/// fall from it.
+const STALL_TICKS: u32 = 15;
+
 /// How far ahead of the server an acrobat's body may be (the inputs on their way,
 /// a few ticks of a fall at most) before the server's word is taken instead.
 const ACROBAT_LAG: f32 = 1.5;
@@ -43,8 +47,20 @@ pub struct Walkers {
     ticks: u64,
     /// Per walker, how hard they push ahead (1 unless [`Walkers::set_throttle`] says).
     throttles: Vec<f32>,
+    /// Per walker, how many ticks in a row they have stood still at an edge, or are falling free of one.
+    stalled: Vec<u32>,
     /// The tick of each player's last accepted move, as the module's `updated_tick` holds it
     /// (the speed bound grows with the ticks since).
+    moved_at: BTreeMap<u16, u64>,
+}
+
+/// What [`Walkers::apply`] changes, kept so that a try can be taken back ([`Walkers::save`]).
+#[derive(Clone)]
+pub struct Saved {
+    mirror: MemoryStore,
+    headings: Vec<f32>,
+    bodies: Vec<Body>,
+    rng: Rng,
     moved_at: BTreeMap<u16, u64>,
 }
 
@@ -128,6 +144,7 @@ impl Walkers {
                 acrobatics: false,
                 ticks: 0,
                 throttles: vec![1.0; players as usize],
+                stalled: vec![0; players as usize],
                 moved_at: BTreeMap::new(),
             },
             spawn,
@@ -199,11 +216,15 @@ impl Walkers {
             let before = self.bodies[i].position;
             let flat = ((body.position[0] - before[0]).powi(2) + (body.position[1] - before[1]).powi(2)).sqrt();
             let stride = (flat.powi(2) + (body.position[2] - before[2]).powi(2)).sqrt();
-            let off_the_ground = if self.acrobatics { flat > MAX_STRIDE } else { body.airborne || stride > MAX_STRIDE };
+            // (a walker who has stood at an edge for a while is hanging on a wall's face or a ledge,
+            // where turning about does not free them: they are let fall, as an acrobat is)
+            let falling_free = self.acrobatics || self.stalled[i] > STALL_TICKS;
+            let off_the_ground = if falling_free { flat > MAX_STRIDE } else { body.airborne || stride > MAX_STRIDE };
+            self.stalled[i] = if off_the_ground || (body.airborne && falling_free) { self.stalled[i] + 1 } else { 0 };
             let position = if off_the_ground {
                 // an edge: stand still and turn to a new random heading
                 self.headings[i] = self.rng.next_f32() * core::f32::consts::TAU;
-                self.bodies[i] = Body::at(p.position);
+                self.bodies[i] = resting(&self.map, p.position);
                 p.position
             } else {
                 self.bodies[i] = body;
@@ -236,13 +257,33 @@ impl Walkers {
             let off = |a: [f32; 3], b: [f32; 3]| (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>().sqrt();
             let lost = if self.acrobatics { off(self.bodies[index].position, position) > ACROBAT_LAG } else { true };
             if lost && self.bodies[index].position != position {
-                self.bodies[index] = Body::at(position);
+                self.bodies[index] = resting(&self.map, position);
             }
             if row.rejected_moves > self.rejects_seen[index] {
                 self.rejects_seen[index] = row.rejected_moves;
                 self.headings[index] = self.rng.next_f32() * core::f32::consts::TAU;
             }
         }
+    }
+
+    /// The copy as it is now, to [`Walkers::restore`] after trying some inputs on it.
+    pub fn save(&self) -> Saved {
+        Saved {
+            mirror: self.mirror.clone(),
+            headings: self.headings.clone(),
+            bodies: self.bodies.clone(),
+            rng: self.rng.clone(),
+            moved_at: self.moved_at.clone(),
+        }
+    }
+
+    /// Go back to a state kept by [`Walkers::save`].
+    pub fn restore(&mut self, saved: Saved) {
+        self.mirror = saved.mirror;
+        self.headings = saved.headings;
+        self.bodies = saved.bodies;
+        self.rng = saved.rng;
+        self.moved_at = saved.moved_at;
     }
 
     /// Apply a tick's inputs to the local copy, as the server will.
@@ -260,13 +301,20 @@ impl Walkers {
                 if let Some(heading) = self.headings.get_mut(*player as usize) {
                     *heading = self.rng.next_f32() * core::f32::consts::TAU;
                     if let Some(p) = self.mirror.player(*player) {
-                        self.bodies[*player as usize] = Body::at(p.position);
+                        self.bodies[*player as usize] = resting(&self.map, p.position);
                     }
                 }
             }
         }
         events
     }
+}
+
+/// A walker put at `position`, at rest and on the ground. A body that has just been put
+/// somewhere has not found the ground yet: if the position is even a hair above it (and the
+/// position of a walker who crossed a crest is), its first tick counts as a fall.
+fn resting(map: &MapData, position: [f32; 3]) -> Body {
+    Body::at(settled(map, position))
 }
 
 /// The height standing on the ground below `from`.

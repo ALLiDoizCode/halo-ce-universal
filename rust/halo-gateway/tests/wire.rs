@@ -17,7 +17,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use halo_gateway::harness::{
-    analyze, run_walk, sim_seed, Crowd, Impairment, Rig, RigSetup, Seats, Truth, DEFAULT_BANDS,
+    analyze, run_walk, run_walk_stalling, sim_seed, Crowd, Impairment, Rig, RigSetup, Seats, Truth, DEFAULT_BANDS,
 };
 use halo_match_driver::server::{build_module, stdb_bin_dir};
 use halo_match_driver::PlayerClient;
@@ -27,7 +27,7 @@ use halo_wire::auth;
 use halo_wire::datagram::{
     Ack, Challenge, ClientMessage, Refused, ServerMessage, REFUSED_BAD_PROOF, REFUSED_NO_SEAT, REFUSED_STALE,
 };
-use halo_wire::planner::STALENESS_BOUND_TICKS;
+use halo_wire::planner::{PlannerConfig, STALENESS_BOUND_TICKS};
 use halo_wire::unit::Bounds;
 
 fn serial() -> MutexGuard<'static, ()> {
@@ -345,7 +345,7 @@ fn every_player_is_sent_every_tick_and_the_states_match_the_server() {
     crowd.join_all(WAIT).unwrap();
     let before = rig.server.tick_metrics();
     let mut truth = Truth::new(rig.capacity);
-    run_walk(&rig.client, &mut rig.walkers, &crowd, &mut truth, Duration::from_secs(4));
+    let rounds = run_walk(&rig.client, &mut rig.walkers, &crowd, &mut truth, Duration::from_secs(4));
     let used = rig.server.tick_metrics().since(&before);
 
     let report = analyze(&crowd, &truth, truth.window(10, 3), &DEFAULT_BANDS);
@@ -375,12 +375,65 @@ fn every_player_is_sent_every_tick_and_the_states_match_the_server() {
     }
     assert!(checked > 40_000, "only {checked} states checked");
 
-    // one batch a tick, not one per player
+    // one batch a tick, not one per player. The walk sends one round of inputs for each tick it sees,
+    // and a tick it sees after others that were waiting (a busy machine) is one round for all of them,
+    // so the batches are counted against the rounds sent, not the ticks that ran: each round is handed to
+    // the module as one batch at the gateway's next tick, and the last two (the most the gateway holds
+    // for a player, `board::QUEUED`) may still be waiting when the walk ends
     assert!(used.submits <= used.ticks + 3.0, "{} submits in {} ticks", used.submits, used.ticks);
-    assert!(used.submits >= used.ticks - 10.0, "{} submits in {} ticks", used.submits, used.ticks);
+    assert!(
+        used.submits >= rounds as f64 - 2.0,
+        "{} submits for {rounds} rounds sent in {} ticks",
+        used.submits,
+        used.ticks
+    );
     let stats = rig.gateway.stats();
     assert_eq!(stats.inputs_late, 0);
     assert_eq!(stats.send_errors, 0);
+}
+
+/// The wire bar for near players at `budget`: see `Report::near_service`.
+fn assert_near_service(report: &halo_gateway::harness::Report, budget: u32) {
+    let capacity = PlannerConfig::with_budget(budget).near_capacity();
+    println!("{}", report.near_summary(capacity));
+    if let Err(why) = report.near_service(capacity) {
+        panic!("{why}");
+    }
+}
+
+#[test]
+fn a_client_that_stops_now_and_then_is_sent_one_batch_for_each_round_it_sent_not_each_tick() {
+    let _serial = serial();
+    const PLAYERS: u16 = 50;
+    let Some(mut rig) = rig("stalls", flat_floor_map(), &grid(PLAYERS as usize, 20.0), PLAYERS, 90_000) else {
+        return;
+    };
+    let crowd = Crowd::connect(rig.gateway.local_addr(), 0..PLAYERS, Impairment::none(), rig.capacity, true);
+    crowd.join_all(WAIT).unwrap();
+    let before = rig.server.tick_metrics();
+    let mut truth = Truth::new(rig.capacity);
+    // stopped for 200 ms (6 ticks) after every 10 rounds: about 40 of the 120 ticks of the walk have no round of their own
+    let rounds = run_walk_stalling(
+        &rig.client,
+        &mut rig.walkers,
+        &crowd,
+        &mut truth,
+        Duration::from_secs(4),
+        10,
+        Duration::from_millis(200),
+    );
+    let used = rig.server.tick_metrics().since(&before);
+    assert!(rounds as f64 + 20.0 < used.ticks, "{rounds} rounds in {} ticks: the walk did not fall behind", used.ticks);
+    // a round is one batch, at the next tick the gateway sees (the last two may be waiting still), and the
+    // ticks between rounds have none
+    assert!(used.submits <= used.ticks + 3.0, "{} submits in {} ticks", used.submits, used.ticks);
+    assert!(
+        used.submits >= rounds as f64 - 2.0,
+        "{} submits for {rounds} rounds sent in {} ticks",
+        used.submits,
+        used.ticks
+    );
+    assert_eq!(rig.gateway.stats().inputs_late, 0);
 }
 
 #[test]
@@ -413,11 +466,7 @@ fn a_budget_holds_and_nearby_players_are_updated_every_tick_while_far_ones_less_
     assert!(report.missed_ticks <= report.expected_receipts / 1000, "{} ticks missed", report.missed_ticks);
     let bands = &report.bands;
     assert!(bands[0].pairs > 1000, "players were near each other");
-    assert!(
-        bands[0].fraction_updated >= 0.999,
-        "players within 10 wu were updated in {:.3}% of ticks",
-        bands[0].fraction_updated * 100.0
-    );
+    assert_near_service(&report, BUDGET);
     assert!(bands[0].hz > bands[1].hz && bands[1].hz > bands[2].hz && bands[2].hz > bands[3].hz, "{bands:?}");
     assert!(bands[3].updated > 0, "far players are still updated now and then");
     // tick 30 Hz, state age
@@ -743,7 +792,7 @@ fn five_hundred_players_on_blood_gulch_hold_a_90_kb_s_budget() {
     );
     assert!(report.max_download <= BUDGET as f64 * 1.02);
     assert_eq!(report.missed_ticks, 0);
-    assert!(report.bands[0].fraction_updated >= 0.999);
+    assert_near_service(&report, BUDGET);
     assert!(report.tick_age_ms.p50 < 10.0);
     assert!(stats.send_ms.max < 10.0 || stats.send_ms.p99 < 10.0);
 }
