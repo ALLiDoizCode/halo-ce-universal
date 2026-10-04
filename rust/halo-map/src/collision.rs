@@ -276,6 +276,7 @@ impl CollisionBsp {
             center2d: [0.0; 2],
             tested: [(0, 0); TESTED],
             tested_count: 0,
+            tested_bits: [0; 4],
         };
         if !self.bsp3d_nodes.is_empty() {
             sphere_recursive(&mut ctx, 0);
@@ -521,6 +522,30 @@ struct SphereCtx<'a> {
     /// which is in the lists already, so it is not tested twice.
     tested: [(i32, i32); TESTED],
     tested_count: usize,
+    /// One bit for each of 256 hashes of the keys in `tested`: a key whose bit is clear is not there,
+    /// which most lookups find out without reading the list.
+    tested_bits: [u64; 4],
+}
+
+impl SphereCtx<'_> {
+    fn tested_bit(key: (i32, i32)) -> (usize, u64) {
+        let hash = ((key.0 as u32).wrapping_mul(0x9E37_79B1) ^ (key.1 as u32).wrapping_mul(0x85EB_CA6B)) >> 24;
+        ((hash >> 6) as usize, 1 << (hash & 63))
+    }
+
+    fn was_tested(&self, key: (i32, i32)) -> bool {
+        let (word, bit) = Self::tested_bit(key);
+        self.tested_bits[word] & bit != 0 && self.tested[..self.tested_count].contains(&key)
+    }
+
+    fn mark_tested(&mut self, key: (i32, i32)) {
+        if self.tested_count < TESTED {
+            self.tested[self.tested_count] = key;
+            self.tested_count += 1;
+            let (word, bit) = Self::tested_bit(key);
+            self.tested_bits[word] |= bit;
+        }
+    }
 }
 
 fn add_feature(list: &mut Vec<i32>, index: i32) {
@@ -633,13 +658,10 @@ fn bsp2d_sphere_recursive(ctx: &mut SphereCtx, mut child_index: i32, reference_p
     if child_index != NONE {
         let surface_index = child_index & MASK;
         let key = (surface_index, reference_plane);
-        if ctx.tested[..ctx.tested_count].contains(&key) {
+        if ctx.was_tested(key) {
             return;
         }
-        if ctx.tested_count < TESTED {
-            ctx.tested[ctx.tested_count] = key;
-            ctx.tested_count += 1;
-        }
+        ctx.mark_tested(key);
         surface_test_sphere(ctx, surface_index);
     }
 }
@@ -673,6 +695,12 @@ fn sphere_recursive(ctx: &mut SphereCtx, mut node_index: i32) {
     for reference_index in first..first + leaf.bsp2d_reference_count as i32 {
         let reference = ctx.bsp.bsp2d_references[reference_index as usize];
         if !ctx.stack.contains(reference.plane) {
+            continue;
+        }
+        // (a reference that goes straight to a surface already tested, or to none: nothing to find out)
+        if reference.root & SIGN != 0
+            && (reference.root == NONE || ctx.was_tested((reference.root & MASK, reference.plane)))
+        {
             continue;
         }
         let plane = ctx.bsp.planes[(reference.plane & MASK) as usize];
