@@ -1,7 +1,7 @@
 //! Whole Slayer matches on the real Blood Gulch and Sidewinder, run by
 //! `halo-server` against a real local SpacetimeDB, with simulated players: more
-//! players than starting locations (so that waves happen and everyone ends up
-//! in the world somewhere they can stand and clear of everyone else), kills
+//! players than starting locations (so that some spawn beside a start and
+//! everyone ends up in the world at once, somewhere they can stand and clear of everyone else), kills
 //! credited through the server's death path, the match ending at the score
 //! limit and at the time limit with a final scoreboard, the rotation moving
 //! on, and the cap refusing the player beyond it.
@@ -33,7 +33,7 @@ fn wait_for<T>(what: &str, seconds: u64, mut check: impl FnMut() -> Option<T>) -
 }
 
 #[test]
-fn a_blood_gulch_match_spawns_in_waves_ends_at_its_score_and_time_limits_and_the_rotation_moves_on() {
+fn a_blood_gulch_match_spawns_everyone_ends_at_its_score_and_time_limits_and_the_rotation_moves_on() {
     let (Some(bin), Some(maps)) = (stdb_bin_dir(), std::env::var_os("HALO_MAP_DIR").map(PathBuf::from)) else {
         eprintln!("HALO_STDB_BIN and HALO_MAP_DIR are not both set: skipping, this test needs the game's own maps");
         return;
@@ -110,12 +110,11 @@ wave_seconds = 3
     let refusal = extra.join([99; 32]).expect_err("the match is full");
     assert!(refusal.contains("full: the match has its 24 players"), "told: {refusal}");
 
-    // more players than the map's 16 starting locations for Slayer: some spawn at once, the rest in waves
+    // more players than the map's 16 starting locations for Slayer: the ones who find no free start
+    // spawn beside one at once, and nobody is told to wait for a wave
     wait_for("the standings", 20, || (owner.standings().len() == 24).then_some(()));
-    let at_a_start = owner.standings().values().filter(|s| s.state == 0).count();
-    assert!((8..=16).contains(&at_a_start), "{at_a_start} of 24 spawned at once on a map with 16 starts");
-    assert!(owner.standings().values().any(|s| s.state == 2), "somebody is told to wait for a wave");
-    wait_for("the waves", 30, || owner.standings().values().all(|s| s.state == 0).then_some(()));
+    assert!(owner.standings().values().all(|s| s.state != 2), "somebody is told to wait for a wave");
+    wait_for("everyone to spawn", 10, || owner.standings().values().all(|s| s.state == 0).then_some(()));
     let rows = owner.players();
     assert_eq!(rows.len(), 24);
     let map = halo_sim::MapData::from(halo_map::HaloMap::from_path(row_map_path(&row.map)).unwrap());
