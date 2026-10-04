@@ -24,3 +24,8 @@ halo-map = { path = "../halo-map" }
 # Time the tick's stages with the host's console timers (the log gets a line per stage per tick):
 # the profile of where a tick's time goes. Off in the module that is published.
 stage-timing = []
+
+# The tick is the hot path of every player's latency (issue #48): optimised across the crates, as one unit
+[profile.release]
+lto = "fat"
+codegen-units = 1
