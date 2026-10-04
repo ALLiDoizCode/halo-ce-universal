@@ -424,9 +424,8 @@ fn the_game_draws_no_more_than_64_items_however_many_lie_near_it() {
     // forty simulated players stand within a few steps of the game's player, with two weapons each to put down
     // when they die: well over 64 weapons lie within range of it
     const SIMULATED: u8 = 40;
-    let mut places: Vec<PlayerInput> = (0..SIMULATED)
-        .map(|k| at(38.4 + f32::from(k % 8) * 0.5, -81.5 + f32::from(k / 8) * 0.5, 0.0))
-        .collect();
+    let mut places: Vec<PlayerInput> =
+        (0..SIMULATED).map(|k| at(38.4 + f32::from(k % 8) * 0.5, -81.5 + f32::from(k / 8) * 0.5, 0.0)).collect();
     places.push(at(40.4, -78.7, std::f32::consts::FRAC_PI_2));
     let Some(a) = arena("items-pile", "bloodgulch", &places) else { return };
     let shotgun = a.weapon("shotgun");
@@ -466,12 +465,7 @@ fn the_game_draws_no_more_than_64_items_however_many_lie_near_it() {
     // ... and never more, though the server holds all of them
     std::thread::sleep(Duration::from_secs(5));
     let text = read(&log);
-    let most = text
-        .lines()
-        .filter(|l| l.contains("large mode: items: "))
-        .filter_map(|l| drawn_in_log(l))
-        .max()
-        .unwrap();
+    let most = text.lines().filter(|l| l.contains("large mode: items: ")).filter_map(drawn_in_log).max().unwrap();
     let (on_the_ground, _) = items_in_log(&text).unwrap();
     println!("{before} items before, {on_the_ground} on the ground after, the game drew at most {most}");
     assert!(on_the_ground as usize > DRAW_LIMIT && most <= DRAW_LIMIT, "{on_the_ground} on the ground, {most} drawn");
