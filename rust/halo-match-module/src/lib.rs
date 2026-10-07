@@ -1275,15 +1275,15 @@ impl ItemStore for TableItems<'_> {
 /// rounds it comes with.
 fn spawn_combat(ctx: &ReducerContext, map: &MapData, id: PlayerId, tick: u64) {
     let mut rng = Rng::seeded(tick ^ ((id as u64) << 32) ^ 0x4B17);
-    let kit = variant_of(ctx).spawn_kit(map, variant::GAME_TYPE_SLAYER, &mut rng);
+    let spawn_kit = variant_of(ctx).spawn_kit(map, variant::GAME_TYPE_SLAYER, &mut rng);
     TRAILS.with(|t| {
-        halo_sim::combat::spawn_with(&mut TableCombat { ctx }, &mut t.borrow_mut(), id, tick, map, kit.weapons)
+        halo_sim::combat::spawn_with(&mut TableCombat { ctx }, &mut t.borrow_mut(), map, id, tick, spawn_kit.weapons)
     });
     let fighter = TableCombat { ctx }.fighter(id);
     if let Some(fighter) = fighter {
         let mut items = TableItems { ctx };
         pickups::on_spawn(&mut items, map, id, &fighter.loadout);
-        pickups::give_grenades(&mut items, id, kit.grenades);
+        pickups::give_grenades(&mut items, id, spawn_kit.grenades);
     }
 }
 

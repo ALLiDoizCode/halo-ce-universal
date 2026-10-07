@@ -304,16 +304,16 @@ pub fn starting_weapon(map: &MapData) -> Option<u16> {
 /// remembered of where they were.
 pub fn spawn(combat: &mut impl CombatStore, trails: &mut Trails, map: &MapData, id: PlayerId, tick: u64) {
     let weapons = [starting_weapon(map).unwrap_or(NO_WEAPON), NO_WEAPON];
-    spawn_with(combat, trails, id, tick, map, weapons);
+    spawn_with(combat, trails, map, id, tick, weapons);
 }
 
 /// [`spawn`], with the weapons a game variant gives (`crate::variant`).
 pub fn spawn_with(
     combat: &mut impl CombatStore,
     trails: &mut Trails,
+    map: &MapData,
     id: PlayerId,
     tick: u64,
-    map: &MapData,
     weapons: [u16; 2],
 ) {
     combat.set_fighter(Fighter {

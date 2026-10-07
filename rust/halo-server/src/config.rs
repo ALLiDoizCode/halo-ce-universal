@@ -304,9 +304,7 @@ impl Rotation {
         }
         Ok(rules)
     }
-}
 
-impl Rotation {
     /// What a player of this step spawns with; the error names the setting.
     pub fn variant(&self) -> Result<Variant, String> {
         let weapon_set = match self.weapon_set.as_deref() {

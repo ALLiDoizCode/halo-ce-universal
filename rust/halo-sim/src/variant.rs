@@ -11,9 +11,11 @@
 //!   the game type: the weapons its item collections pick (by weight), and
 //!   grenades by its flags (none, plasma instead of frag, or two frags). A map
 //!   with no starting equipment for the game type gives the generic kit.
-//! - The weapon set then narrows the grenades, as `game_engine_remap_equipment`
-//!   does: plasma weapons give plasma grenades only, human weapons frags only,
-//!   and "no grenades" none.
+//! - The weapon set then narrows the grenades: plasma weapons give plasma
+//!   grenades only, human weapons frags only, and "no grenades" none. This is
+//!   the kind remap `game_engine_remap_equipment` applies to grenades lying on
+//!   the map, taken as the spawn's rule too: the engine's own spawn handler
+//!   (`_handle_custom_starting_equipment`) has no body in this source.
 //! - Infinite grenades give the same grenades at the spawn; a throw does not
 //!   cost one ([`crate::items::Kit::throw_grenade`]).
 
@@ -220,10 +222,10 @@ fn map_equipment(map: &MapData, game_type: i16, rng: &mut Rng) -> Option<([u16; 
 
 /// One of the permutations, by weight.
 fn pick(permutations: &[&(f32, u16)], rng: &mut Rng) -> Option<u16> {
-    let total: f32 = permutations.iter().map(|(w, _)| w.max(0.0)).sum();
     if permutations.is_empty() {
         return None;
     }
+    let total: f32 = permutations.iter().map(|(w, _)| w.max(0.0)).sum();
     let mut at = rng.next_f32() * total;
     for (weight, tag) in permutations {
         at -= weight.max(0.0);
@@ -360,7 +362,7 @@ mod tests {
         use crate::items::{ItemStore, MemoryItems};
         let (mut combat, mut items) = (MemoryCombat::new(), MemoryItems::new());
         let spawn_kit = variant.spawn_kit(map, GAME_TYPE_SLAYER, &mut Rng::seeded(3));
-        crate::combat::spawn_with(&mut combat, &mut Trails::new(), 4, 0, map, spawn_kit.weapons);
+        crate::combat::spawn_with(&mut combat, &mut Trails::new(), map, 4, 0, spawn_kit.weapons);
         let fighter = combat.fighter(4).unwrap();
         crate::pickups::on_spawn(&mut items, map, 4, &fighter.loadout);
         crate::pickups::give_grenades(&mut items, 4, spawn_kit.grenades);
