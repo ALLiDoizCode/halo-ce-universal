@@ -27,10 +27,27 @@ push, open a PR or close the issue. The runner does all three once you finish.
   the exact commands CI runs for each, including the format and clippy checks.
 - The game data (`maps/`, extracted from an Xbox disc image) is not in the repository and
   is not in the sandbox. Tests that need it skip themselves, and so does the 500-player
-  measurement on the real maps. A ticket whose acceptance rests on a measurement with the
-  real maps, or on a frame rate seen in the running game, cannot be proved from here: do
-  what the tests without game data can prove, and say in a comment on the issue which
-  measurement is still owed.
+  measurement on the real maps.
+- When a ticket's acceptance includes a measurement you cannot make here (a run of
+  `rust/halo-server/check/run.sh`, a frame rate in the running game, anything on the real
+  maps), do the part the tests without game data can prove, and hand the measurement to the
+  maintainer as a ticket of its own. Once your work is committed, and before you output
+  COMPLETE, open one issue with `gh issue create --label ready-for-human`, titled
+  `Measure: <what is to be shown> (#{{ISSUE_NUMBER}})`. Its body gives:
+  - the issue (`#{{ISSUE_NUMBER}}`) and the branch (`{{BRANCH}}`) the change is on;
+  - the exact command to run, with its settings, and which lines of which output to read;
+  - the criteria of the ticket that the measurement decides, copied as a checklist, with the
+    figures to compare against;
+  - what the sandbox did show, in one or two sentences;
+  - `Measure before the merge.` when the change is in the game client (`source/`, `port/`
+    or `rust/halo-client`): a merge to `main` is released to players. For a change to the
+    server or the load generator only, say that it can be measured after the merge.
+  Then say in a comment on `#{{ISSUE_NUMBER}}` which ticket holds the measurement. Open one
+  measurement ticket at most (an earlier session of this run may have opened it: look with
+  `gh issue list --search "Measure: in:title #{{ISSUE_NUMBER}}"` first), and none when you stop
+  blocked. The pull request closes
+  `#{{ISSUE_NUMBER}}` when it merges, so the measurement ticket is the only record of what is
+  still to be shown: leave nothing out of it.
 - Do not edit `.github/workflows/build.yml` unless the ticket asks for it: a successful
   build of `main` is published as a release that the game's self-updater installs.
 - Issues are on the fork, `ALLiDoizCode/halo-ce-universal`, never the upstream

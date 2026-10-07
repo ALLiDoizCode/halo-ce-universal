@@ -22,6 +22,12 @@ pushes `sandcastle/issue-N` and opens a PR labelled `ready-for-human`. A failed 
 the issue to `needs-triage`. Specs, blocked issues, issues with an open PR and any issue
 labelled `wayfinder:*` are skipped (`.sandcastle/ready-issues.ts`). A human merges every PR.
 
+The sandbox has no game data, so it cannot make a measurement on the real maps or in the
+running game. When a ticket's acceptance includes one, the agent proves what the tests can,
+and opens a `Measure: ...` issue labelled `ready-for-human` with the command and the criteria
+still to be shown (`.sandcastle/implement-prompt.md`). The pull request closes the ticket
+when it merges; the measurement issue stays open until a human has made the run.
+
 **The gate reads its steps from CI.** The gate is the `run:` steps of the `gate` job
 (else the `checks` job) of `.github/workflows/ci.yml` **on `main`**, in order. If there is
 no `ci.yml`, no such job, or no runnable step, the gate runs nothing and logs that loudly.
