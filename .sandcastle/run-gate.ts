@@ -128,6 +128,15 @@ export async function loadGate(sandbox: Sandbox, base: string): Promise<Gate> {
 }
 
 /**
+ * A step's command as the sandbox is handed it. The sandbox runs what it is given under `sh`,
+ * which is dash in the agent image and has no `pipefail`, so the step is passed whole to
+ * bash: it stops at the first failing line, and a pipe fails when any part of it does, as a
+ * `run:` step does on GitHub.
+ */
+export const gateCommand = (command: string): string =>
+  `bash -eo pipefail -c ${shellQuote(command)}`;
+
+/**
  * Run `steps` in order, stopping at the first failure.
  *
  * Failure is returned, not thrown, so the caller can decide between a fix
@@ -139,7 +148,7 @@ export async function runGate(sandbox: Sandbox, steps: readonly GateStep[]): Pro
   for (const step of steps) {
     console.log(`  [gate] ${step.name}: ${step.command}`);
     const lines: string[] = [];
-    const result = await sandbox.exec(`bash -eo pipefail -c ${shellQuote(step.command)}`, {
+    const result = await sandbox.exec(gateCommand(step.command), {
       onLine: (line) => {
         lines.push(line);
         // Stream sparingly: full build output would bury the runner log.
