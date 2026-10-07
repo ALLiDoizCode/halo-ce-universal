@@ -1,0 +1,64 @@
+name: CI
+
+# The gate of the AFK factory (see "The AFK factory" in CLAUDE.md). The
+# factory's runner reads the `run:` steps of the `gate` job from this file on
+# main and runs them, in order, in its sandbox before it opens a pull request;
+# GitHub runs the same job here on every pull request. So every `run:` step
+# must work in both places: no `if:` and no ${{ }} expression (the runner skips
+# a step with either), and nothing that needs the game's own data.
+#
+# The steps are those of the `rust` job in build.yml, which runs on each push:
+# the Rust libraries of the large-scale mode (rust/), formatted, linted, tested
+# on the host, and built for the 32-bit client and WebAssembly. Keep the two
+# the same.
+on:
+  pull_request:
+    paths-ignore:
+      - "**.md"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            rust/target
+          key: rust-${{ hashFiles('rust/**/Cargo.toml', 'rust/Cargo.lock') }}
+          restore-keys: rust-
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt \
+            --target i686-unknown-linux-gnu --target wasm32-unknown-unknown
+          rustup default stable
+
+      - name: Format and lints
+        working-directory: rust
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        working-directory: rust
+        run: cargo test --locked
+
+      - name: Build for 32-bit x86 and WebAssembly
+        working-directory: rust
+        run: |
+          # the libraries only: halo-sim-parity's cdylib is for wasm, and
+          # linking a 32-bit shared library needs 32-bit libc
+          cargo build --locked --release --target i686-unknown-linux-gnu -p halo-map -p halo-sim -p halo-wire
+          cargo build --locked --release --target wasm32-unknown-unknown
