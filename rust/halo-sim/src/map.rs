@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use halo_map::collision::CollisionBsp;
 use halo_map::combat::Combat;
 use halo_map::items::Items;
-use halo_map::{HaloMap, Movement};
+use halo_map::{HaloMap, Movement, NetgameFlag};
 
 use crate::math::sqrt;
 use crate::spawn::Start;
@@ -21,6 +21,11 @@ pub struct MapData {
     /// The player starting locations, settled on the ground (see
     /// [`crate::spawn`]). Where [`crate::rules`] spawns players.
     pub starts: Vec<Start>,
+    /// The map's netgame flags in full: the flags of Capture the Flag, the
+    /// ball spawns of Oddball, the hills of King, the checkpoints of Race,
+    /// the vehicle spots and the teleporters. A game type picks the ones it
+    /// plays by `flag_type` (see [`crate::gametype`]).
+    pub netgame_flags: Vec<NetgameFlag>,
     /// What the tags say of fighting: the weapons, and the player's health and
     /// shields (see [`crate::combat`]).
     pub combat: Combat,
@@ -28,6 +33,9 @@ pub struct MapData {
     /// how often, and how far a player reaches (see [`crate::items`]).
     pub items: Items,
 }
+
+/// Bytes of a netgame flag in [`MapData::to_bytes`].
+const FLAG_BYTES: usize = 4 * 4 + 2 * 2;
 
 impl MapData {
     /// The fastest an on-foot player can go over the ground, in world units a
@@ -50,6 +58,8 @@ impl MapData {
     /// bounds and the [`Movement::COUNT`] movement values (all little-endian
     /// `f32`), the starting locations (a `u32` count, then for each its
     /// position and yaw as `f32`s, its team and four game types as `i16`s),
+    /// the netgame flags (a `u32` count, then for each its position and
+    /// facing as `f32`s, its type and team as `i16`s),
     /// the combat values ([`Combat::to_bytes`], behind a `u32` length), the
     /// item values ([`Items::to_bytes`], likewise), and
     /// [`CollisionBsp::to_bytes`](halo_map::collision::CollisionBsp::to_bytes).
@@ -66,6 +76,14 @@ impl MapData {
             for v in core::iter::once(&start.team).chain(&start.game_types) {
                 out.extend_from_slice(&v.to_le_bytes());
             }
+        }
+        out.extend_from_slice(&(self.netgame_flags.len() as u32).to_le_bytes());
+        for flag in &self.netgame_flags {
+            for v in flag.position.iter().chain([&flag.facing]) {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            out.extend_from_slice(&flag.flag_type.to_le_bytes());
+            out.extend_from_slice(&flag.team_index.to_le_bytes());
         }
         let combat = self.combat.to_bytes();
         out.extend_from_slice(&(combat.len() as u32).to_le_bytes());
@@ -92,6 +110,11 @@ impl MapData {
         let count = u32::from_le_bytes(count.try_into().unwrap()) as usize;
         let (start_bytes, rest) =
             count.checked_mul(Start::BYTES).and_then(|n| rest.split_at_checked(n)).ok_or_else(short)?;
+        let short_flags = || halo_map::MapError::Malformed("map data is shorter than its netgame flags".into());
+        let (flag_count, rest) = rest.split_at_checked(4).ok_or_else(short_flags)?;
+        let flag_count = u32::from_le_bytes(flag_count.try_into().unwrap()) as usize;
+        let (flag_bytes, rest) =
+            flag_count.checked_mul(FLAG_BYTES).and_then(|n| rest.split_at_checked(n)).ok_or_else(short_flags)?;
         let short_combat = || halo_map::MapError::Malformed("map data is shorter than its combat values".into());
         let (combat_len, rest) = rest.split_at_checked(4).ok_or_else(short_combat)?;
         let combat_len = u32::from_le_bytes(combat_len.try_into().unwrap()) as usize;
@@ -112,6 +135,16 @@ impl MapData {
                 Start { position: [f(0), f(1), f(2)], yaw: f(3), team: h(0), game_types: [h(1), h(2), h(3), h(4)] }
             })
             .collect();
+        let netgame_flags = flag_bytes
+            .as_chunks::<FLAG_BYTES>()
+            .0
+            .iter()
+            .map(|b| {
+                let f = |i: usize| f32::from_le_bytes(b[4 * i..4 * i + 4].try_into().unwrap());
+                let h = |i: usize| i16::from_le_bytes(b[16 + 2 * i..18 + 2 * i].try_into().unwrap());
+                NetgameFlag { position: [f(0), f(1), f(2)], facing: f(3), flag_type: h(0), team_index: h(1) }
+            })
+            .collect();
         let mut world_bounds = [0.0; 6];
         for (v, b) in world_bounds.iter_mut().zip(bounds.as_chunks::<4>().0) {
             *v = f32::from_le_bytes(*b);
@@ -124,7 +157,15 @@ impl MapData {
         if !movement.is_sane() {
             return Err(halo_map::MapError::Malformed("the map's movement values are not usable".into()));
         }
-        Ok(MapData { collision: CollisionBsp::from_bytes(collision)?, world_bounds, movement, starts, combat, items })
+        Ok(MapData {
+            collision: CollisionBsp::from_bytes(collision)?,
+            world_bounds,
+            movement,
+            starts,
+            netgame_flags,
+            combat,
+            items,
+        })
     }
 }
 
@@ -135,6 +176,7 @@ impl From<HaloMap> for MapData {
             world_bounds: map.world_bounds,
             movement: map.movement,
             starts: Vec::new(),
+            netgame_flags: map.netgame_flags,
             combat: map.combat,
             items: map.items,
         };
@@ -163,6 +205,26 @@ mod tests {
     }
 
     #[test]
+    fn the_netgame_flags_of_every_game_type_survive_the_bytes() {
+        use halo_map::flag_type::*;
+        let mut map = crate::fixtures::flat_floor_map();
+        map.netgame_flags =
+            [CTF_FLAG, CTF_VEHICLE, ODDBALL_BALL_SPAWN, RACE_TRACK, RACE_VEHICLE, TELEPORTER_SOURCE, HILL]
+                .iter()
+                .enumerate()
+                .map(|(i, &t)| NetgameFlag {
+                    position: [i as f32, -2.5, 0.25],
+                    facing: 0.5 * i as f32,
+                    flag_type: t,
+                    team_index: (i % 2) as i16,
+                })
+                .collect();
+        let back = MapData::from_bytes(&map.to_bytes()).unwrap();
+        assert_eq!(back.netgame_flags, map.netgame_flags);
+        assert!(MapData::from_bytes(&map.to_bytes()[..24 + 4 * Movement::COUNT + 4 + 4 + 30]).is_err());
+    }
+
+    #[test]
     fn a_map_with_fighting_survives_its_bytes() {
         let mut map = crate::fixtures::flat_floor_map();
         map.combat = crate::fixtures::combat_fixture();
@@ -177,7 +239,7 @@ mod tests {
         map.combat = crate::fixtures::combat_fixture();
         let bytes = map.to_bytes();
         // (cut anywhere in the combat values and what follows is no longer what they say)
-        let combat_at = 24 + 4 * Movement::COUNT + 4;
+        let combat_at = 24 + 4 * Movement::COUNT + 4 + 4;
         assert!(MapData::from_bytes(&bytes[..combat_at + 6]).is_err());
         let mut broken = map.clone();
         broken.combat.resistance.maximum_body_vitality = f32::NAN;

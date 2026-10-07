@@ -1520,7 +1520,8 @@ pub fn join(ctx: &ReducerContext, udp_key: Vec<u8>) -> Result<(), String> {
     } else {
         // the game's rules say where: at a free starting location now, or in the next wave
         let map = current_map(ctx).ok_or("the match has no map yet")?;
-        if !map.starts.iter().any(|s| s.is_for_slayer()) {
+        let game_type = TableGame { ctx }.game().rules.game_type();
+        if !map.starts.iter().any(|s| game_type.uses_start(s)) {
             return Err("the map has no starting locations for the game".into());
         }
         add_to_roster(ctx, id, Some(ctx.sender()));

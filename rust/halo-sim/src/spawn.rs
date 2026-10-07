@@ -49,6 +49,7 @@ use alloc::vec::Vec;
 use halo_map::collision::{TEST_BACK_FACING, TEST_FRONT_FACING};
 use halo_map::game_type;
 
+use crate::gametype::GameType;
 use crate::map::MapData;
 use crate::math::sqrt;
 use crate::rng::Rng;
@@ -210,10 +211,18 @@ pub struct Spot {
 /// starts that the game allows, each rating scaled by the square root of a
 /// random number. `None` when none is free. With `overflow`, if none is, a
 /// spot beside one that is taken (see the module's list of what differs).
-pub fn pick(map: &MapData, teams: bool, team: u8, others: &[Occupant], rng: &mut Rng, overflow: bool) -> Option<Spot> {
+pub fn pick(
+    map: &MapData,
+    game_type: &dyn GameType,
+    team: u8,
+    others: &[Occupant],
+    rng: &mut Rng,
+    overflow: bool,
+) -> Option<Spot> {
+    let teams = game_type.teams();
     let mut best: Option<(f32, &Start)> = None;
     let mut allowed = 0u32;
-    for start in map.starts.iter().filter(|s| s.is_for_slayer()) {
+    for start in map.starts.iter().filter(|s| game_type.uses_start(s)) {
         allowed += 1;
         let rating = rate(map, teams, team, &start.position, others) * sqrt(rng.next_f32());
         if rating > best.map_or(0.0, |(r, _)| r) {
@@ -228,7 +237,7 @@ pub fn pick(map: &MapData, teams: bool, team: u8, others: &[Occupant], rng: &mut
     }
     // every one is taken: beside them, from a random one on
     let first = rng.next_u32() % allowed;
-    let starts: Vec<&Start> = map.starts.iter().filter(|s| s.is_for_slayer()).collect();
+    let starts: Vec<&Start> = map.starts.iter().filter(|s| game_type.uses_start(s)).collect();
     for radius in RING_RADII {
         for i in 0..starts.len() {
             let start = starts[(first as usize + i) % starts.len()];

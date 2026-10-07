@@ -52,6 +52,7 @@ extern crate alloc;
 pub mod combat;
 pub mod damage;
 pub mod fixtures;
+pub mod gametype;
 pub mod items;
 mod map;
 pub mod math;

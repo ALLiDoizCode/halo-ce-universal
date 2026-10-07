@@ -264,11 +264,14 @@ impl Rotation {
     /// The rules of the game this step plays: the original variant of its
     /// game type, with the settings it overrides.
     pub fn rules(&self) -> Result<Rules, String> {
-        let mut rules = match self.game_type.as_str() {
-            "slayer" => Rules::slayer(),
-            "team_slayer" => Rules::team_slayer(),
-            other => {
-                return Err(format!("game_type {other:?}: only slayer and team_slayer are played so far"));
+        let mut rules = match halo_sim::gametype::by_name(&self.game_type) {
+            Some(game_type) if game_type.teams() => Rules::team_slayer(),
+            Some(_) => Rules::slayer(),
+            None => {
+                return Err(format!(
+                    "game_type {:?}: only slayer and team_slayer are played so far",
+                    self.game_type
+                ));
             }
         };
         let ticks = |seconds: u32| seconds.saturating_mul(TICKS_PER_SECOND);

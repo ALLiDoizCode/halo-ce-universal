@@ -50,6 +50,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
+use crate::gametype::{GameType, ScoreTo};
 use crate::map::MapData;
 use crate::rng::Rng;
 use crate::spawn::{self, Occupant};
@@ -99,6 +100,15 @@ impl Rules {
     /// second respawn.
     pub fn team_slayer() -> Rules {
         Rules { teams: true, score_limit: 50, respawn_ticks: 10 * TICKS_PER_SECOND, ..Rules::slayer() }
+    }
+
+    /// The game type these rules play: the one place the rules ask what a game type decides.
+    pub fn game_type(&self) -> &'static dyn GameType {
+        if self.teams {
+            &crate::gametype::TEAM_SLAYER
+        } else {
+            &crate::gametype::SLAYER
+        }
     }
 
     fn wave_ticks(&self) -> u64 {
@@ -548,7 +558,8 @@ pub fn spawn_due(
         Life::Alive => (2, 0, c.id),
     });
 
-    let teams = state.rules.teams;
+    let game_type = state.rules.game_type();
+    let teams = game_type.teams();
     // (the players are read at once, in id order: a store may find that dearer to ask for one by one)
     let bodies = store.players();
     let mut occupants: Vec<Occupant> = game
@@ -567,13 +578,13 @@ pub fn spawn_due(
         let mut spot = None;
         let waited = matches!(c.life, Life::Waiting { .. });
         if !waited && !none_free[key] {
-            spot = spawn::pick(map, teams, c.team, &occupants, rng, false);
+            spot = spawn::pick(map, game_type, c.team, &occupants, rng, false);
             none_free[key] = spot.is_none();
         }
         // (a player who is dead is offered a spot beside a start at once, on their own tick, the same one a wave offers;
         // a player who waits is due on the wave's tick: a wave that was late is still one)
         if spot.is_none() && !none_beside[key] {
-            spot = spawn::pick(map, teams, c.team, &occupants, rng, true);
+            spot = spawn::pick(map, game_type, c.team, &occupants, rng, true);
             none_beside[key] = spot.is_none();
         }
         let in_wave = spot.is_some() && waited;
@@ -630,12 +641,10 @@ fn apply_death(game: &mut impl GameStore, state: &mut Game, tick: u64, death: De
     };
 
     // the score
-    let scored = match kind {
-        DeathKind::Kill => credit.as_mut().map(|k| (k, 1)),
-        DeathKind::Betrayal => credit.as_mut().map(|k| (k, -1)),
-        DeathKind::Suicide => Some((&mut victim, -1)),
-        DeathKind::Unclaimed => None,
-    };
+    let scored = rules.game_type().death_score(kind).and_then(|(to, delta)| match to {
+        ScoreTo::Killer => credit.as_mut().map(|k| (k, delta)),
+        ScoreTo::Victim => Some((&mut victim, delta)),
+    });
     let mut scorer = None;
     if let Some((player, delta)) = scored {
         player.score += delta;

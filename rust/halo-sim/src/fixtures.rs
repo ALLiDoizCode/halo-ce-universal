@@ -141,6 +141,7 @@ fn map_of(collision: CollisionBsp) -> MapData {
         world_bounds: world_bounds(),
         movement: movement(),
         starts: Vec::new(),
+        netgame_flags: Vec::new(),
         combat: combat_fixture(),
         items: Default::default(),
     }
