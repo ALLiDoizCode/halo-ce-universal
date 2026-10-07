@@ -1,6 +1,7 @@
 //! The server's log line and the check's summary of it agree (issue #48): the line carries the tick's
 //! age on reaching the gateway beside the gateway's send time, and `check/summarise.py` reads those,
 //! and the load report's tick age, into the three parts of tick age side by side.
+//! And `check/stages.py --ticks` picks out single ticks from the module's timing lines (issue #68).
 
 use std::path::Path;
 use std::process::Command;

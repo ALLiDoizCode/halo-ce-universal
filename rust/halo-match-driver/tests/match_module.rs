@@ -8,7 +8,7 @@
 //! `HALO_MAP_DIR`; the others run on a flat floor and need no game data.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -31,12 +31,17 @@ fn wasm() -> &'static PathBuf {
 
 /// A published, empty match on a fresh server; `None` (skip) without a server.
 fn start_server(name: &str) -> Option<Server> {
+    start_server_with(wasm(), name)
+}
+
+/// The same, with the given build of the module.
+fn start_server_with(module: &Path, name: &str) -> Option<Server> {
     let Some(bin) = stdb_bin_dir() else {
         eprintln!("HALO_STDB_BIN is not set: skipping, this test needs a SpacetimeDB 2.10.x release");
         return None;
     };
     let server = Server::start(&bin);
-    server.publish(wasm(), name);
+    server.publish(module, name);
     Some(server)
 }
 
@@ -233,12 +238,7 @@ fn ticks_hold_30_hz_with_one_batch_per_tick_and_the_tables_match_a_local_copy() 
 /// logs a "Timing span" line for each of them (the stages `tick.1` to `tick.9` and the ones between).
 #[test]
 fn the_module_with_stage_timing_logs_a_span_for_every_stage_of_the_tick() {
-    let Some(bin) = stdb_bin_dir() else {
-        eprintln!("HALO_STDB_BIN is not set: skipping, this test needs a SpacetimeDB 2.10.x release");
-        return;
-    };
-    let server = Server::start(&bin);
-    server.publish(&build_module_with("stage-timing"), "timed");
+    let Some(server) = start_server_with(&build_module_with("stage-timing"), "timed") else { return };
     let client = server.connect("timed");
     let map = flat_floor_map();
     client.load_map(map.to_bytes()).unwrap();
