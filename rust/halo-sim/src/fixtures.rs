@@ -143,6 +143,7 @@ fn map_of(collision: CollisionBsp) -> MapData {
         starts: Vec::new(),
         combat: combat_fixture(),
         items: Default::default(),
+        vehicles: Default::default(),
     }
 }
 

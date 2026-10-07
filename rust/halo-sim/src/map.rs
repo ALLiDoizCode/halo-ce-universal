@@ -3,6 +3,7 @@ use alloc::vec::Vec;
 use halo_map::collision::CollisionBsp;
 use halo_map::combat::Combat;
 use halo_map::items::Items;
+use halo_map::vehicles::Vehicles;
 use halo_map::{HaloMap, Movement};
 
 use crate::math::sqrt;
@@ -27,6 +28,9 @@ pub struct MapData {
     /// What the tags say of items: what can be picked up, where it appears and
     /// how often, and how far a player reaches (see [`crate::items`]).
     pub items: Items,
+    /// What the tags say of vehicles: their handling, physics, seats, weapons
+    /// and bodies, and which vehicle each placement of the map places.
+    pub vehicles: Vehicles,
 }
 
 impl MapData {
@@ -51,7 +55,8 @@ impl MapData {
     /// `f32`), the starting locations (a `u32` count, then for each its
     /// position and yaw as `f32`s, its team and four game types as `i16`s),
     /// the combat values ([`Combat::to_bytes`], behind a `u32` length), the
-    /// item values ([`Items::to_bytes`], likewise), and
+    /// item values ([`Items::to_bytes`], likewise), the vehicle values
+    /// ([`Vehicles::to_bytes`], likewise), and
     /// [`CollisionBsp::to_bytes`](halo_map::collision::CollisionBsp::to_bytes).
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -73,6 +78,9 @@ impl MapData {
         let items = self.items.to_bytes();
         out.extend_from_slice(&(items.len() as u32).to_le_bytes());
         out.extend_from_slice(&items);
+        let vehicles = self.vehicles.to_bytes();
+        out.extend_from_slice(&(vehicles.len() as u32).to_le_bytes());
+        out.extend_from_slice(&vehicles);
         out.extend_from_slice(&self.collision.to_bytes());
         out
     }
@@ -100,8 +108,14 @@ impl MapData {
         let short_items = || halo_map::MapError::Malformed("map data is shorter than its item values".into());
         let (items_len, rest) = rest.split_at_checked(4).ok_or_else(short_items)?;
         let items_len = u32::from_le_bytes(items_len.try_into().unwrap()) as usize;
-        let (items_bytes, collision) = rest.split_at_checked(items_len).ok_or_else(short_items)?;
+        let (items_bytes, rest) = rest.split_at_checked(items_len).ok_or_else(short_items)?;
         let items = Items::from_bytes(items_bytes)?;
+        let short_vehicles = || halo_map::MapError::Malformed("map data is shorter than its vehicle values".into());
+        let (vehicles_len, rest) = rest.split_at_checked(4).ok_or_else(short_vehicles)?;
+        let vehicles_len = u32::from_le_bytes(vehicles_len.try_into().unwrap()) as usize;
+        let (vehicles_bytes, collision) = rest.split_at_checked(vehicles_len).ok_or_else(short_vehicles)?;
+        let vehicles = Vehicles::from_bytes(vehicles_bytes)?;
+        vehicles.check_against(&combat)?;
         let starts = start_bytes
             .as_chunks::<{ Start::BYTES }>()
             .0
@@ -124,7 +138,15 @@ impl MapData {
         if !movement.is_sane() {
             return Err(halo_map::MapError::Malformed("the map's movement values are not usable".into()));
         }
-        Ok(MapData { collision: CollisionBsp::from_bytes(collision)?, world_bounds, movement, starts, combat, items })
+        Ok(MapData {
+            collision: CollisionBsp::from_bytes(collision)?,
+            world_bounds,
+            movement,
+            starts,
+            combat,
+            items,
+            vehicles,
+        })
     }
 }
 
@@ -137,6 +159,7 @@ impl From<HaloMap> for MapData {
             starts: Vec::new(),
             combat: map.combat,
             items: map.items,
+            vehicles: map.vehicle_tags,
         };
         let starts: Vec<Start> = map
             .player_starts
@@ -150,6 +173,8 @@ impl From<HaloMap> for MapData {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
 
     #[test]
@@ -169,6 +194,104 @@ mod tests {
         let back = MapData::from_bytes(&map.to_bytes()).unwrap();
         assert_eq!(back.combat, map.combat);
         assert!(!back.combat.weapons.is_empty());
+    }
+
+    fn vehicles_fixture(weapon: u16) -> Vehicles {
+        use halo_map::vehicles::{Handling, MassPoint, Physics, Seat, VehicleDef};
+        let point = MassPoint {
+            name: "wheel".into(),
+            powered_mass_point_index: -1,
+            model_node_index: 2,
+            flags: 1,
+            relative_mass: 1.0,
+            mass: 2.0,
+            relative_density: 3.0,
+            density: 4.0,
+            position: [0.5, 1.0, 0.0],
+            forward: [0.0, 1.0, 0.0],
+            up: [0.0, 0.0, 1.0],
+            friction_type: 1,
+            friction_parallel_scale: 0.9,
+            friction_perpendicular_scale: 0.8,
+            radius: 0.4,
+        };
+        let physics = Physics {
+            radius: 1.5,
+            moment: 2.0,
+            mass: 1200.0,
+            center_of_mass: [0.0, 0.0, 0.5],
+            density: 1.0,
+            gravity_scale: 1.0,
+            ground_friction: 0.25,
+            ground_depth: 0.5,
+            ground_damp_fraction: 0.75,
+            ground_normal_k1: 0.125,
+            ground_normal_k0: 0.0625,
+            water_friction: 0.5,
+            water_depth: 1.0,
+            water_density: 1.5,
+            air_friction: 0.125,
+            xx_moment: 0.1,
+            yy_moment: 0.2,
+            zz_moment: 0.3,
+            powered_mass_points: Vec::new(),
+            mass_points: vec![point],
+        };
+        let seat = Seat {
+            flags: 4,
+            label: "warthog_d".into(),
+            marker_name: "driver".into(),
+            acceleration_scale: [0.0, 0.5, 0.25],
+            yaw_rate: 1.5,
+            pitch_rate: 1.25,
+            yaw_minimum: -1.0,
+            yaw_maximum: 1.0,
+        };
+        let def = VehicleDef {
+            tag_index: 40,
+            name: "vehicles\\warthog\\warthog.vehicle".into(),
+            object_flags: 5,
+            bounding_radius: 3.0,
+            bounding_offset: [0.0, 0.0, 0.75],
+            unit_flags: 0x40,
+            child_damage_fraction: 0.5,
+            handling: Handling {
+                vehicle_type: 1,
+                maximum_forward_speed: 28.0,
+                maximum_reverse_speed: -9.0,
+                ..Default::default()
+            },
+            physics: Some(physics),
+            seats: vec![seat],
+            weapons: vec![weapon],
+            resistance: Some(halo_map::combat::Resistance::default()),
+        };
+        Vehicles { defs: vec![def], placements: vec![Some(40), None], ..Default::default() }
+    }
+
+    #[test]
+    fn a_map_with_vehicles_survives_its_bytes() {
+        let mut map = crate::fixtures::flat_floor_map();
+        map.vehicles = vehicles_fixture(map.combat.weapons[0].tag_index);
+        let back = MapData::from_bytes(&map.to_bytes()).unwrap();
+        assert_eq!(back.vehicles, map.vehicles);
+        assert_eq!(back.items, map.items);
+        assert_eq!(back.collision, map.collision);
+    }
+
+    #[test]
+    fn vehicle_values_that_are_cut_short_or_not_numbers_or_carry_a_weapon_the_map_lacks_are_refused() {
+        let mut map = crate::fixtures::flat_floor_map();
+        map.vehicles = vehicles_fixture(map.combat.weapons[0].tag_index);
+        let bytes = map.to_bytes();
+        let at = bytes.len() - map.collision.to_bytes().len() - map.vehicles.to_bytes().len();
+        assert!(MapData::from_bytes(&bytes[..at + 8]).is_err());
+        let mut broken = map.clone();
+        broken.vehicles.defs[0].handling.speed_acceleration = f32::NAN;
+        assert!(MapData::from_bytes(&broken.to_bytes()).is_err());
+        let mut broken = map;
+        broken.vehicles.defs[0].weapons = vec![broken.combat.weapons[0].tag_index.wrapping_add(1000)];
+        assert!(MapData::from_bytes(&broken.to_bytes()).is_err());
     }
 
     #[test]

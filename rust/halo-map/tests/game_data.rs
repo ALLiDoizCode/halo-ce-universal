@@ -275,3 +275,74 @@ fn every_map_has_every_weapon_of_the_game_as_the_tags_have_it() {
         }
     }
 }
+
+#[test]
+fn every_vehicle_placement_of_every_map_names_a_vehicle_that_is_read_whole() {
+    use halo_map::vehicles::seat_flag;
+    let Some(maps) = load_all() else { return };
+    let mut placed = 0;
+    for (name, map) in &maps {
+        let v = &map.vehicle_tags;
+        assert_eq!(v.placements.len(), map.vehicles.len(), "{name}: a vehicle tag for each placement");
+        for (i, (placement, tag)) in map.vehicles.iter().zip(&v.placements).enumerate() {
+            let tag = tag.unwrap_or_else(|| panic!("{name}: placement {i} ({}) names no vehicle", placement.tag_name));
+            let def = v.def(tag).unwrap_or_else(|| panic!("{name}: placement {i}: no vehicle with tag {tag}"));
+            assert_eq!(def.name, placement.tag_name, "{name}: placement {i}");
+
+            let physics = def.physics.as_ref().unwrap_or_else(|| panic!("{name}: {} has no physics", def.name));
+            assert!(physics.mass > 0.0 && !physics.mass_points.is_empty(), "{name}: {}", def.name);
+            for m in &physics.mass_points {
+                let p = m.powered_mass_point_index;
+                assert!(p >= -1 && (p as i32) < physics.powered_mass_points.len() as i32, "{name}: {}", def.name);
+            }
+            assert!(!def.seats.is_empty(), "{name}: {} has no seats", def.name);
+            assert!(
+                def.seats.iter().any(|s| s.flags & (seat_flag::DRIVER | seat_flag::GUNNER) != 0),
+                "{name}: {} has no driver's or gunner's seat",
+                def.name
+            );
+            assert!(!def.weapons.is_empty(), "{name}: {} carries no weapon", def.name);
+            for w in &def.weapons {
+                assert!(map.combat.weapons.iter().any(|c| c.tag_index == *w), "{name}: {}: weapon {w}", def.name);
+            }
+            let body = def.resistance.as_ref().unwrap_or_else(|| panic!("{name}: {} has no collision", def.name));
+            assert!(body.maximum_body_vitality > 0.0, "{name}: {}", def.name);
+            placed += 1;
+        }
+        // what the byte form carries
+        assert_eq!(&halo_map::vehicles::Vehicles::from_bytes(&v.to_bytes()).unwrap(), v, "{name}");
+        v.check_against(&map.combat).unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
+    assert!(placed > 0, "the 13 maps place some vehicles");
+}
+
+/// The Warthog, Ghost and Scorpion of Blood Gulch. What is known of them
+/// without the numbers is asserted; the numbers themselves are printed (run
+/// with `--nocapture`), for pinning with the developer's own game data.
+#[test]
+fn the_warthog_ghost_and_scorpion_of_blood_gulch_are_read_as_the_tags_have_them() {
+    use halo_map::vehicles::{seat_flag, vehicle_type};
+    let Some(dir) = map_dir() else { return };
+    let map = HaloMap::from_path(map_path(&dir, "bloodgulch")).unwrap();
+    let v = &map.vehicle_tags;
+    let placed = |what: &str| {
+        let tag = v.placements.iter().flatten().find(|t| v.def(**t).unwrap().name.contains(what));
+        v.def(*tag.unwrap_or_else(|| panic!("no {what} placed on Blood Gulch"))).unwrap()
+    };
+    for (what, kind) in [
+        ("warthog", vehicle_type::HUMAN_JEEP),
+        ("ghost", vehicle_type::ALIEN_SCOUT),
+        ("scorpion", vehicle_type::HUMAN_TANK),
+    ] {
+        let d = placed(what);
+        println!("{what}: {:#?}", d);
+        assert_eq!(d.handling.vehicle_type, kind, "{what}");
+        assert!(d.handling.maximum_forward_speed > 0.0, "{what}");
+        assert!(d.seats[0].flags & seat_flag::DRIVER != 0, "{what}: the first seat is the driver's");
+        let p = d.physics.as_ref().unwrap();
+        println!("{what}: {} powered and {} plain mass points", p.powered_mass_points.len(), p.mass_points.len());
+    }
+    let warthog = placed("warthog");
+    assert!(warthog.seats.iter().any(|s| s.flags & seat_flag::GUNNER != 0), "a Warthog has a gunner's seat");
+    println!("collision damage {:?}", v.collision_damage);
+}

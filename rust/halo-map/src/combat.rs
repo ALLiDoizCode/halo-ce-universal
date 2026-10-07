@@ -539,37 +539,7 @@ impl Combat {
             }
             w.opt_damage(&weapon.melee_damage);
         }
-        let r = &self.resistance;
-        w.u32(r.flags);
-        w.i16(r.indirect_damage_material_index);
-        for v in [
-            r.maximum_body_vitality,
-            r.friendly_damage_resistance,
-            r.body_destroyed_threshold,
-            r.maximum_shield_vitality,
-        ] {
-            w.f32(v);
-        }
-        w.i16(r.shield_material_type);
-        w.i16(r.shield_failure_function);
-        for v in [
-            r.shield_failure_threshold,
-            r.maximum_shield_failure,
-            r.minimum_shield_stun_damage,
-            r.shield_stun_time,
-            r.shield_recharge_time,
-            r.shield_recharge_velocity,
-        ] {
-            w.f32(v);
-        }
-        w.count(r.materials.len());
-        for m in &r.materials {
-            w.u32(m.flags);
-            w.i16(m.material_type);
-            w.f32(m.shield_leak_fraction);
-            w.f32(m.shield_damage_multiplier);
-            w.f32(m.body_damage_multiplier);
-        }
+        self.resistance.write(&mut w);
         w.count(self.starting_equipment.len());
         for s in &self.starting_equipment {
             w.u32(s.flags);
@@ -717,32 +687,7 @@ impl Combat {
                 melee_damage,
             });
         }
-        let mut resistance = Resistance {
-            flags: r.u32()?,
-            indirect_damage_material_index: r.i16()?,
-            maximum_body_vitality: r.f32()?,
-            friendly_damage_resistance: r.f32()?,
-            body_destroyed_threshold: r.f32()?,
-            maximum_shield_vitality: r.f32()?,
-            shield_material_type: r.i16()?,
-            shield_failure_function: r.i16()?,
-            shield_failure_threshold: r.f32()?,
-            maximum_shield_failure: r.f32()?,
-            minimum_shield_stun_damage: r.f32()?,
-            shield_stun_time: r.f32()?,
-            shield_recharge_time: r.f32()?,
-            shield_recharge_velocity: r.f32()?,
-            materials: Vec::new(),
-        };
-        for _ in 0..r.count()? {
-            resistance.materials.push(DamageMaterial {
-                flags: r.u32()?,
-                material_type: r.i16()?,
-                shield_leak_fraction: r.f32()?,
-                shield_damage_multiplier: r.f32()?,
-                body_damage_multiplier: r.f32()?,
-            });
-        }
+        let resistance = Resistance::read(&mut r)?;
         let mut starting_equipment = Vec::new();
         for _ in 0..r.count()? {
             let flags = r.u32()?;
@@ -768,31 +713,8 @@ impl Combat {
     /// Whether the numbers can be used: finite, and the lists that the rules
     /// index (a damage's material, a trigger's magazine) in range.
     fn check(&self) -> Result<()> {
-        let r = &self.resistance;
+        self.resistance.check()?;
         let finite = |vs: &[f32]| vs.iter().all(|v| v.is_finite());
-        if !finite(&[
-            r.maximum_body_vitality,
-            r.friendly_damage_resistance,
-            r.body_destroyed_threshold,
-            r.maximum_shield_vitality,
-            r.shield_failure_threshold,
-            r.maximum_shield_failure,
-            r.minimum_shield_stun_damage,
-            r.shield_stun_time,
-            r.shield_recharge_time,
-            r.shield_recharge_velocity,
-        ]) {
-            return malformed("combat data has a resistance that is not a number");
-        }
-        if r.materials.iter().any(|m| {
-            !(0..MATERIAL_TYPES as i16).contains(&m.material_type)
-                || !finite(&[m.shield_leak_fraction, m.shield_damage_multiplier, m.body_damage_multiplier])
-        }) {
-            return malformed("combat data has a body part with a material that is not one");
-        }
-        if r.maximum_shield_vitality > 0.0 && !(0..MATERIAL_TYPES as i16).contains(&r.shield_material_type) {
-            return malformed("combat data has a shield with a material that is not one");
-        }
         let damage_ok = |d: &Option<Damage>| {
             d.is_none_or(|d| {
                 finite(&[d.minimum, d.lower, d.upper, d.falloff_radius, d.cutoff_radius, d.cutoff_scale, d.core_radius])
@@ -860,5 +782,146 @@ impl Combat {
             }
         }
         Ok(())
+    }
+}
+
+// The byte form of a resistance and of a damage, shared with the vehicles'
+// (`crate::vehicles`), which keep the same values for a vehicle's collision.
+impl Resistance {
+    pub(crate) fn write_to(&self, out: &mut Vec<u8>) {
+        let mut w = Writer(core::mem::take(out));
+        self.write(&mut w);
+        *out = w.0;
+    }
+
+    /// Read one from the front of `bytes`, leaving what follows.
+    pub(crate) fn read_from(bytes: &mut &[u8]) -> Result<Resistance> {
+        let mut r = Reader(bytes);
+        let resistance = Resistance::read(&mut r)?;
+        *bytes = r.0;
+        Ok(resistance)
+    }
+
+    fn write(&self, w: &mut Writer) {
+        let r = self;
+        w.u32(r.flags);
+        w.i16(r.indirect_damage_material_index);
+        for v in [
+            r.maximum_body_vitality,
+            r.friendly_damage_resistance,
+            r.body_destroyed_threshold,
+            r.maximum_shield_vitality,
+        ] {
+            w.f32(v);
+        }
+        w.i16(r.shield_material_type);
+        w.i16(r.shield_failure_function);
+        for v in [
+            r.shield_failure_threshold,
+            r.maximum_shield_failure,
+            r.minimum_shield_stun_damage,
+            r.shield_stun_time,
+            r.shield_recharge_time,
+            r.shield_recharge_velocity,
+        ] {
+            w.f32(v);
+        }
+        w.count(r.materials.len());
+        for m in &r.materials {
+            w.u32(m.flags);
+            w.i16(m.material_type);
+            w.f32(m.shield_leak_fraction);
+            w.f32(m.shield_damage_multiplier);
+            w.f32(m.body_damage_multiplier);
+        }
+    }
+
+    fn read(r: &mut Reader) -> Result<Resistance> {
+        let mut resistance = Resistance {
+            flags: r.u32()?,
+            indirect_damage_material_index: r.i16()?,
+            maximum_body_vitality: r.f32()?,
+            friendly_damage_resistance: r.f32()?,
+            body_destroyed_threshold: r.f32()?,
+            maximum_shield_vitality: r.f32()?,
+            shield_material_type: r.i16()?,
+            shield_failure_function: r.i16()?,
+            shield_failure_threshold: r.f32()?,
+            maximum_shield_failure: r.f32()?,
+            minimum_shield_stun_damage: r.f32()?,
+            shield_stun_time: r.f32()?,
+            shield_recharge_time: r.f32()?,
+            shield_recharge_velocity: r.f32()?,
+            materials: Vec::new(),
+        };
+        for _ in 0..r.count()? {
+            resistance.materials.push(DamageMaterial {
+                flags: r.u32()?,
+                material_type: r.i16()?,
+                shield_leak_fraction: r.f32()?,
+                shield_damage_multiplier: r.f32()?,
+                body_damage_multiplier: r.f32()?,
+            });
+        }
+        Ok(resistance)
+    }
+
+    /// Whether the numbers can be used.
+    pub(crate) fn check(&self) -> Result<()> {
+        let r = self;
+        let finite = |vs: &[f32]| vs.iter().all(|v| v.is_finite());
+        if !finite(&[
+            r.maximum_body_vitality,
+            r.friendly_damage_resistance,
+            r.body_destroyed_threshold,
+            r.maximum_shield_vitality,
+            r.shield_failure_threshold,
+            r.maximum_shield_failure,
+            r.minimum_shield_stun_damage,
+            r.shield_stun_time,
+            r.shield_recharge_time,
+            r.shield_recharge_velocity,
+        ]) {
+            return malformed("combat data has a resistance that is not a number");
+        }
+        if r.materials.iter().any(|m| {
+            !(0..MATERIAL_TYPES as i16).contains(&m.material_type)
+                || !finite(&[m.shield_leak_fraction, m.shield_damage_multiplier, m.body_damage_multiplier])
+        }) {
+            return malformed("combat data has a body part with a material that is not one");
+        }
+        if r.maximum_shield_vitality > 0.0 && !(0..MATERIAL_TYPES as i16).contains(&r.shield_material_type) {
+            return malformed("combat data has a shield with a material that is not one");
+        }
+        Ok(())
+    }
+}
+
+impl Damage {
+    pub(crate) fn write_optional_to(damage: &Option<Damage>, out: &mut Vec<u8>) {
+        let mut w = Writer(core::mem::take(out));
+        w.opt_damage(damage);
+        *out = w.0;
+    }
+
+    pub(crate) fn read_optional_from(bytes: &mut &[u8]) -> Result<Option<Damage>> {
+        let mut r = Reader(bytes);
+        let damage = r.opt_damage()?;
+        *bytes = r.0;
+        Ok(damage)
+    }
+
+    /// Whether the numbers can be used.
+    pub(crate) fn is_finite(&self) -> bool {
+        let finite = |vs: &[f32]| vs.iter().all(|v| v.is_finite());
+        finite(&[
+            self.minimum,
+            self.lower,
+            self.upper,
+            self.falloff_radius,
+            self.cutoff_radius,
+            self.cutoff_scale,
+            self.core_radius,
+        ]) && finite(&self.material_modifiers)
     }
 }

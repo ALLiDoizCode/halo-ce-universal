@@ -18,6 +18,7 @@ use crate::error::{malformed, MapError, Result};
 use crate::items::{ItemDef, Items, Placement, Reach};
 use crate::movement::Movement;
 use crate::reader::{Raw, Space};
+use crate::vehicles::{Handling, MassPoint, Physics, PoweredMassPoint, Seat, VehicleDef, Vehicles};
 
 /// physical_memory_map.c: TAG_CACHE_BASE_ADDRESS, where tag data is loaded
 /// and so what its pointers are relative to.
@@ -218,6 +219,42 @@ const IC_SPAWN_TIME: usize = 0xC;
 /// struct scenario_netgame_equipment: the item collection's tag reference
 const NE_ITEM_COLLECTION: usize = 0x50;
 
+// a vehicle tag: struct vehicle_definition (0x3F0), whose unit_definition ends at 0x2F0
+const VEHICLE_SIZE: usize = 0x3F0;
+const OBJECT_FLAGS: usize = 2;
+const OBJECT_PHYSICS: usize = 0x80;
+const UNIT_FLAGS: usize = 0x17C;
+const UNIT_CHILD_DAMAGE_FRACTION: usize = 0x184;
+const UNIT_INITIAL_WEAPONS: usize = 0x2D8;
+const UNIT_SEATS: usize = 0x2E4;
+const SZ_UNIT_INITIAL_WEAPON: usize = 0x24;
+const SZ_UNIT_SEAT: usize = 0x11C;
+const SEAT_LABEL: usize = 4;
+const SEAT_MARKER_NAME: usize = 0x24;
+const SEAT_ACCELERATION_SCALE: usize = 0x64;
+const SEAT_YAW_RATE: usize = 0x7C;
+const SEAT_PITCH_RATE: usize = 0x80;
+const SEAT_YAW_MINIMUM: usize = 0xF0;
+const SEAT_YAW_MAXIMUM: usize = 0xF4;
+const VEHICLE_FLAGS: usize = 0x2F0;
+const VEHICLE_TYPE: usize = 0x2F4;
+const VEHICLE_FUNCTION_MODES: usize = 0x31C;
+// (the numbers of struct vehicle_definition that units/vehicles.c reads, by offset in the tag)
+const VEHICLE_NUMBERS: [usize; 14] =
+    [0x2F8, 0x2FC, 0x300, 0x304, 0x308, 0x30C, 0x310, 0x314, 0x318, 0x330, 0x334, 0x340, 0x344, 0x364];
+// struct physics_definition (0x80) and its two blocks
+const PHYSICS_SIZE: usize = 0x80;
+const PHYSICS_NUMBERS: [usize; 20] =
+    [0, 4, 8, 0xC, 0x10, 0x14, 0x18, 0x1C, 0x20, 0x24, 0x28, 0x2C, 0x30, 0x38, 0x3C, 0x40, 0x48, 0x50, 0x54, 0x58];
+const PHYSICS_POWERED_MASS_POINTS: usize = 0x68;
+const PHYSICS_MASS_POINTS: usize = 0x74;
+const SZ_POWERED_MASS_POINT: usize = 0x80;
+const SZ_MASS_POINT: usize = 0x80;
+// the game globals' falling damage block names the damage effects of a vehicle
+const FD_VEHICLE_HIT_ENVIRONMENT_DAMAGE_EFFECT: usize = 0x3C;
+const FD_VEHICLE_KILLED_UNIT_DAMAGE_EFFECT: usize = 0x4C;
+const FD_VEHICLE_COLLISION_DAMAGE: usize = 0x5C;
+
 // element sizes
 const SZ_PLAYER_START: usize = 0x34;
 const SZ_NETGAME_FLAG: usize = 0x94;
@@ -360,6 +397,8 @@ pub struct HaloMap {
     pub combat: Combat,
     /// What the tags say of items: what can be picked up, where it appears and how often.
     pub items: Items,
+    /// What the tags say of vehicles, and which the scenario's placements are.
+    pub vehicle_tags: Vehicles,
 }
 
 impl HaloMap {
@@ -554,6 +593,7 @@ fn parse(data: &[u8], compressed: bool) -> Result<HaloMap> {
     let movement = parse_movement(&raw, &tags_space, &tags)?;
     let combat = parse_combat(&raw, &tags_space, &tags, scn)?;
     let items = parse_items(&raw, &tags_space, &tags, scn)?;
+    let vehicle_tags = parse_vehicles(&raw, &tags_space, &tags, scn, &combat)?;
 
     // struct scenario_structure_bsp_reference { file_offset, file_size,
     // base_address, pad, tag_reference }; a multiplayer map has one
@@ -605,6 +645,7 @@ fn parse(data: &[u8], compressed: bool) -> Result<HaloMap> {
         vehicles,
         combat,
         items,
+        vehicle_tags,
     })
 }
 
@@ -946,6 +987,11 @@ fn parse_resistance(raw: &Raw, space: &Space, tags: &[TagInstance], biped: usize
     let Some(tag) = referenced(raw, tags, biped + OBJECT_COLLISION_MODEL, "coll")? else {
         return malformed("the multiplayer unit has no collision model");
     };
+    parse_resistance_of(raw, space, tag)
+}
+
+/// The resistance in a collision model tag.
+fn parse_resistance_of(raw: &Raw, space: &Space, tag: &TagInstance) -> Result<Resistance> {
     let c = space.resolve(tag.base_address, COLLISION_MODEL_SIZE)?;
     let (n, mats) = space.block(raw, c + RES_MATERIALS, SZ_RESISTANCE_MATERIAL)?;
     let mut materials = Vec::with_capacity(n);
@@ -1111,6 +1157,194 @@ fn parse_items(raw: &Raw, space: &Space, tags: &[TagInstance], scn: usize) -> Re
         bounding_offset: raw.f32s(b + OBJECT_BOUNDING_OFFSET)?,
     };
     Ok(Items { defs, placements, player })
+}
+
+/// What the tags say of vehicles: every vehicle tag with its physics, seats,
+/// weapons and collision model, and the vehicle each placement of the
+/// scenario places.
+fn parse_vehicles(raw: &Raw, space: &Space, tags: &[TagInstance], scn: usize, combat: &Combat) -> Result<Vehicles> {
+    let mut defs = Vec::new();
+    for tag in tags.iter().filter(|t| t.group.trim_end() == "vehi") {
+        defs.push(parse_vehicle(raw, space, tags, tag)?);
+    }
+
+    let (palette_count, palette) = space.block(raw, scn + SCN_VEHICLE_PALETTE, SZ_PALETTE_ENTRY)?;
+    let (n, p) = space.block(raw, scn + SCN_VEHICLES, SZ_VEHICLE)?;
+    let mut placements = Vec::with_capacity(n);
+    for i in 0..n {
+        let palette_index = raw.i16(p + i * SZ_VEHICLE)?;
+        placements.push(if palette_index < 0 {
+            None
+        } else if (palette_index as usize) < palette_count {
+            let entry = palette + palette_index as usize * SZ_PALETTE_ENTRY;
+            referenced(raw, tags, entry, "vehi")?.map(|t| (t.tag_index & 0xFFFF) as u16)
+        } else {
+            return malformed(format!("vehicle palette index {palette_index} out of range ({palette_count})"));
+        });
+    }
+
+    let Some(globals) = tags.iter().find(|t| t.group == "matg") else {
+        return malformed("the map has no globals tag");
+    };
+    let g = space.resolve(globals.base_address, GLOBALS_SIZE)?;
+    let (n, fd) = space.block(raw, g + GLOBALS_FALLING_DAMAGE, SZ_FALLING_DAMAGE)?;
+    let (mut hit_environment_damage, mut killed_unit_damage, mut collision_damage) = (None, None, None);
+    if n > 0 {
+        hit_environment_damage = parse_damage(raw, space, tags, fd + FD_VEHICLE_HIT_ENVIRONMENT_DAMAGE_EFFECT)?;
+        killed_unit_damage = parse_damage(raw, space, tags, fd + FD_VEHICLE_KILLED_UNIT_DAMAGE_EFFECT)?;
+        collision_damage = parse_damage(raw, space, tags, fd + FD_VEHICLE_COLLISION_DAMAGE)?;
+    }
+
+    let vehicles = Vehicles { defs, placements, hit_environment_damage, killed_unit_damage, collision_damage };
+    vehicles.check_against(combat)?;
+    Ok(vehicles)
+}
+
+fn parse_vehicle(raw: &Raw, space: &Space, tags: &[TagInstance], tag: &TagInstance) -> Result<VehicleDef> {
+    let v = space.resolve(tag.base_address, VEHICLE_SIZE)?;
+
+    let mut n = [0.0; VEHICLE_NUMBERS.len()];
+    for (value, off) in n.iter_mut().zip(VEHICLE_NUMBERS) {
+        *value = raw.f32(v + off)?;
+    }
+    let handling = Handling {
+        flags: raw.u32(v + VEHICLE_FLAGS)?,
+        vehicle_type: raw.i16(v + VEHICLE_TYPE)?,
+        maximum_forward_speed: n[0],
+        maximum_reverse_speed: n[1],
+        speed_acceleration: n[2],
+        speed_deceleration: n[3],
+        maximum_left_turn: n[4],
+        maximum_right_turn: n[5],
+        wheel_circumference: n[6],
+        unknown_314: n[7],
+        unknown_318: n[8],
+        function_modes: raw.i16s(v + VEHICLE_FUNCTION_MODES)?,
+        maximum_left_slide: n[9],
+        maximum_right_slide: n[10],
+        unknown_340: n[11],
+        unknown_344: n[12],
+        unknown_364: n[13],
+    };
+
+    let physics = match referenced(raw, tags, v + OBJECT_PHYSICS, "phys")? {
+        Some(t) => Some(parse_physics(raw, space, t)?),
+        None => None,
+    };
+
+    let (count, seats_at) = space.block(raw, v + UNIT_SEATS, SZ_UNIT_SEAT)?;
+    let mut seats = Vec::with_capacity(count);
+    for i in 0..count {
+        let s = seats_at + i * SZ_UNIT_SEAT;
+        seats.push(Seat {
+            flags: raw.u32(s)?,
+            label: raw.cstr(s + SEAT_LABEL, 32)?,
+            marker_name: raw.cstr(s + SEAT_MARKER_NAME, 32)?,
+            acceleration_scale: raw.f32s(s + SEAT_ACCELERATION_SCALE)?,
+            yaw_rate: raw.f32(s + SEAT_YAW_RATE)?,
+            pitch_rate: raw.f32(s + SEAT_PITCH_RATE)?,
+            yaw_minimum: raw.f32(s + SEAT_YAW_MINIMUM)?,
+            yaw_maximum: raw.f32(s + SEAT_YAW_MAXIMUM)?,
+        });
+    }
+
+    let (count, weapons_at) = space.block(raw, v + UNIT_INITIAL_WEAPONS, SZ_UNIT_INITIAL_WEAPON)?;
+    let mut weapons = Vec::with_capacity(count);
+    for i in 0..count {
+        if let Some(w) = referenced(raw, tags, weapons_at + i * SZ_UNIT_INITIAL_WEAPON, "weap")? {
+            weapons.push((w.tag_index & 0xFFFF) as u16);
+        }
+    }
+
+    let resistance = match referenced(raw, tags, v + OBJECT_COLLISION_MODEL, "coll")? {
+        Some(t) => Some(parse_resistance_of(raw, space, t)?),
+        None => None,
+    };
+
+    Ok(VehicleDef {
+        tag_index: (tag.tag_index & 0xFFFF) as u16,
+        name: format!("{}.{}", tag.name, tag.group.trim_end()),
+        object_flags: raw.u16(v + OBJECT_FLAGS)?,
+        bounding_radius: raw.f32(v + OBJECT_BOUNDING_RADIUS)?,
+        bounding_offset: raw.f32s(v + OBJECT_BOUNDING_OFFSET)?,
+        unit_flags: raw.u32(v + UNIT_FLAGS)?,
+        child_damage_fraction: raw.f32(v + UNIT_CHILD_DAMAGE_FRACTION)?,
+        handling,
+        physics,
+        seats,
+        weapons,
+        resistance,
+    })
+}
+
+fn parse_physics(raw: &Raw, space: &Space, tag: &TagInstance) -> Result<Physics> {
+    let p = space.resolve(tag.base_address, PHYSICS_SIZE)?;
+    let mut n = [0.0; PHYSICS_NUMBERS.len()];
+    for (value, off) in n.iter_mut().zip(PHYSICS_NUMBERS) {
+        *value = raw.f32(p + off)?;
+    }
+
+    let (count, at) = space.block(raw, p + PHYSICS_POWERED_MASS_POINTS, SZ_POWERED_MASS_POINT)?;
+    let mut powered_mass_points = Vec::with_capacity(count);
+    for i in 0..count {
+        let o = at + i * SZ_POWERED_MASS_POINT;
+        powered_mass_points.push(PoweredMassPoint {
+            name: raw.cstr(o, 32)?,
+            flags: raw.u32(o + 0x20)?,
+            antigrav_strength: raw.f32(o + 0x24)?,
+            antigrav_offset: raw.f32(o + 0x28)?,
+            antigrav_height: raw.f32(o + 0x2C)?,
+            antigrav_damp_fraction: raw.f32(o + 0x30)?,
+            antigrav_normal_k1: raw.f32(o + 0x34)?,
+            antigrav_normal_k0: raw.f32(o + 0x38)?,
+        });
+    }
+
+    let (count, at) = space.block(raw, p + PHYSICS_MASS_POINTS, SZ_MASS_POINT)?;
+    let mut mass_points = Vec::with_capacity(count);
+    for i in 0..count {
+        let o = at + i * SZ_MASS_POINT;
+        mass_points.push(MassPoint {
+            name: raw.cstr(o, 32)?,
+            powered_mass_point_index: raw.i16(o + 0x20)?,
+            model_node_index: raw.i16(o + 0x22)?,
+            flags: raw.u32(o + 0x24)?,
+            relative_mass: raw.f32(o + 0x28)?,
+            mass: raw.f32(o + 0x2C)?,
+            relative_density: raw.f32(o + 0x30)?,
+            density: raw.f32(o + 0x34)?,
+            position: raw.f32s(o + 0x38)?,
+            forward: raw.f32s(o + 0x44)?,
+            up: raw.f32s(o + 0x50)?,
+            friction_type: raw.i16(o + 0x5C)?,
+            friction_parallel_scale: raw.f32(o + 0x60)?,
+            friction_perpendicular_scale: raw.f32(o + 0x64)?,
+            radius: raw.f32(o + 0x68)?,
+        });
+    }
+
+    Ok(Physics {
+        radius: n[0],
+        moment: n[1],
+        mass: n[2],
+        center_of_mass: [n[3], n[4], n[5]],
+        density: n[6],
+        gravity_scale: n[7],
+        ground_friction: n[8],
+        ground_depth: n[9],
+        ground_damp_fraction: n[10],
+        ground_normal_k1: n[11],
+        ground_normal_k0: n[12],
+        water_friction: n[13],
+        water_depth: n[14],
+        water_density: n[15],
+        air_friction: n[16],
+        xx_moment: n[17],
+        yy_moment: n[18],
+        zz_moment: n[19],
+        powered_mass_points,
+        mass_points,
+    })
 }
 
 /// struct collision_bsp (0x60): eight tag blocks in the order bsp3d nodes,

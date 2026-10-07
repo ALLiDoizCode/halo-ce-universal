@@ -13,7 +13,7 @@ use halo_map::{flag_type, game_type, HaloMap, MapError};
 const TAG_BASE: u32 = 0x803A_6000;
 const BSP_BASE: u32 = 0x4000_0000;
 const HEADER: usize = 0x800;
-const TAG_DATA_SIZE: usize = 0x3400;
+const TAG_DATA_SIZE: usize = 0x4400;
 const BSP_DATA_SIZE: usize = 0x1000;
 
 /// The map's inflated image, header included.
@@ -28,6 +28,9 @@ impl Image {
     }
     fn i32(&mut self, at: usize, v: i32) {
         self.u32(at, v as u32);
+    }
+    fn u16(&mut self, at: usize, v: u16) {
+        self.0[at..at + 2].copy_from_slice(&v.to_le_bytes());
     }
     fn i16(&mut self, at: usize, v: i16) {
         self.0[at..at + 2].copy_from_slice(&v.to_le_bytes());
@@ -100,6 +103,14 @@ const T_PERMUTATIONS: usize = 0x3080;
 const T_EFFECT: usize = 0x3100;
 const T_EFFECT_EVENT: usize = 0x3140;
 const T_EFFECT_PARTS: usize = 0x3190;
+// the warthog: its tag, its physics with one powered and two plain mass points,
+// two seats and one weapon
+const T_VEHICLE: usize = 0x3400;
+const T_PHYSICS: usize = 0x3800;
+const T_POWERED_MASS_POINTS: usize = 0x3880;
+const T_MASS_POINTS: usize = 0x3900;
+const T_SEATS: usize = 0x3A00;
+const T_INITIAL_WEAPONS: usize = 0x3D00;
 const NONE: u32 = 0xFFFF_FFFF;
 
 /// Offsets within the structure BSP data.
@@ -133,9 +144,9 @@ fn build() -> Image {
     let t = HEADER;
     m.u32(t, TAG_BASE + T_INSTANCES as u32);
     m.u32(t + 4, tag_id(0));
-    m.u32(t + 0xC, 12);
+    m.u32(t + 0xC, 13);
     m.code(t + 0x20, b"tags");
-    let tags: [(&[u8; 4], &str); 12] = [
+    let tags: [(&[u8; 4], &str); 13] = [
         (b"scnr", "levels\\synth\\synth"),
         (b"itmc", "item collections\\pistol"),
         (b"vehi", "vehicles\\warthog\\warthog"),
@@ -148,6 +159,7 @@ fn build() -> Image {
         (b"jpt!", "weapons\\pistol\\bullet"),
         (b"antr", "weapons\\pistol\\fp"),
         (b"effe", "weapons\\pistol\\bullet hit"),
+        (b"phys", "vehicles\\warthog\\warthog"),
     ];
     let mut name_at = T_NAMES;
     for (i, (group, name)) in tags.iter().enumerate() {
@@ -169,6 +181,8 @@ fn build() -> Image {
         (9, T_DAMAGE_EFFECT),
         (10, T_ANIMATION_GRAPH),
         (11, T_EFFECT),
+        (2, T_VEHICLE),
+        (12, T_PHYSICS),
     ] {
         m.u32(t + T_INSTANCES + index * 0x20 + 0x14, TAG_BASE + at as u32);
     }
@@ -216,6 +230,10 @@ fn build() -> Image {
     m.tag_block(g + 0x164, 1, T_MULTIPLAYER_INFORMATION);
     m.tag_block(g + 0x170, 1, T_PLAYER_INFORMATION);
     m.tag_block(g + 0x188, 1, T_FALLING_DAMAGE);
+    // the vehicles' damage effects: only the one for a collision is there
+    m.u32(t + T_FALLING_DAMAGE + 0x3C + 0xC, NONE);
+    m.u32(t + T_FALLING_DAMAGE + 0x4C + 0xC, NONE);
+    m.tag_ref(t + T_FALLING_DAMAGE + 0x5C, 9);
     m.f32s(t + T_FALLING_DAMAGE + 0x8C, &[0.35, 0.125, 0.3125]); // maximum falling, minimum damage, maximum damage
     m.tag_ref(t + T_MULTIPLAYER_INFORMATION + 0x10, 5);
     let pi = t + T_PLAYER_INFORMATION;
@@ -249,6 +267,60 @@ fn build() -> Image {
         m.i16(o + 0x24, 21);
         m.f32(o + 0x2C, 1.0);
         m.f32(o + 0x3C, *body);
+    }
+
+    // the warthog: a jeep that does 28 forward and 9 back, with the player's body,
+    // a physics tag and a pistol in the hand of its gunner
+    let wh = t + T_VEHICLE;
+    m.u16(wh + 2, 5);
+    m.f32(wh + 4, 3.0); // bounding radius
+    m.f32s(wh + 8, &[0.0, 0.0, 0.75]);
+    m.tag_ref(wh + 0x70, 6);
+    m.tag_ref(wh + 0x80, 12);
+    m.u32(wh + 0x17C, 0x40);
+    m.f32(wh + 0x184, 0.5);
+    m.tag_block(wh + 0x2D8, 1, T_INITIAL_WEAPONS);
+    m.tag_ref(t + T_INITIAL_WEAPONS, 7);
+    m.tag_block(wh + 0x2E4, 2, T_SEATS);
+    for (i, (flags, label, marker)) in
+        [(0x04u32, "warthog_d", "driver"), (0x08, "warthog_g", "gunner")].iter().enumerate()
+    {
+        let o = t + T_SEATS + i * 0x11C;
+        m.u32(o, *flags);
+        m.cstr(o + 4, label);
+        m.cstr(o + 0x24, marker);
+        m.f32s(o + 0x64, &[0.0, 0.5, 0.25]);
+        m.f32s(o + 0x7C, &[1.5, 1.25]);
+        m.f32s(o + 0xF0, &[-1.0, 1.0]);
+    }
+    m.u32(wh + 0x2F0, 0x80); // flags: causes collision damage
+    m.i16(wh + 0x2F4, 1); // a jeep
+    m.f32s(wh + 0x2F8, &[28.0, -9.0, 15.0, 30.0, 0.5, 0.625, 1.25, 0.7, 0.8]);
+    m.i16(wh + 0x31C, 3);
+    m.f32s(wh + 0x330, &[0.1, 0.2]);
+    m.f32s(wh + 0x340, &[0.3, 0.4]);
+    m.f32(wh + 0x364, 0.05);
+    let ph = t + T_PHYSICS;
+    m.f32s(ph, &[1.5, 2.0, 1200.0, 0.0, 0.0, 0.5, 1.0, 1.0, 0.25, 0.5, 0.75, 0.125, 0.0625]);
+    m.f32s(ph + 0x38, &[0.5, 1.0, 1.5, 0.0, 0.125, 0.0, 0.1, 0.2, 0.3]);
+    m.tag_block(ph + 0x68, 1, T_POWERED_MASS_POINTS);
+    m.tag_block(ph + 0x74, 2, T_MASS_POINTS);
+    let pm = t + T_POWERED_MASS_POINTS;
+    m.cstr(pm, "engine");
+    m.u32(pm + 0x20, 2);
+    m.f32s(pm + 0x24, &[1.0, 0.5, 0.25, 0.75, 0.125, 0.0625]);
+    for (i, name) in ["front", "back"].iter().enumerate() {
+        let o = t + T_MASS_POINTS + i * 0x80;
+        m.cstr(o, name);
+        m.i16(o + 0x20, if i == 0 { 0 } else { -1 });
+        m.i16(o + 0x22, 3 + i as i16);
+        m.u32(o + 0x24, 1);
+        m.f32s(o + 0x28, &[1.0, 2.0, 3.0, 4.0]);
+        m.f32s(o + 0x38, &[0.5 - i as f32, 1.0, 0.0]);
+        m.f32s(o + 0x44, &[0.0, 1.0, 0.0]);
+        m.f32s(o + 0x50, &[0.0, 0.0, 1.0]);
+        m.i16(o + 0x5C, 1);
+        m.f32s(o + 0x60, &[0.9, 0.8, 0.4]);
     }
 
     // the pistol: a magazine of 12 and 60 rounds, one trigger at 3.5 a second that fires
@@ -660,4 +732,94 @@ fn a_truncated_map_is_refused_and_never_panics() {
     for len in (0..file.len() - 700).step_by(97) {
         assert!(HaloMap::from_bytes(&file[..len]).is_err(), "{len} compressed bytes loaded");
     }
+}
+
+#[test]
+fn a_vehicle_is_read_with_its_handling_physics_seats_weapon_and_body() {
+    let map = HaloMap::from_bytes(&build().0).unwrap();
+    let v = &map.vehicle_tags;
+    assert_eq!(v.defs.len(), 1);
+    let d = &v.defs[0];
+    assert_eq!(d.name, "vehicles\\warthog\\warthog.vehi");
+    assert_eq!(v.placements, vec![Some(d.tag_index)]);
+    assert_eq!((d.object_flags, d.bounding_radius, d.bounding_offset), (5, 3.0, [0.0, 0.0, 0.75]));
+    assert_eq!((d.unit_flags, d.child_damage_fraction), (0x40, 0.5));
+
+    let h = &d.handling;
+    assert_eq!(
+        (h.flags, h.vehicle_type, h.function_modes),
+        (0x80, halo_map::vehicles::vehicle_type::HUMAN_JEEP, [3, 0, 0, 0])
+    );
+    assert_eq!((h.maximum_forward_speed, h.maximum_reverse_speed), (28.0, -9.0));
+    assert_eq!((h.speed_acceleration, h.speed_deceleration), (15.0, 30.0));
+    assert_eq!((h.maximum_left_turn, h.maximum_right_turn, h.wheel_circumference), (0.5, 0.625, 1.25));
+    assert_eq!(
+        (h.maximum_left_slide, h.maximum_right_slide, h.unknown_340, h.unknown_344, h.unknown_364),
+        (0.1, 0.2, 0.3, 0.4, 0.05)
+    );
+
+    let p = d.physics.as_ref().unwrap();
+    assert_eq!((p.radius, p.moment, p.mass, p.center_of_mass), (1.5, 2.0, 1200.0, [0.0, 0.0, 0.5]));
+    assert_eq!((p.gravity_scale, p.ground_friction, p.xx_moment, p.zz_moment), (1.0, 0.25, 0.1, 0.3));
+    assert_eq!(p.powered_mass_points.len(), 1);
+    assert_eq!((p.powered_mass_points[0].name.as_str(), p.powered_mass_points[0].antigrav_strength), ("engine", 1.0));
+    assert_eq!(p.mass_points.len(), 2);
+    let m = &p.mass_points[1];
+    assert_eq!((m.name.as_str(), m.powered_mass_point_index, m.model_node_index), ("back", -1, 4));
+    assert_eq!((m.mass, m.position, m.friction_type, m.radius), (2.0, [-0.5, 1.0, 0.0], 1, 0.4));
+
+    assert_eq!(d.seats.len(), 2);
+    assert_eq!((d.seats[0].label.as_str(), d.seats[0].marker_name.as_str()), ("warthog_d", "driver"));
+    assert_eq!(d.seats[1].flags & halo_map::vehicles::seat_flag::GUNNER, halo_map::vehicles::seat_flag::GUNNER);
+    assert_eq!(
+        (d.seats[1].acceleration_scale, d.seats[1].yaw_rate, d.seats[1].yaw_maximum),
+        ([0.0, 0.5, 0.25], 1.5, 1.0)
+    );
+
+    assert_eq!(d.weapons, vec![map.combat.weapons[0].tag_index]);
+    assert_eq!(d.resistance.as_ref().unwrap(), &map.combat.resistance);
+    assert!(v.hit_environment_damage.is_none() && v.killed_unit_damage.is_none());
+    assert!(v.collision_damage.is_some());
+}
+
+#[test]
+fn the_vehicles_survive_their_bytes_and_bytes_that_are_not_theirs_are_refused() {
+    use halo_map::vehicles::Vehicles;
+    let v = HaloMap::from_bytes(&build().0).unwrap().vehicle_tags;
+    let bytes = v.to_bytes();
+    assert_eq!(Vehicles::from_bytes(&bytes).unwrap(), v);
+    assert_eq!(Vehicles::from_bytes(&Vehicles::default().to_bytes()).unwrap(), Vehicles::default());
+    assert!(Vehicles::from_bytes(&bytes[..bytes.len() - 1]).is_err());
+    assert!(Vehicles::from_bytes(&[bytes.as_slice(), &[0]].concat()).is_err());
+    assert!(Vehicles::from_bytes(b"HCV0").is_err());
+
+    let mut broken = v.clone();
+    broken.defs[0].handling.maximum_forward_speed = f32::NAN;
+    assert!(Vehicles::from_bytes(&broken.to_bytes()).is_err());
+    let mut broken = v.clone();
+    broken.defs[0].physics.as_mut().unwrap().mass_points[0].powered_mass_point_index = 1;
+    assert!(Vehicles::from_bytes(&broken.to_bytes()).is_err());
+    let mut broken = v.clone();
+    broken.placements.push(Some(999));
+    assert!(Vehicles::from_bytes(&broken.to_bytes()).is_err());
+    let mut broken = v;
+    broken.collision_damage.as_mut().unwrap().upper = f32::INFINITY;
+    assert!(Vehicles::from_bytes(&broken.to_bytes()).is_err());
+}
+
+#[test]
+fn a_vehicle_that_carries_a_weapon_the_map_lacks_is_refused() {
+    let v = HaloMap::from_bytes(&build().0).unwrap();
+    let mut other = v.vehicle_tags.clone();
+    other.defs[0].weapons = vec![999];
+    assert!(other.check_against(&v.combat).is_err());
+    assert!(v.vehicle_tags.check_against(&v.combat).is_ok());
+}
+
+#[test]
+fn a_vehicle_placement_of_a_palette_entry_that_is_not_there_is_refused() {
+    let mut image = build();
+    // the placement's palette index, beyond the one entry
+    image.i16(HEADER + T_VEHICLES, 3);
+    assert!(HaloMap::from_bytes(&image.0).is_err());
 }

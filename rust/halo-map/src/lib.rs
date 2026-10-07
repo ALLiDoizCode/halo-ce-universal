@@ -1,7 +1,7 @@
 //! Reads the Xbox Halo CE multiplayer map files a player or operator already
 //! owns and returns what the large-scale mode needs from them: the collision
 //! BSP, the world bounds, player starting locations, netgame flags, netgame
-//! equipment and vehicle placements.
+//! equipment, vehicle placements and the vehicles' tags.
 //!
 //! ```no_run
 //! let map = halo_map::HaloMap::from_path("maps/bloodgulch.map")?;
@@ -36,6 +36,7 @@ pub mod items;
 mod map;
 mod movement;
 mod reader;
+pub mod vehicles;
 
 pub use error::{MapError, Result};
 pub use map::{flag_type, game_type, HaloMap, MapHeader, NetgameEquipment, NetgameFlag, PlayerStart, VehiclePlacement};
