@@ -37,13 +37,13 @@ fn maps() -> Option<std::ffi::OsString> {
 #[test]
 fn on_every_map_the_flags_of_each_game_type_are_read_and_survive_the_stored_bytes() {
     let Some(dir) = maps() else { return };
-    let mut seen = [0usize; 9];
+    let mut seen = std::collections::BTreeMap::<i16, usize>::new();
     for name in MAPS {
         let map = load(&dir, name);
         let back = MapData::from_bytes(&map.to_bytes()).unwrap();
         assert_eq!(back.netgame_flags, map.netgame_flags, "{name}");
         for f in &map.netgame_flags {
-            seen[f.flag_type as usize] += 1;
+            *seen.entry(f.flag_type).or_default() += 1;
         }
         let of = |t: i16| map.netgame_flags.iter().filter(|f| f.flag_type == t).count();
         eprintln!(
@@ -60,6 +60,6 @@ fn on_every_map_the_flags_of_each_game_type_are_read_and_survive_the_stored_byte
         (flag_type::RACE_TRACK, "Race checkpoints"),
         (flag_type::HILL, "King hills"),
     ] {
-        assert!(seen[kind as usize] > 0, "none of the 13 maps has {what}");
+        assert!(seen.get(&kind).is_some_and(|&n| n > 0), "none of the 13 maps has {what}");
     }
 }

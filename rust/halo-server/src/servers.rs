@@ -366,7 +366,7 @@ impl ServerRun {
             id: self.server.id.clone(),
             title: self.server.title().to_string(),
             map: live.step.map.clone(),
-            game_type: live.step.game_type.clone(),
+            game_type: live.step.rules()?.game_type().name().to_string(),
             variant: live.step.variant.clone(),
             database: live.matched.database.clone(),
             gateway: self.server.gateway_advertised(live.number),

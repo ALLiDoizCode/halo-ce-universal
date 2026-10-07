@@ -5,7 +5,8 @@
 //! death is worth, which is the score a scoreboard row carries.
 //!
 //! Slayer and Team Slayer are the two there are. A game type to come adds one
-//! `impl` and a line to [`by_name`] and [`Rules::game_type`](crate::rules::Rules::game_type).
+//! `impl`, a line to [`by_name`] and [`Rules::game_type`](crate::rules::Rules::game_type),
+//! and its rules to the server's configuration (`Rotation::rules` in `halo-server`).
 
 use crate::rules::DeathKind;
 use crate::spawn::Start;
@@ -30,9 +31,6 @@ pub trait GameType: Sync {
     /// Whether players spawn at this starting location: the game type's own list.
     fn uses_start(&self, start: &Start) -> bool;
 
-    /// What the score is counted in, for a scoreboard's column.
-    fn score_unit(&self) -> &'static str;
-
     /// What a death adds to a score, and whose: the score of the scoreboard row.
     /// `None` when it is worth nothing to anyone.
     fn death_score(&self, kind: DeathKind) -> Option<(ScoreTo, i32)>;
@@ -46,6 +44,15 @@ pub struct Slayer {
 
 pub static SLAYER: Slayer = Slayer { teams: false };
 pub static TEAM_SLAYER: Slayer = Slayer { teams: true };
+
+/// Slayer, with teams or without.
+pub fn slayer(teams: bool) -> &'static Slayer {
+    if teams {
+        &TEAM_SLAYER
+    } else {
+        &SLAYER
+    }
+}
 
 impl GameType for Slayer {
     fn name(&self) -> &'static str {
@@ -62,10 +69,6 @@ impl GameType for Slayer {
 
     fn uses_start(&self, start: &Start) -> bool {
         start.is_for_slayer()
-    }
-
-    fn score_unit(&self) -> &'static str {
-        "kills"
     }
 
     fn death_score(&self, kind: DeathKind) -> Option<(ScoreTo, i32)> {

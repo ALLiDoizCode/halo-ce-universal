@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use halo_sim::gametype::GameType as _;
 use halo_sim::Rng;
 use halo_sim::TICKS_PER_SECOND;
 
@@ -392,8 +393,8 @@ pub fn spread(values: &mut [f64]) -> Option<[f64; 4]> {
 /// two counts are the same.
 pub fn free_starts(map: &halo_sim::MapData, teams: bool, others: &[halo_sim::spawn::Occupant]) -> [usize; 2] {
     let mut free = [0usize; 2];
-    let game_type = if teams { &halo_sim::gametype::TEAM_SLAYER } else { &halo_sim::gametype::SLAYER };
-    for start in map.starts.iter().filter(|s| halo_sim::gametype::GameType::uses_start(game_type, s)) {
+    let game_type = halo_sim::gametype::slayer(teams);
+    for start in map.starts.iter().filter(|s| game_type.uses_start(s)) {
         for (team, count) in free.iter_mut().enumerate() {
             if halo_sim::spawn::rate(map, teams, team as u8, &start.position, others) > 0.0 {
                 *count += 1;

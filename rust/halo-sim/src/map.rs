@@ -23,8 +23,7 @@ pub struct MapData {
     pub starts: Vec<Start>,
     /// The map's netgame flags in full: the flags of Capture the Flag, the
     /// ball spawns of Oddball, the hills of King, the checkpoints of Race,
-    /// the vehicle spots and the teleporters. A game type picks the ones it
-    /// plays by `flag_type` (see [`crate::gametype`]).
+    /// the vehicle spots and the teleporters, each with its `flag_type`.
     pub netgame_flags: Vec<NetgameFlag>,
     /// What the tags say of fighting: the weapons, and the player's health and
     /// shields (see [`crate::combat`]).

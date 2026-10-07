@@ -268,10 +268,7 @@ impl Rotation {
             Some(game_type) if game_type.teams() => Rules::team_slayer(),
             Some(_) => Rules::slayer(),
             None => {
-                return Err(format!(
-                    "game_type {:?}: only slayer and team_slayer are played so far",
-                    self.game_type
-                ));
+                return Err(format!("game_type {:?}: only slayer and team_slayer are played so far", self.game_type));
             }
         };
         let ticks = |seconds: u32| seconds.saturating_mul(TICKS_PER_SECOND);

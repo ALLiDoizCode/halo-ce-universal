@@ -104,11 +104,7 @@ impl Rules {
 
     /// The game type these rules play: the one place the rules ask what a game type decides.
     pub fn game_type(&self) -> &'static dyn GameType {
-        if self.teams {
-            &crate::gametype::TEAM_SLAYER
-        } else {
-            &crate::gametype::SLAYER
-        }
+        crate::gametype::slayer(self.teams)
     }
 
     fn wave_ticks(&self) -> u64 {

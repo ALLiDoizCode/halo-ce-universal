@@ -62,6 +62,7 @@ use halo_server::loadgen::{free_starts, spread, Contact, Gunner, Path, Respawns,
 use halo_server::nav::{Nav, DEFAULT_CELL};
 use halo_server::root::Root;
 use halo_sim::combat::HitReport;
+use halo_sim::gametype::GameType as _;
 use halo_sim::spawn::Occupant;
 use halo_sim::wire::encode_hits;
 use halo_sim::{MapData, TICKS_PER_SECOND};
@@ -395,7 +396,7 @@ fn main() {
                 counts.iter().max().copied().unwrap(),
             )
         };
-        let total = walkers.map.starts.iter().filter(|s| s.is_for_slayer()).count();
+        let total = walkers.map.starts.iter().filter(|s| halo_sim::gametype::slayer(teams).uses_start(s)).count();
         for (team, name) in ["red", "blue"].into_iter().enumerate() {
             let (mean, low, high) = of(team);
             line(format!(
