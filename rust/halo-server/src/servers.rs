@@ -329,11 +329,13 @@ impl ServerRun {
         let budget = step.budget.unwrap_or(self.server.budget);
         let capacity = step.capacity.unwrap_or(map.default_capacity);
         let rules = step.rules()?;
+        let variant = step.variant()?;
         let spec = MatchSpec {
             database: database.clone(),
             map: &map,
             capacity,
             rules,
+            variant,
             budget,
             send_threads: self.server.send_threads,
             bind,

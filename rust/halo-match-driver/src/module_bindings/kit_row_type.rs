@@ -13,6 +13,8 @@ pub struct KitRow {
     pub loaded_1: i16,
     pub reserve_1: i16,
     pub version: u32,
+    pub frag: u8,
+    pub plasma: u8,
 }
 
 impl __sdk::InModule for KitRow {
@@ -29,6 +31,8 @@ pub struct KitRowCols {
     pub loaded_1: __sdk::__query_builder::Col<KitRow, i16>,
     pub reserve_1: __sdk::__query_builder::Col<KitRow, i16>,
     pub version: __sdk::__query_builder::Col<KitRow, u32>,
+    pub frag: __sdk::__query_builder::Col<KitRow, u8>,
+    pub plasma: __sdk::__query_builder::Col<KitRow, u8>,
 }
 
 impl __sdk::__query_builder::HasCols for KitRow {
@@ -41,6 +45,8 @@ impl __sdk::__query_builder::HasCols for KitRow {
             loaded_1: __sdk::__query_builder::Col::new(table_name, "loaded_1"),
             reserve_1: __sdk::__query_builder::Col::new(table_name, "reserve_1"),
             version: __sdk::__query_builder::Col::new(table_name, "version"),
+            frag: __sdk::__query_builder::Col::new(table_name, "frag"),
+            plasma: __sdk::__query_builder::Col::new(table_name, "plasma"),
         }
     }
 }

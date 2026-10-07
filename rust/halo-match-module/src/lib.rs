@@ -101,6 +101,7 @@ use halo_sim::items::{Ammo, Item, ItemId, ItemStore, Kit};
 use halo_sim::pickups::{self, ItemEvent, Request};
 use halo_sim::rules::{self, Contestant, Death, EndReason, Ending, Game, GameEvent, GameStore, Life, Rules, Winner};
 use halo_sim::wire::{decode_hits, decode_inputs, HIT_SIZE, INPUT_SIZE, MAX_HITS_PER_CALL};
+use halo_sim::variant::{self, StartingEquipment, Variant, WeaponSet};
 use halo_sim::{Event, MapData, Player, PlayerId, RejectReason, Rng, Store, TICKS_PER_SECOND};
 use spacetimedb::{reducer, table, ConnectionId, Identity, ReducerContext, ScheduleAt, Table};
 
@@ -458,6 +459,23 @@ pub struct KitRow {
     loaded_1: i16,
     reserve_1: i16,
     version: u32,
+    /// Grenades by kind (frag, plasma).
+    frag: u8,
+    plasma: u8,
+}
+
+/// The settings of the game variant that bear on what a player spawns with
+/// (`halo_sim::variant`). One row at most, `ONLY`; without it the default
+/// variant. Private. `set_game` clears it; `set_variant` sets it.
+#[table(accessor = variant_config)]
+pub struct VariantRow {
+    #[primary_key]
+    id: u8,
+    /// `WeaponSet::code`.
+    weapon_set: u8,
+    /// The map's own starting equipment, not the generic.
+    map_equipment: bool,
+    infinite_grenades: bool,
 }
 
 /// A player's press of the action button, waiting for the next tick: the weapon
@@ -1139,6 +1157,7 @@ fn kit_of(row: Option<KitRow>, camo: Option<PowerupRow>, player: PlayerId) -> Ki
             Ammo { loaded: row.loaded_1, reserve: row.reserve_1 },
         ];
         kit.version = row.version;
+        kit.grenades = [row.frag, row.plasma];
     }
     kit.camo_until = camo.map_or(0, |p| p.camo_until);
     kit
@@ -1152,6 +1171,8 @@ fn kit_row(kit: &Kit) -> KitRow {
         loaded_1: kit.ammo[1].loaded,
         reserve_1: kit.ammo[1].reserve,
         version: kit.version,
+        frag: kit.grenades[0],
+        plasma: kit.grenades[1],
     }
 }
 
@@ -1215,7 +1236,7 @@ impl ItemStore for TableItems<'_> {
         match table.player().find(kit.player) {
             Some(old) => {
                 let held = kit_of(Some(old), None, kit.player);
-                if held.ammo != kit.ammo || held.version != kit.version {
+                if held.ammo != kit.ammo || held.version != kit.version || held.grenades != kit.grenades {
                     table.player().update(kit_row(&kit));
                 }
             }
@@ -1253,11 +1274,26 @@ impl ItemStore for TableItems<'_> {
 /// A player has spawned: full health and shields, the starting weapon and the
 /// rounds it comes with.
 fn spawn_combat(ctx: &ReducerContext, map: &MapData, id: PlayerId, tick: u64) {
-    TRAILS.with(|t| halo_sim::combat::spawn(&mut TableCombat { ctx }, &mut t.borrow_mut(), map, id, tick));
+    let mut rng = Rng::seeded(tick ^ ((id as u64) << 32) ^ 0x4B17);
+    let kit = variant_of(ctx).spawn_kit(map, variant::GAME_TYPE_SLAYER, &mut rng);
+    TRAILS.with(|t| {
+        halo_sim::combat::spawn_with(&mut TableCombat { ctx }, &mut t.borrow_mut(), id, tick, map, kit.weapons)
+    });
     let fighter = TableCombat { ctx }.fighter(id);
     if let Some(fighter) = fighter {
-        pickups::on_spawn(&mut TableItems { ctx }, map, id, &fighter.loadout);
+        let mut items = TableItems { ctx };
+        pickups::on_spawn(&mut items, map, id, &fighter.loadout);
+        pickups::give_grenades(&mut items, id, kit.grenades);
     }
+}
+
+/// The game variant's settings (the default variant when none were set).
+fn variant_of(ctx: &ReducerContext) -> Variant {
+    ctx.db.variant_config().id().find(ONLY).map_or_else(Variant::default, |row| Variant {
+        weapon_set: WeaponSet::from_code(row.weapon_set).unwrap_or_default(),
+        equipment: if row.map_equipment { StartingEquipment::Map } else { StartingEquipment::Generic },
+        infinite_grenades: row.infinite_grenades,
+    })
 }
 
 /// Take every item off the ground (a new game, a new map), and what the
@@ -1806,11 +1842,37 @@ pub fn set_game(
         wave_ticks,
     };
     let tick = match_tick_of(ctx);
+    ctx.db.variant_config().id().delete(ONLY);
     let mut game = TableGame { ctx };
     game.set_game(Game::new(rules, tick));
     rules::begin(&mut game, tick);
     // (the items of the match before are not the new one's: its placements make theirs from the next tick)
     clear_items(ctx);
+    Ok(())
+}
+
+/// Set the game variant's settings that bear on what a player spawns with, for
+/// the game `set_game` set: the weapon set (`halo_sim::variant::WeaponSet::code`),
+/// whether the map's own starting equipment is used and not the generic, and
+/// whether grenades are infinite. Players who spawn from now on carry what it
+/// gives.
+#[reducer]
+pub fn set_variant(
+    ctx: &ReducerContext,
+    weapon_set: u8,
+    map_equipment: bool,
+    infinite_grenades: bool,
+) -> Result<(), String> {
+    require_owner(ctx)?;
+    if WeaponSet::from_code(weapon_set).is_none() {
+        return Err(format!("weapon set {weapon_set}: there are {}", WeaponSet::NAMES.len()));
+    }
+    let row = VariantRow { id: ONLY, weapon_set, map_equipment, infinite_grenades };
+    if ctx.db.variant_config().id().find(ONLY).is_some() {
+        ctx.db.variant_config().id().update(row);
+    } else {
+        ctx.db.variant_config().insert(row);
+    }
     Ok(())
 }
 

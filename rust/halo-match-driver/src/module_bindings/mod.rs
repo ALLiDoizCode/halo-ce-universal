@@ -53,6 +53,7 @@ pub mod set_gateway_reducer;
 pub mod set_loadout_reducer;
 pub mod set_name_reducer;
 pub mod set_spawn_points_reducer;
+pub mod set_variant_reducer;
 pub mod shooter_row_type;
 pub mod spawn_point_type;
 pub mod standing_row_type;
@@ -111,6 +112,7 @@ pub use set_gateway_reducer::set_gateway;
 pub use set_loadout_reducer::set_loadout;
 pub use set_name_reducer::set_name;
 pub use set_spawn_points_reducer::set_spawn_points;
+pub use set_variant_reducer::set_variant;
 pub use shooter_row_type::ShooterRow;
 pub use spawn_point_type::SpawnPoint;
 pub use standing_row_type::StandingRow;
@@ -192,6 +194,11 @@ pub enum Reducer {
     SetSpawnPoints {
         batch: Vec<u8>,
     },
+    SetVariant {
+        weapon_set: u8,
+        map_equipment: bool,
+        infinite_grenades: bool,
+    },
     Start,
     Stop,
     SubmitInputs {
@@ -228,6 +235,7 @@ impl __sdk::Reducer for Reducer {
             Reducer::SetLoadout { .. } => "set_loadout",
             Reducer::SetName { .. } => "set_name",
             Reducer::SetSpawnPoints { .. } => "set_spawn_points",
+            Reducer::SetVariant { .. } => "set_variant",
             Reducer::Start => "start",
             Reducer::Stop => "stop",
             Reducer::SubmitInputs { .. } => "submit_inputs",
@@ -304,6 +312,13 @@ impl __sdk::Reducer for Reducer {
             }
             Reducer::SetSpawnPoints { batch } => {
                 __sats::bsatn::to_vec(&set_spawn_points_reducer::SetSpawnPointsArgs { batch: batch.clone() })
+            }
+            Reducer::SetVariant { weapon_set, map_equipment, infinite_grenades } => {
+                __sats::bsatn::to_vec(&set_variant_reducer::SetVariantArgs {
+                    weapon_set: weapon_set.clone(),
+                    map_equipment: map_equipment.clone(),
+                    infinite_grenades: infinite_grenades.clone(),
+                })
             }
             Reducer::Start => __sats::bsatn::to_vec(&start_reducer::StartArgs {}),
             Reducer::Stop => __sats::bsatn::to_vec(&stop_reducer::StopArgs {}),

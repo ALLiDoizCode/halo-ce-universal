@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use halo_sim::rules::Rules;
+use halo_sim::variant::{StartingEquipment, Variant, WeaponSet};
 use halo_sim::TICKS_PER_SECOND;
 use serde::Deserialize;
 
@@ -98,6 +99,12 @@ seconds = 600                    # the time limit: the match ends after this lon
                                  # (without it, the original's: 15 for slayer, 50 for team_slayer)
 # respawn_seconds = 5            # seconds a dead player waits (never under 3)
 # suicide_penalty_seconds = 10   # seconds more after a suicide or a death nobody caused
+# weapon_set = "normal"          # normal, pistols, assault_rifles, plasma, sniping, no_sniping, rockets,
+                                 # shotguns, short_range, human or no_grenades: what a player spawns with, and
+                                 # (plasma, human, no_grenades) which grenades
+# starting_equipment = "generic" # generic: the weapon set's weapon and two grenades of each kind; or map: the
+                                 # map's own starting equipment for the game type
+# infinite_grenades = false      # a thrown grenade costs none
 # wave_seconds = 5               # a player who can be put neither at a free starting location nor beside one
                                  # waits for a wave, this far apart (the fallback: most respawns are at once)
 
@@ -248,6 +255,13 @@ pub struct Rotation {
     pub respawn_seconds: Option<u32>,
     pub suicide_penalty_seconds: Option<u32>,
     pub wave_seconds: Option<u32>,
+    /// What a player spawns with: one of [`WeaponSet::NAMES`] (`normal` without it).
+    pub weapon_set: Option<String>,
+    /// `generic` (the weapon set's weapon and two grenades of each kind; without it) or `map`.
+    pub starting_equipment: Option<String>,
+    /// A thrown grenade costs none.
+    #[serde(default)]
+    pub infinite_grenades: bool,
     /// Overrides the server's `budget` for this map.
     pub budget: Option<u32>,
 }
@@ -289,6 +303,25 @@ impl Rotation {
             rules.wave_ticks = ticks(seconds);
         }
         Ok(rules)
+    }
+}
+
+impl Rotation {
+    /// What a player of this step spawns with; the error names the setting.
+    pub fn variant(&self) -> Result<Variant, String> {
+        let weapon_set = match self.weapon_set.as_deref() {
+            None => WeaponSet::Normal,
+            Some(name) => WeaponSet::from_name(name).ok_or_else(|| {
+                let names: Vec<&str> = WeaponSet::NAMES.iter().map(|(n, _)| *n).collect();
+                format!("weapon_set {name:?}: one of {}", names.join(", "))
+            })?,
+        };
+        let equipment = match self.starting_equipment.as_deref() {
+            None | Some("generic") => StartingEquipment::Generic,
+            Some("map") => StartingEquipment::Map,
+            Some(other) => return Err(format!("starting_equipment {other:?}: generic or map")),
+        };
+        Ok(Variant { weapon_set, equipment, infinite_grenades: self.infinite_grenades })
     }
 }
 
@@ -360,6 +393,7 @@ impl Config {
                     return Err(format!("server {id:?}, map {}: capacity must be at least 1", step.map));
                 }
                 step.rules().map_err(|e| format!("server {id:?}, map {}: {e}", step.map))?;
+                step.variant().map_err(|e| format!("server {id:?}, map {}: {e}", step.map))?;
                 if step.budget == Some(0) || server.budget == 0 {
                     return Err(format!("server {id:?}: a budget of 0 sends players nothing"));
                 }
@@ -398,6 +432,23 @@ mod tests {
     }
 
     #[test]
+    fn a_rotation_entry_names_its_variant() {
+        let variant = |from: &str, to: &str| parse(&EXAMPLE.replace(from, to)).unwrap().servers[0].rotation[0].variant();
+        assert_eq!(variant("x", "x").unwrap(), Variant::default(), "the example sets none");
+        let v = parse(
+            &EXAMPLE
+                .replace("# weapon_set = \"normal\"", "weapon_set = \"rockets\"")
+                .replace("# starting_equipment = \"generic\"", "starting_equipment = \"map\"")
+                .replace("# infinite_grenades = false", "infinite_grenades = true"),
+        )
+        .unwrap();
+        let v = v.servers[0].rotation[0].variant().unwrap();
+        assert_eq!(v.weapon_set, WeaponSet::RocketLaunchers);
+        assert_eq!(v.equipment, StartingEquipment::Map);
+        assert!(v.infinite_grenades);
+    }
+
+    #[test]
     fn matches_alternate_between_two_udp_ports() {
         let server = parse(EXAMPLE).unwrap().servers.remove(0);
         assert_eq!(server.gateway_bind(1).port(), 7777);
@@ -414,6 +465,9 @@ mod tests {
         assert!(bad("capacity = 200", "capacity = 0").contains("capacity"));
         assert!(bad("game_type = \"slayer\"", "game_type = \"ctf\"").contains("only slayer and team_slayer"));
         assert!(bad("# wave_seconds = 5 ", "wave_seconds = 0 ").contains("wave_seconds"));
+        assert!(bad("# weapon_set = \"normal\"", "weapon_set = \"bazookas\"").contains("weapon_set"));
+        assert!(bad("# starting_equipment = \"generic\"", "starting_equipment = \"both\"").contains("starting_equipment"));
+        assert!(bad("# infinite_grenades = false", "infinite_grenades = 3").contains("infinite_grenades"));
         assert!(bad("send_threads = 4", "send_threadz = 4").contains("send_threadz"));
         assert!(bad("start = true", "start = false\nurl2 = 1").contains("url2"));
         assert!(bad("data_dir = \"spacetimedb-data\"", "").contains("data_dir"));

@@ -1220,6 +1220,7 @@ fn connect(inner: &Arc<Inner>) -> Result<DbConnection, String> {
                     Ammo { loaded: row.loaded_1, reserve: row.reserve_1 },
                 ],
                 camo_until: 0,
+                grenades: [row.frag, row.plasma],
                 version: row.version,
             });
         }

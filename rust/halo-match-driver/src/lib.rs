@@ -214,6 +214,14 @@ impl MatchClient {
         })
     }
 
+    /// Set the game variant's settings (see the module's `set_variant`), after `set_game`.
+    pub fn set_variant(&self, variant: &halo_sim::variant::Variant) -> Result<(), String> {
+        let map_equipment = variant.equipment == halo_sim::variant::StartingEquipment::Map;
+        call_reducer("set_variant", |cb| {
+            self.conn.reducers.set_variant_then(variant.weapon_set.code(), map_equipment, variant.infinite_grenades, cb)
+        })
+    }
+
     /// Start the match's clock now, and clear the scores.
     pub fn begin_game(&self) -> Result<(), String> {
         call_reducer("begin_game", |cb| self.conn.reducers.begin_game_then(cb))

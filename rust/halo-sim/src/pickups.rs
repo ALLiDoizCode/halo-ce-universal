@@ -392,6 +392,14 @@ pub fn on_spawn(items: &mut impl ItemStore, map: &MapData, player: PlayerId, loa
     items.set_kit(kit);
 }
 
+/// A player has spawned with grenades by kind (see `crate::variant`): after
+/// [`on_spawn`], which sets the rest of their kit.
+pub fn give_grenades(items: &mut impl ItemStore, player: PlayerId, grenades: [u8; 2]) {
+    let mut kit = items.kit(player);
+    kit.grenades = grenades;
+    items.set_kit(kit);
+}
+
 /// A player has died: every weapon they carried falls where they were (each
 /// is still theirs for a while, for the shot in flight), and they are no longer
 /// camouflaged.

@@ -303,11 +303,24 @@ pub fn starting_weapon(map: &MapData) -> Option<u16> {
 /// fresh bucket's worth of hits kept (their record of reports is kept), and nothing
 /// remembered of where they were.
 pub fn spawn(combat: &mut impl CombatStore, trails: &mut Trails, map: &MapData, id: PlayerId, tick: u64) {
+    let weapons = [starting_weapon(map).unwrap_or(NO_WEAPON), NO_WEAPON];
+    spawn_with(combat, trails, id, tick, map, weapons);
+}
+
+/// [`spawn`], with the weapons a game variant gives (`crate::variant`).
+pub fn spawn_with(
+    combat: &mut impl CombatStore,
+    trails: &mut Trails,
+    id: PlayerId,
+    tick: u64,
+    map: &MapData,
+    weapons: [u16; 2],
+) {
     combat.set_fighter(Fighter {
         id,
         vitals: Vitals::full(&map.combat.resistance),
         tick,
-        loadout: starting_weapon(map).map_or(Loadout::EMPTY, Loadout::with),
+        loadout: Loadout { weapons, ..Loadout::EMPTY },
         hurt_tick: 0,
         hurt_by: PlayerId::MAX,
         hurt_count: 0,

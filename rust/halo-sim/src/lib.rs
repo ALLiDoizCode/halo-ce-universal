@@ -64,6 +64,7 @@ pub mod source;
 pub mod spawn;
 mod state;
 mod step;
+pub mod variant;
 pub mod walk;
 pub mod weapon;
 pub mod wire;

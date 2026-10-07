@@ -11,6 +11,7 @@ use halo_gateway::{Gateway, GatewayConfig, StatsSnapshot, UdpTransport};
 use halo_match_driver::server::TickMetrics;
 use halo_match_driver::MatchClient;
 use halo_sim::rules::Rules;
+use halo_sim::variant::Variant;
 use spacetimedb_sdk::{DbContext, Identity};
 
 use crate::admin::Admin;
@@ -35,6 +36,8 @@ pub struct MatchSpec<'a> {
     pub capacity: u16,
     /// The game: its rules and limits.
     pub rules: Rules,
+    /// What a player spawns with.
+    pub variant: Variant,
     pub budget: u32,
     pub send_threads: usize,
     pub bind: SocketAddr,
@@ -127,6 +130,7 @@ impl RunningMatch {
         client.load_map(spec.map.data.to_bytes())?;
         client.set_capacity(spec.capacity)?;
         client.set_game(&spec.rules)?;
+        client.set_variant(&spec.variant)?;
         for (identity, reason) in &spec.bans {
             client.set_ban(*identity, reason)?;
         }

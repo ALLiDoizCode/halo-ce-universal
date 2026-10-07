@@ -227,6 +227,8 @@ pub struct Kit {
     pub ammo: [Ammo; 2],
     /// The tick the player's active camouflage runs out at; 0 when they have none.
     pub camo_until: u64,
+    /// Grenades by kind (`crate::variant::FRAG`, `PLASMA`).
+    pub grenades: [u8; 2],
     /// Counts the times the server changed the rounds (a pickup, a spawn): a
     /// client takes the server's rounds when it changes, and keeps its own
     /// (which it counts as it fires) otherwise.
@@ -242,7 +244,22 @@ pub struct Ammo {
 
 impl Kit {
     pub fn new(player: PlayerId) -> Kit {
-        Kit { player, ammo: [Ammo::default(); 2], camo_until: 0, version: 0 }
+        Kit { player, ammo: [Ammo::default(); 2], camo_until: 0, grenades: [0; 2], version: 0 }
+    }
+
+    /// A throw of a grenade of `kind`: it costs one, unless the variant's
+    /// grenades are infinite. `false` (and nothing taken) if the player has
+    /// none of that kind.
+    pub fn throw_grenade(&mut self, kind: usize, infinite: bool) -> bool {
+        match self.grenades.get_mut(kind) {
+            Some(count) if *count > 0 => {
+                if !infinite {
+                    *count -= 1;
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn is_camouflaged(&self, tick: u64) -> bool {
