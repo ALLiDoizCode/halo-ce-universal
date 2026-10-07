@@ -1951,9 +1951,11 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
     if ctx.sender() != ctx.database_identity() {
         return Err("tick is scheduled by the server".into());
     }
+    let stage = Stage::begin("tick.0 read the marker");
     let mut marker = ctx.db.match_tick().id().find(ONLY).ok_or("the match is not initialised")?;
     marker.tick += 1;
     marker.stamped_us = ctx.timestamp.to_micros_since_unix_epoch();
+    stage.end();
 
     let stage = Stage::begin("tick.1 read inputs");
     let mut batches: Vec<InputBatch> = ctx.db.input_batch().iter().collect();
@@ -1996,13 +1998,20 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
 
     let mut rejected = 0u32;
     let (mut hits, mut rejected_hits, mut not_where_seen) = (0u32, 0u32, 0u64);
-    if let Some(map) = current_map(ctx) {
+    let stage = Stage::begin("tick.2a load the map");
+    let map = current_map(ctx);
+    stage.end();
+    if let Some(map) = map {
+        let stage = Stage::begin("tick.2b load the stores");
         let mut store = TableStore::new(ctx, marker.tick);
         store.load();
         let mut game = TableGame { ctx };
         let mut rng = Rng::seeded(marker.tick);
+        stage.end();
         if marker.tick.is_multiple_of(TICKS_PER_SECOND as u64) {
+            let stage = Stage::begin("tick.2c ensure fighters");
             ensure_fighters(ctx, &map, marker.tick);
+            stage.end();
         }
         // the hits first: the damage they do, and the deaths, are this tick's
         let stage = Stage::begin("tick.3 combat resolve");
@@ -2033,7 +2042,9 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
         let stage = Stage::begin("tick.4 rules play");
         let outcome = rules::play(&mut store, &mut game, &map, &mut rng, marker.tick, &deaths, &inputs);
         stage.end();
+        let stage = Stage::begin("tick.4a log events");
         log_events(&outcome.events);
+        stage.end();
         let stage = Stage::begin("tick.5 deaths and spawns");
         // a player who died puts their weapons down; a player who spawned has the weapon
         // and the rounds the match starts them with

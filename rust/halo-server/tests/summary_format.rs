@@ -67,3 +67,41 @@ fn the_summary_sets_the_three_parts_of_tick_age_beside_what_the_players_saw() {
         "{text}"
     );
 }
+
+/// One tick's "Timing span" lines (the two forms `stages.py`'s pattern accepts: the plain one, and the
+/// one inside a JSON log line, with escaped quotes).
+fn spans(tick: u32, stage_ms: &[(&str, f64)]) -> String {
+    stage_ms
+        .iter()
+        .enumerate()
+        .map(|(i, (name, ms))| {
+            if (tick + i as u32).is_multiple_of(2) {
+                format!("Timing span \"{name}\": {ms}ms\n")
+            } else {
+                format!("{{\"message\":\"Timing span \\\"{name}\\\": {}µs\"}}\n", ms * 1000.0)
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn the_single_tick_report_names_the_slow_tick_and_its_slow_stage() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("stages-format");
+    std::fs::create_dir_all(&dir).unwrap();
+    let log: String = (1..=20)
+        .map(|t| {
+            let load = if t == 7 { 15.0 } else { 0.5 };
+            spans(t, &[("tick.1 read inputs", 0.1), ("tick.2b load the stores", load), ("tick.4 rules play", 0.7)])
+        })
+        .collect();
+    std::fs::write(dir.join("module.log"), log).unwrap();
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("check").join("stages.py");
+    let out =
+        Command::new("python3").arg(script).arg(dir.join("module.log")).arg("--ticks").output().expect("run python3");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}{}", String::from_utf8_lossy(&out.stderr));
+    assert!(text.contains("slowest tick: tick #7 of the run"), "{text}");
+    assert!(text.contains("first tick over twice the median: tick #7 of the run"), "{text}");
+    let slow_line = text.lines().find(|l| l.starts_with("tick.2b load the stores")).expect("the stage is listed");
+    assert!(slow_line.contains("15.000") && slow_line.contains("0.500") && slow_line.contains("30.0x"), "{text}");
+}

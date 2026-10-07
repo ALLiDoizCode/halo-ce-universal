@@ -44,7 +44,8 @@
 #                   builds of the server by the same script); without it the script builds them
 #   NO_BUILD [unset]  1: do not build anything (MATCH_WASM [the module's release build] is the match module to run)
 #   MODULE_FEATURES [none]  cargo features for the match module, e.g. stage-timing (module-logs/ gets the
-#                   host's timing lines; python3 check/stages.py module-logs/* summarises them)
+#                   host's timing lines; python3 check/stages.py module-logs/* summarises them;
+#                   add --ticks for the slowest tick and the first full tick, stage by stage)
 #   OUT             where logs and reports go [rust/halo-server/target/slayer-check/<time>]
 #
 # The script builds the modules and programs it needs.

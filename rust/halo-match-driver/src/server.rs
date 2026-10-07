@@ -16,18 +16,24 @@ pub fn stdb_bin_dir() -> Option<PathBuf> {
 
 /// Build the match module for WebAssembly and return the `.wasm`'s path.
 pub fn build_module() -> PathBuf {
-    build_wasm("halo-match-module", "halo_match_module")
+    build_wasm("halo-match-module", "halo_match_module", &[])
+}
+
+/// The match module built with cargo features (`stage-timing`, say).
+pub fn build_module_with(features: &str) -> PathBuf {
+    build_wasm("halo-match-module", "halo_match_module", &["--features", features])
 }
 
 /// Build the root database's module for WebAssembly and return the `.wasm`'s path.
 pub fn build_root_module() -> PathBuf {
-    build_wasm("halo-root-module", "halo_root_module")
+    build_wasm("halo-root-module", "halo_root_module", &[])
 }
 
-fn build_wasm(crate_dir: &str, file: &str) -> PathBuf {
+fn build_wasm(crate_dir: &str, file: &str, extra: &[&str]) -> PathBuf {
     let module = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(crate_dir);
     let status = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
         .args(["build", "--release", "--locked", "--target", "wasm32-unknown-unknown"])
+        .args(extra)
         .current_dir(&module)
         .status()
         .expect("run cargo");
@@ -159,6 +165,27 @@ impl Server {
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
+    }
+
+    /// Everything the databases of this server have logged (the files under `module_logs`), as one text.
+    pub fn module_logs(&self) -> String {
+        fn walk(dir: &Path, out: &mut String) {
+            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+            entries.sort();
+            for path in entries {
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "log")
+                    && path.components().any(|c| c.as_os_str() == "module_logs")
+                {
+                    out.push_str(&String::from_utf8_lossy(&std::fs::read(&path).unwrap_or_default()));
+                }
+            }
+        }
+        let mut out = String::new();
+        walk(&self.dir.join("data"), &mut out);
+        out
     }
 
     /// The server's Prometheus metrics, parsed for the tick reducer.

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use halo_match_driver::server::{build_module, stdb_bin_dir, Server};
+use halo_match_driver::server::{build_module, build_module_with, stdb_bin_dir, Server};
 use halo_match_driver::walkers::Walkers;
 use halo_match_driver::{MatchClient, PlayerClient, SeenTick};
 use halo_sim::fixtures::flat_floor_map;
@@ -227,6 +227,51 @@ fn ticks_hold_30_hz_with_one_batch_per_tick_and_the_tables_match_a_local_copy() 
         used.submits,
         used.ticks
     );
+}
+
+/// Every part of the tick that does work is inside a timed stage: a module built with `stage-timing`
+/// logs a "Timing span" line for each of them (the stages `tick.1` to `tick.9` and the ones between).
+#[test]
+fn the_module_with_stage_timing_logs_a_span_for_every_stage_of_the_tick() {
+    let Some(bin) = stdb_bin_dir() else {
+        eprintln!("HALO_STDB_BIN is not set: skipping, this test needs a SpacetimeDB 2.10.x release");
+        return;
+    };
+    let server = Server::start(&bin);
+    server.publish(&build_module_with("stage-timing"), "timed");
+    let client = server.connect("timed");
+    let map = flat_floor_map();
+    client.load_map(map.to_bytes()).unwrap();
+    let (mut walkers, spawn) = Walkers::new(map, &[[0.0, 0.0, 0.0]], 50, 1);
+    client.add_players(&spawn).unwrap();
+    client.start();
+    // (past tick 30, so that the once-a-second stage has run)
+    let Driven { seen, .. } = drive(&client, &mut walkers, 70, Hiccup::None);
+    assert!(seen.last().unwrap().marker.tick >= 31);
+    let logs = server.module_logs();
+    for stage in [
+        "tick.0 read the marker",
+        "tick.1 read inputs",
+        "tick.2 read deaths and hit reports",
+        "tick.2a load the map",
+        "tick.2b load the stores",
+        "tick.2c ensure fighters",
+        "tick.3 combat resolve",
+        "tick.4 rules play",
+        "tick.4a log events",
+        "tick.5 deaths and spawns",
+        "tick.6 items",
+        "tick.7 rejected moves",
+        "tick.8 trails",
+        "tick.9 upkeep and marker",
+    ] {
+        assert!(
+            logs.contains(&format!("Timing span \\\"{stage}\\\""))
+                || logs.contains(&format!("Timing span \"{stage}\"")),
+            "no span for {stage}: {}",
+            &logs[..logs.len().min(2000)]
+        );
+    }
 }
 
 #[test]
