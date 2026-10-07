@@ -45,3 +45,17 @@ _Avoid_: Lag, position error
 **Band**:
 A range of distance from the recipient over which update rates are reported: under 10, 10 to 25, 25 to 60, and over 60 world units.
 _Avoid_: Tier, ring
+
+### Authority in large-scale mode
+
+**Server-flown**:
+Simulated on the server, with the result sent to every recipient: a grenade, an empty vehicle, a flag, the ball.
+_Avoid_: Server-owned, host-simulated
+
+**Client-flown**:
+Simulated on the shooter's client, which reports what it hit for the server to check: a weapon's projectile, from the hand or from a vehicle.
+_Avoid_: Client-owned, predicted
+
+**Push**:
+A change of a player's velocity that an explosion gives them. The server gives it; the client applies it.
+_Avoid_: Knock-back, impulse
