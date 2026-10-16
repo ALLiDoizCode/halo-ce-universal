@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { gateFromCi } from './run-gate.ts';
+import { spawnSync } from 'node:child_process';
+
+import { gateCommand, gateFromCi } from './run-gate.ts';
 
 const CI = `
 name: CI
@@ -99,4 +101,27 @@ test('a GitHub expression in env or working-directory skips the step too', () =>
 test('the expression note names the expression syntax literally', () => {
   const { notes } = gateFromCi('jobs:\n  gate:\n    steps:\n      - run: echo ${{ x }}\n');
   assert.match(notes.join('\n'), /a \$\{\{ \}\} expression/);
+});
+
+// The sandbox runs a step under `sh` (dash in the agent image, which rejects `set -o pipefail`).
+const underSh = (command: string) => spawnSync('sh', ['-c', gateCommand(command)], { encoding: 'utf8' });
+
+test('a step runs under sh, and a failing part of a pipe fails it', () => {
+  assert.equal(underSh('echo ok | cat').stdout, 'ok\n');
+  const piped = underSh('false | true\necho reached');
+  assert.notEqual(piped.status, 0);
+  assert.equal(piped.stdout, '');
+});
+
+test('a step with several lines stops at the first that fails', () => {
+  const result = underSh('echo one\nfalse\necho two');
+  assert.notEqual(result.status, 0);
+  assert.equal(result.stdout, 'one\n');
+});
+
+test("a step's own quotes and its working directory reach bash as written", () => {
+  const { steps } = gateFromCi(
+    "jobs:\n  gate:\n    steps:\n      - run: echo 'a b' \"$PWD\"\n        working-directory: /\n"
+  );
+  assert.equal(underSh(steps[0]!.command).stdout, 'a b /\n');
 });
